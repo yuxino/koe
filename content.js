@@ -24,14 +24,22 @@
       .meta { display: none; }
       .stage.compact .card { padding: 8px 15px 9px; border-radius: 10px; box-shadow: 0 10px 32px rgba(0, 0, 0, .26); }
       .stage.compact .translated { font-size: 13px; }
+      .processing { display: none; align-items: center; justify-content: center; gap: 7px; padding: 10px 16px; border-radius: 99px; background: rgba(25, 35, 30, .5); backdrop-filter: blur(10px); }
+      .processing span { width: 7px; height: 7px; border-radius: 50%; background: rgba(216, 229, 140, .85); animation: koe-blink 1.2s ease-in-out infinite; }
+      .processing span:nth-child(2) { animation-delay: .2s; }
+      .processing span:nth-child(3) { animation-delay: .4s; }
+      @keyframes koe-blink { 0%, 100% { opacity: .25; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-3px); } }
     </style>
     <div class="stage" aria-live="polite" aria-atomic="true">
       <div class="eyebrow"><span class="dot"></span><span class="label">KOE · READY</span></div>
       <div class="card"><p class="translated"></p><p class="original"></p><div class="meta"></div></div>
+      <div class="processing"><span></span><span></span><span></span></div>
     </div>
   `;
 
   const stage = shadow.querySelector(".stage");
+  const card = shadow.querySelector(".card");
+  const processingEl = shadow.querySelector(".processing");
   const translated = shadow.querySelector(".translated");
   const original = shadow.querySelector(".original");
   const meta = shadow.querySelector(".meta");
@@ -44,6 +52,7 @@
   let showingCue = false;
   let autoPlayedPartial = false;
   let lastAutoPlayAt = 0;
+  let processing = false;
 
   const STAGE_TEXT = {
     downloading: "正在下载 / 提取声音",
@@ -67,14 +76,17 @@
     }
     if (message.type === "JOB_STATUS") {
       if (message.status === "analyzing") {
+        processing = true;
         analysisDone = false;
         autoPlayedPartial = false;
       }
       if (message.status === "ready") {
+        processing = false;
         subtitleReady = true;
         analysisDone = true;
       }
       if (message.status === "idle") {
+        processing = false;
         subtitleReady = false;
         analysisDone = false;
         autoPlayedPartial = false;
@@ -84,6 +96,7 @@
       return false;
     }
     if (message.type === "SUBTITLE_READY") {
+      processing = false;
       cues = parseVtt(message.vtt || "");
       activeVideo = findVideo();
       subtitleReady = true;
@@ -108,6 +121,7 @@
       return false;
     }
     if (message.type === "CAPTURE_ERROR") {
+      processing = false;
       showStatus("视频分析失败", message.error || "请检查视频来源和服务配置。", "ERROR");
       return false;
     }
@@ -143,6 +157,7 @@
   // 视频切换：清掉旧字幕并通知后台
   document.addEventListener("emptied", () => {
     cues = [];
+    processing = false;
     subtitleReady = false;
     analysisDone = false;
     autoPlayedPartial = false;
@@ -253,11 +268,17 @@
         return;
       }
       showingCue = false;
+      if (processing) {
+        showProcessing();
+        return;
+      }
       hide();
     }, 100);
   }
 
   function showStatus(value, detail, mode) {
+    card.style.display = "";
+    processingEl.style.display = "none";
     translated.textContent = value;
     original.textContent = "";
     meta.textContent = detail;
@@ -267,6 +288,8 @@
   }
 
   function show(cue, detail, mode) {
+    card.style.display = "";
+    processingEl.style.display = "none";
     translated.textContent = cue.translated || cue.original || "";
     original.textContent = "";
     meta.textContent = detail;
@@ -275,8 +298,15 @@
     stage.classList.add("visible");
   }
 
+  function showProcessing() {
+    card.style.display = "none";
+    processingEl.style.display = "flex";
+    stage.classList.add("visible");
+  }
+
   function hide() {
     stage.classList.remove("visible");
+    processingEl.style.display = "none";
   }
 
   function parseVtt(value) {
