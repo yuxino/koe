@@ -156,7 +156,12 @@ export function createRealtimeAsr({
       await openConnection();
       onMessage(callbacks);
       runTask();
-      return taskStarted;
+      return Promise.race([
+        taskStarted,
+        delay(timeoutMs).then(() => {
+          throw new Error("realtime_task_start_timeout");
+        })
+      ]);
     },
     sendFrame,
     finish() {
@@ -177,4 +182,8 @@ export function createRealtimeAsr({
     },
     get closeReason() { return closeReason; }
   };
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

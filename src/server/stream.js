@@ -98,6 +98,12 @@ async function streamRealtimeTranscribe({
   });
   let sentenceCount = 0;
   let totalAudioMs = 0;
+  let firstAudioAt = 0;
+  const connectTicker = setInterval(() => {
+    if (firstAudioAt || !onProgress) return;
+    const waited = Math.floor((Date.now() - startedAt) / 1_000);
+    onProgress(0.08, `正在连接视频源 · ${waited}s`);
+  }, 1_000);
   const onAbort = () => {
     asr.terminate();
     spawned.kill();
@@ -145,6 +151,7 @@ async function streamRealtimeTranscribe({
     for await (const chunk of spawned.stream) {
       if (signal?.aborted) throw abortError();
       if (!chunk.length) continue;
+      firstAudioAt ||= Date.now();
       lastAudioAt = Date.now();
       totalAudioMs += Math.round(chunk.length / 32);
       if (!sentFirst) {
@@ -159,6 +166,7 @@ async function streamRealtimeTranscribe({
       }
     }
     clearInterval(stallWatchdog);
+    clearInterval(connectTicker);
     if (frame.length) await asr.sendFrame(frame);
     if (signal?.aborted) throw abortError();
     const failed = spawned.diagnostics.filter((entry) => entry.code !== 0);
@@ -189,6 +197,7 @@ async function streamRealtimeTranscribe({
     throw error;
   } finally {
     signal?.removeEventListener("abort", onAbort);
+    clearInterval(connectTicker);
   }
 }
 
@@ -230,6 +239,12 @@ async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, on
   const spawned = factory();
   const { stream, closePromise, diagnostics } = spawned;
   signal?.addEventListener("abort", () => spawned.kill(), { once: true });
+  let gotAudio = false;
+  const connectTicker = setInterval(() => {
+    if (gotAudio || !onProgress) return;
+    const waited = Math.floor((Date.now() - startedAt) / 1_000);
+    onProgress(0.08, `正在连接视频源 · ${waited}s`);
+  }, 1_000);
   const queue = [];
   const failures = [];
   const processed = new Set();
@@ -253,6 +268,7 @@ async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, on
     };
 
     stream.on("data", (chunk) => {
+      gotAudio = true;
       buffer = Buffer.concat([buffer, chunk]);
       if (!header) {
         if (buffer.length < 44) return;
@@ -317,6 +333,7 @@ async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, on
   }
 
   await Promise.all([collector(), ...Array.from({ length: workerCount }, () => worker())]);
+  clearInterval(connectTicker);
   if (signal?.aborted) throw abortError();
   const failed = diagnostics.filter((entry) => entry.code !== 0);
   if (failed.length) {
