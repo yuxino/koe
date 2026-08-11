@@ -61,12 +61,21 @@
     if (message.type === "JOB_STATUS") {
       if (message.status === "analyzing") {
         analysisDone = false;
-        if (message.jobStatus === "downloading" && !message.hasDuration) {
-          showStatus("正在下载 / 提取声音…", message.stageDetail || STAGE_HINT.downloading, "ANALYZING");
+        const percent = Math.round(Number(message.progress || 0) * 100);
+        const elapsed = message.startedAt
+          ? Math.max(1, Math.round((Date.now() - Number(message.startedAt)) / 1_000))
+          : null;
+        if (message.jobStatus === "downloading") {
+          const timeText = elapsed ? `已用时 ${elapsed} 秒 · ` : "";
+          if (!message.hasDuration) {
+            showStatus("正在下载 / 提取声音…", `${timeText}视频越大这一步越久`, "ANALYZING");
+          } else {
+            showStatus(`正在下载 / 提取声音 ${percent}%`, `${timeText}视频越大这一步越久`, "ANALYZING");
+          }
         } else {
           const stage = STAGE_TEXT[message.jobStatus] || "正在分析视频";
           const hint = message.stageDetail || STAGE_HINT[message.jobStatus] || "字幕将在整段分析完成后出现";
-          showStatus(`${stage} ${Math.round(Number(message.progress || 0) * 100)}%`, hint, "ANALYZING");
+          showStatus(`${stage} ${percent}%`, hint, "ANALYZING");
         }
       }
       if (message.status === "ready") {

@@ -69,7 +69,7 @@ async function beginWatching({ tabId, frameId = 0, serverUrl, apiToken, job }) {
     lastPartialVtt: ""
   };
   tabStates.set(tabId, state);
-  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: state.jobStatus, stageDetail: state.stageDetail, hasDuration: state.hasDuration }, frameId);
+  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: state.jobStatus, stageDetail: state.stageDetail, hasDuration: state.hasDuration, startedAt: state.startedAt }, frameId);
   if (job.status === "ready") await publishReady(state);
   else pollers.set(tabId, setInterval(() => pollJob(tabId).catch((error) => failJob(tabId, error)), 2_000));
   return { ok: true, state: publicState(state) };
@@ -94,7 +94,7 @@ async function pollJob(tabId) {
     return failJob(tabId, new Error(job.error || "视频分析失败。"));
   }
   state.status = "analyzing";
-  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: job.status, stageDetail: state.stageDetail, hasDuration: state.hasDuration }, state.frameId);
+  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: job.status, stageDetail: state.stageDetail, hasDuration: state.hasDuration, startedAt: state.startedAt }, state.frameId);
   void pollPartial(state);
 }
 
