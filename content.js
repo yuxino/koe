@@ -98,12 +98,14 @@
         showStatus("字幕已就绪", "请回到视频页面", "READY");
       }
       startSubtitleClock();
+      refreshNativeTrack();
       return false;
     }
     if (message.type === "PARTIAL_SUBTITLES") {
       cues = parseVtt(message.vtt || "");
       subtitleReady = true;
       startSubtitleClock();
+      refreshNativeTrack();
       return false;
     }
     if (message.type === "CAPTURE_ERROR") {
@@ -122,6 +124,62 @@
     lastSeekAt = now;
     chrome.runtime.sendMessage({ type: "SEEK_PRIORITIZE", timeMs: Math.round(video.currentTime * 1_000) }).catch(() => undefined);
   }, true);
+
+  let nativeTrack = null;
+  let nativeTrackVideo = null;
+  document.addEventListener("fullscreenchange", syncFullscreen, true);
+  document.addEventListener("webkitfullscreenchange", syncFullscreen, true);
+
+  function syncFullscreen() {
+    const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement || null;
+    if (!fullscreenElement) {
+      restoreOverlayHost();
+      disableNativeTrack();
+      return;
+    }
+    if (fullscreenElement instanceof HTMLVideoElement) {
+      restoreOverlayHost();
+      hide();
+      enableNativeTrack(fullscreenElement);
+      return;
+    }
+    disableNativeTrack();
+    if (host.parentElement !== fullscreenElement) fullscreenElement.appendChild(host);
+    host.style.position = "absolute";
+    host.style.inset = "0";
+  }
+
+  function restoreOverlayHost() {
+    if (host.parentElement !== document.documentElement) document.documentElement.appendChild(host);
+    host.style.position = "fixed";
+    host.style.inset = "0";
+  }
+
+  function enableNativeTrack(video) {
+    nativeTrackVideo = video;
+    let track = [...(video.textTracks || [])].find((item) => item.label === "Koe");
+    if (!track) track = video.addTextTrack("captions", "Koe", "zh");
+    while (track.cues && track.cues.length) track.removeCue(track.cues[0]);
+    for (const cue of cues) {
+      try {
+        track.addCue(new VTTCue(cue.startMs / 1_000, Math.max(cue.endMs / 1_000, cue.startMs / 1_000 + 0.2), cue.text));
+      } catch {
+        // 单条失效不影响其它
+      }
+    }
+    track.mode = "showing";
+    nativeTrack = track;
+  }
+
+  function refreshNativeTrack() {
+    if (nativeTrackVideo) enableNativeTrack(nativeTrackVideo);
+  }
+
+  function disableNativeTrack() {
+    if (nativeTrack) nativeTrack.mode = "disabled";
+    nativeTrack = null;
+    nativeTrackVideo = null;
+  }
 
   function findVideo() {
     return [...document.querySelectorAll("video")]
