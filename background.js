@@ -242,8 +242,26 @@ async function getJob(serverUrl, apiToken, jobId) {
 async function failJob(tabId, error) {
   const state = tabStates.get(tabId);
   if (!state) return;
+  stopPolling(tabId);
   state.status = "error";
-  await forwardToTab(tabId, { type: "CAPTURE_ERROR", tabId, error: error instanceof Error ? error.message : String(error) }, state.frameId);
+  const message = error instanceof Error ? error.message : String(error);
+  await forwardToTab(tabId, { type: "CAPTURE_ERROR", tabId, error: message }, state.frameId);
+  const transient = /job_not_found|fetch failed|未启动|ECONNREFUSED|EAI_AGAIN|network/i.test(message);
+  if (transient && !state.recoveryScheduled) {
+    state.recoveryScheduled = true;
+    setTimeout(() => {
+      const current = tabStates.get(tabId);
+      if (!current || current.status !== "error") return;
+      analyzeVideo({
+        tabId,
+        serverUrl: current.serverUrl,
+        apiToken: current.apiToken,
+        pageUrl: current.pageUrl,
+        selection: current.selection,
+        translate: current.translate
+      }).catch(() => undefined);
+    }, 2_000);
+  }
 }
 
 async function stopAnalysis(tabId) {
