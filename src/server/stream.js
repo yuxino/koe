@@ -1,15 +1,14 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, readdir, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { rm, writeFile } from "node:fs/promises";
 import { transcribeWav } from "./asr.js";
 import { detectSpeechRanges, MEDIA_USER_AGENT } from "./media.js";
 
-const CHUNK_SECONDS = Math.max(10, Number(process.env.KOE_STREAM_CHUNK_SECONDS || 10));
+const FIRST_CHUNK_MS = 5_000;
+const CHUNK_MS = Math.max(10_000, Number(process.env.KOE_STREAM_CHUNK_SECONDS || 10) * 1_000);
 
 export async function streamExtractAndTranscribe({
   pageUrl,
   sourceUrl,
-  directory,
   ffmpegBin,
   ytdlpBin,
   apiKey,
@@ -17,30 +16,58 @@ export async function streamExtractAndTranscribe({
   onLines,
   onProgress
 }) {
-  const segDir = join(directory, "segments");
-  await mkdir(segDir, { recursive: true });
-
-  const { closePromise, diagnostics } = startPipeline({ pageUrl, sourceUrl, segDir, ffmpegBin, ytdlpBin });
-  const processed = new Set();
-  const failures = [];
+  const startedAt = Date.now();
+  const log = (message) => console.log(`[koe] stream +${((Date.now() - startedAt) / 1_000).toFixed(1)}s ${message}`);
+  const { stream, closePromise, diagnostics } = startPipeline({ pageUrl, sourceUrl, ffmpegBin, ytdlpBin });
   const queue = [];
+  const failures = [];
+  const processed = new Set();
   const workerCount = Math.max(1, Number(process.env.KOE_STREAM_WORKERS || 4));
   let offsetMs = 0;
   let chunkCount = 0;
-  let closed = false;
   let collectorDone = false;
-  void closePromise.then(() => { closed = true; });
 
   async function collector() {
-    while (true) {
-      const ready = await collectReadySegments(segDir, closed);
-      for (const item of ready) {
-        if (processed.has(item.index)) continue;
-        processed.add(item.index);
-        queue.push(item);
+    let header = null;
+    let buffer = Buffer.alloc(0);
+    let index = 0;
+    let bytesPerMs = 32;
+
+    const targetMs = (segmentIndex) => (segmentIndex === 0 ? FIRST_CHUNK_MS : CHUNK_MS);
+
+    const emit = (audio, segmentIndex) => {
+      if (processed.has(segmentIndex)) return;
+      processed.add(segmentIndex);
+      queue.push({ index: segmentIndex, audio });
+    };
+
+    stream.on("data", (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      if (!header) {
+        if (buffer.length < 44) return;
+        header = {
+          sampleRate: buffer.readUInt32LE(24),
+          blockAlign: buffer.readUInt16LE(32)
+        };
+        bytesPerMs = Math.max(1, Math.round((header.sampleRate * header.blockAlign) / 1_000));
+        buffer = buffer.subarray(44);
       }
-      if (closed) break;
-      await delay(300);
+      while (buffer.length >= targetMs(index) * bytesPerMs) {
+        const segmentBytes = targetMs(index) * bytesPerMs;
+        const pcm = buffer.subarray(0, segmentBytes);
+        buffer = buffer.subarray(segmentBytes);
+        emit(wrapWav(pcm, header), index);
+        index += 1;
+      }
+    });
+
+    await new Promise((resolve) => {
+      stream.on("end", resolve);
+      stream.on("close", resolve);
+      stream.on("error", () => resolve());
+    });
+    if (header && buffer.length >= 500 * bytesPerMs) {
+      emit(wrapWav(buffer, header), index);
     }
     collectorDone = true;
   }
@@ -49,35 +76,24 @@ export async function streamExtractAndTranscribe({
     while (true) {
       const item = queue.shift();
       if (!item) {
-        if (closed && collectorDone) break;
-        await delay(150);
+        if (collectorDone) break;
+        await delay(100);
         continue;
       }
-      const { index, path } = item;
-      let audio;
-      try {
-        audio = await readFile(path);
-      } catch {
-        continue;
-      }
-      const chunkMs = chunkMsOf(audio);
+      const { index, audio } = item;
+      const chunkMs = Math.max(1_000, Math.round((audio.length - 44) / 32));
       const chunkStartMs = offsetMs;
       offsetMs += chunkMs;
       chunkCount += 1;
       if (process.env.ASR_VAD !== "0" && index !== 0) {
-        try {
-          const rangesSec = await detectSpeechRanges({ inputPath: path, ffmpegBin });
-          if (!rangesSec.length) {
-            await rm(path, { force: true }).catch(() => undefined);
-            console.log(`[koe] stream chunk ${index} silent, skipped`);
-            onProgress(Math.min(1, chunkCount * 0.02));
-            continue;
-          }
-        } catch {
-          // 检测失败就照常识别
+        // 静音门：跳过整块都没声音的块；第一块不检查，尽快出字幕
+        const silent = await isSilentWav(audio, ffmpegBin);
+        if (silent === true) {
+          log(`chunk ${index} silent, skipped`);
+          onProgress(Math.min(1, chunkCount * 0.02));
+          continue;
         }
       }
-      await rm(path, { force: true }).catch(() => undefined);
       try {
         const lines = await transcribeChunk(audio, chunkMs, apiKey, asrAcquire);
         onLines(lines.map((line) => ({
@@ -86,9 +102,9 @@ export async function streamExtractAndTranscribe({
           endMs: line.endMs + chunkStartMs
         })));
         onProgress(Math.min(1, chunkCount * 0.02));
-        console.log(`[koe] stream chunk ${index} done`);
+        log(`chunk ${index} done (${lines.length} lines)`);
       } catch (error) {
-        console.log(`[koe] stream chunk ${index} failed, will retry: ${error instanceof Error ? error.message : String(error)}`);
+        log(`chunk ${index} failed, will retry: ${error instanceof Error ? error.message : String(error)}`);
         failures.push({ index, audio, chunkStartMs });
       }
     }
@@ -102,13 +118,13 @@ export async function streamExtractAndTranscribe({
   if (chunkCount === 0) throw new Error("stream pipeline produced no audio");
   for (const failure of failures) {
     try {
-      const lines = await transcribeChunk(failure.audio, chunkMsOf(failure.audio), apiKey, asrAcquire);
+      const lines = await transcribeChunk(failure.audio, Math.max(1_000, Math.round((failure.audio.length - 44) / 32)), apiKey, asrAcquire);
       onLines(lines.map((line) => ({
         ...line,
         startMs: line.startMs + failure.chunkStartMs,
         endMs: line.endMs + failure.chunkStartMs
       })));
-      console.log(`[koe] stream chunk ${failure.index} recovered`);
+      log(`chunk ${failure.index} recovered`);
     } catch (error) {
       throw new Error(`stream chunk ${failure.index} failed after retry: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -116,43 +132,11 @@ export async function streamExtractAndTranscribe({
   return { chunks: chunkCount };
 }
 
-async function transcribeChunk(audio, chunkMs, apiKey, asrAcquire) {
-  const run = () => transcribeWav({ audio, startMs: 0, endMs: chunkMs, apiKey });
-  if (!asrAcquire) return run();
-  const release = await asrAcquire();
-  try {
-    return await run();
-  } finally {
-    release();
-  }
-}
-
-function chunkMsOf(audio) {
-  return Math.max(1_000, Math.round((audio.length - 44) / 32));
-}
-
-function startPipeline({ pageUrl, sourceUrl, segDir, ffmpegBin, ytdlpBin }) {
-  const segmentArgs = [
-    "-nostdin",
-    "-hide_banner",
-    "-loglevel",
-    "error",
-    "-ac",
-    "1",
-    "-ar",
-    "16000",
-    "-c:a",
-    "pcm_s16le",
-    "-f",
-    "segment",
-    "-segment_time",
-    String(CHUNK_SECONDS),
-    "-segment_format",
-    "wav",
-    join(segDir, "seg_%05d.wav")
-  ];
+function startPipeline({ pageUrl, sourceUrl, ffmpegBin, ytdlpBin }) {
   const children = [];
+  const diagnostics = [];
   const useYtDlp = Boolean(pageUrl) && pageUrl !== sourceUrl && Boolean(ytdlpBin);
+  let ff;
   if (useYtDlp) {
     const yt = spawn(ytdlpBin, [
       "--no-playlist",
@@ -166,37 +150,100 @@ function startPipeline({ pageUrl, sourceUrl, segDir, ffmpegBin, ytdlpBin }) {
       "-",
       pageUrl
     ], { stdio: ["ignore", "pipe", "pipe"] });
-    const ff = spawn(ffmpegBin, ["-i", "pipe:0", ...segmentArgs], { stdio: ["pipe", "ignore", "ignore"] });
+    ff = spawn(ffmpegBin, [
+      "-nostdin",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      "pipe:0",
+      "-ac",
+      "1",
+      "-ar",
+      "16000",
+      "-c:a",
+      "pcm_s16le",
+      "-f",
+      "wav",
+      "pipe:1"
+    ], { stdio: ["pipe", "pipe", "ignore"] });
     yt.stdout.pipe(ff.stdin);
-    yt.stderr.on("data", () => undefined);
     children.push(yt, ff);
   } else {
     const headers = pageUrl
       ? ["-headers", `Referer: ${pageUrl}\r\nUser-Agent: ${MEDIA_USER_AGENT}\r\n`]
       : [];
-    const ff = spawn(ffmpegBin, [...headers, "-i", sourceUrl, ...segmentArgs], { stdio: ["ignore", "ignore", "ignore"] });
+    ff = spawn(ffmpegBin, [
+      "-nostdin",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      ...headers,
+      "-i",
+      sourceUrl,
+      "-ac",
+      "1",
+      "-ar",
+      "16000",
+      "-c:a",
+      "pcm_s16le",
+      "-f",
+      "wav",
+      "pipe:1"
+    ], { stdio: ["ignore", "pipe", "ignore"] });
     children.push(ff);
   }
-  const closePromise = Promise.all(children.map((child) => new Promise((resolve) => child.on("close", resolve))));
-  const diagnostics = [];
-  for (const child of children) {
+  const closePromise = Promise.all(children.map((child) => new Promise((resolve) => {
     child.on("close", (code) => {
       diagnostics.push({ command: String(child.spawnargs?.[0] || "child").split("/").pop(), code });
+      resolve();
     });
-  }
-  return { closePromise, diagnostics };
+  })));
+  return { stream: ff.stdout, closePromise, diagnostics };
 }
 
-async function collectReadySegments(segDir, closed) {
-  const files = (await readdir(segDir)).filter((name) => /^seg_\d+\.wav$/.test(name));
-  if (!files.length) return [];
-  const maxIndex = Math.max(...files.map((name) => Number(name.match(/\d+/)[0])));
-  const ready = [];
-  for (const name of files) {
-    const index = Number(name.match(/\d+/)[0]);
-    if (closed || index < maxIndex) ready.push({ index, path: join(segDir, name) });
+async function transcribeChunk(audio, chunkMs, apiKey, asrAcquire) {
+  const run = () => transcribeWav({ audio, startMs: 0, endMs: chunkMs, apiKey });
+  if (!asrAcquire) return run();
+  const release = await asrAcquire();
+  try {
+    return await run();
+  } finally {
+    release();
   }
-  return ready;
+}
+
+async function isSilentWav(audio, ffmpegBin) {
+  if (audio.length < 44) return true;
+  const tempPath = `/tmp/koe-silence-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}.wav`;
+  try {
+    await writeFile(tempPath, audio);
+    const ranges = await detectSpeechRanges({ inputPath: tempPath, ffmpegBin });
+    return !ranges.length;
+  } catch {
+    return false;
+  } finally {
+    await rm(tempPath, { force: true }).catch(() => undefined);
+  }
+}
+
+function wrapWav(pcm, header) {
+  const data = Buffer.alloc(44 + pcm.length);
+  data.write("RIFF", 0, "ascii");
+  data.writeUInt32LE(36 + pcm.length, 4);
+  data.write("WAVE", 8, "ascii");
+  data.write("fmt ", 12, "ascii");
+  data.writeUInt32LE(16, 16);
+  data.writeUInt16LE(1, 20);
+  data.writeUInt16LE(1, 22);
+  data.writeUInt32LE(header.sampleRate, 24);
+  data.writeUInt32LE(header.sampleRate * header.blockAlign, 28);
+  data.writeUInt16LE(header.blockAlign, 32);
+  data.writeUInt16LE(16, 34);
+  data.write("data", 36, "ascii");
+  data.writeUInt32LE(pcm.length, 40);
+  pcm.copy(data, 44);
+  return data;
 }
 
 function delay(ms) {
