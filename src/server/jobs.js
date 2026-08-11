@@ -93,6 +93,8 @@ export function createJobManager(options = {}) {
     if (job.running) return;
     job.running = true;
     job.startedAt = Date.now();
+    let lastStatus = "";
+    console.log(`[koe] job ${job.id.slice(0, 8)} started (${job.filename}, ${provider})`);
     try {
       const result = await processJob(job, {
         provider,
@@ -102,6 +104,10 @@ export function createJobManager(options = {}) {
         remoteUrl: options.remoteUrl || process.env.KOE_REMOTE_URL || "",
         remoteToken: options.remoteToken || process.env.KOE_REMOTE_TOKEN || "",
         updateProgress: (status, progress) => {
+          if (status !== lastStatus) {
+            console.log(`[koe] job ${job.id.slice(0, 8)} -> ${status} at +${((Date.now() - job.startedAt) / 1_000).toFixed(1)}s`);
+            lastStatus = status;
+          }
           job.status = status;
           job.progress = Math.max(0, Math.min(1, progress));
         }
@@ -111,10 +117,12 @@ export function createJobManager(options = {}) {
       job.status = "ready";
       job.progress = 1;
       job.completedAt = Date.now();
+      console.log(`[koe] job ${job.id.slice(0, 8)} ready in ${((job.completedAt - job.startedAt) / 1_000).toFixed(1)}s (${job.lines.length} lines)`);
     } catch (error) {
       job.status = "error";
       job.error = error instanceof Error ? error.message : String(error);
       job.completedAt = Date.now();
+      console.log(`[koe] job ${job.id.slice(0, 8)} error in ${((job.completedAt - job.startedAt) / 1_000).toFixed(1)}s: ${job.error}`);
     } finally {
       job.running = false;
       if (job.directory) await rm(job.directory, { recursive: true, force: true }).catch(() => undefined);
@@ -178,6 +186,7 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
     baseUrl: process.env.DASHSCOPE_BASE_URL,
     model: process.env.ASR_MODEL,
     segmentMs: Number(process.env.ASR_SEGMENT_SECONDS || 60) * 1_000,
+    concurrency: Number(process.env.ASR_CONCURRENCY || 3),
     onProgress: (value) => updateProgress("analyzing", 0.35 + value * 0.6)
   });
   return { lines, vtt: toWebVtt(lines) };

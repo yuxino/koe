@@ -54,6 +54,32 @@ test("transcribes a complete PCM WAV in internal segments while keeping absolute
   assert.deepEqual(lines.map((line) => line.startMs), [0, 1_000]);
 });
 
+test("transcribes segments concurrently while keeping timeline order", async () => {
+  const audio = createWav(16_000 * 4);
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const lines = await transcribeCompleteWav({
+    audio,
+    apiKey: "test-key",
+    segmentMs: 1_000,
+    concurrency: 3,
+    fetchImpl: async (_url, options) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight -= 1;
+      const payload = JSON.parse(options.body);
+      const data = Buffer.from(payload.input.messages[0].content[0].input_audio.data.split(",")[1], "base64");
+      return {
+        ok: true,
+        json: async () => ({ output: { output: { sentence: { words: [{ begin_time: 0, end_time: 100, text: "字", punctuation: "" }] } } } })
+      };
+    }
+  });
+  assert.ok(maxInFlight >= 2, `expected parallel segments, saw at most ${maxInFlight} in flight`);
+  assert.deepEqual(lines.map((line) => line.startMs), [0, 1_000, 2_000, 3_000]);
+});
+
 function createWav(sampleCount) {
   const data = Buffer.alloc(sampleCount * 2);
   const wav = Buffer.alloc(44 + data.length);

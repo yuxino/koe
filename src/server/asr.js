@@ -70,22 +70,48 @@ export async function transcribeCompleteWav({
   baseUrl,
   model,
   segmentMs = 60_000,
+  concurrency = 3,
   fetchImpl = fetch,
   onProgress = () => undefined
 }) {
   const wav = parsePcmWav(audio);
   const bytesPerMs = wav.sampleRate * wav.channels * wav.bitsPerSample / 8 / 1_000;
   const segmentBytes = Math.max(wav.channels, Math.floor(segmentMs * bytesPerMs / wav.blockAlign) * wav.blockAlign);
-  const lines = [];
+  const segments = [];
   for (let offset = 0; offset < wav.data.length; offset += segmentBytes) {
     const data = wav.data.subarray(offset, Math.min(wav.data.length, offset + segmentBytes));
-    const startMs = Math.round(offset / bytesPerMs);
-    const endMs = Math.round((offset + data.length) / bytesPerMs);
-    const segment = encodePcmWav(data, wav);
-    lines.push(...await transcribeWav({ audio: segment, startMs, endMs, apiKey, baseUrl, model, fetchImpl }));
-    onProgress(Math.min(1, (offset + data.length) / wav.data.length));
+    segments.push({
+      audio: encodePcmWav(data, wav),
+      startMs: Math.round(offset / bytesPerMs),
+      endMs: Math.round((offset + data.length) / bytesPerMs)
+    });
   }
-  return lines.sort((left, right) => left.startMs - right.startMs);
+  const results = new Array(segments.length);
+  let cursor = 0;
+  let completed = 0;
+
+  async function worker() {
+    while (cursor < segments.length) {
+      const index = cursor;
+      cursor += 1;
+      const segment = segments[index];
+      const lines = await transcribeWav({
+        audio: segment.audio,
+        startMs: segment.startMs,
+        endMs: segment.endMs,
+        apiKey,
+        baseUrl,
+        model,
+        fetchImpl
+      });
+      results[index] = lines;
+      completed += 1;
+      onProgress(Math.min(1, completed / Math.max(1, segments.length)));
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), segments.length) }, () => worker()));
+  return results.flat().sort((left, right) => left.startMs - right.startMs);
 }
 
 function parsePcmWav(audio) {
