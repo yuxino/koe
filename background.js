@@ -99,6 +99,8 @@ async function watchJob({ tabId, frameId, serverUrl, apiToken, jobId }) {
 
 async function beginWatching({ tabId, frameId = 0, serverUrl, apiToken, job, pageUrl = "", selection = null, translate }) {
   stopPolling(tabId);
+  const previous = tabStates.get(tabId);
+  if (previous?.jobId && previous.jobId !== job.id) void cancelJob(previous);
   const state = {
     tabId,
     frameId,

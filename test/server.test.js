@@ -77,6 +77,47 @@ test("reuses cached subtitles for the same source url", async (t) => {
   }
 });
 
+test("cache hits across expiring CDN signatures in the source url", async (t) => {
+  const cacheDir = await mkdtemp(join(tmpdir(), "koe-cache-token-"));
+  t.after(() => rm(cacheDir, { recursive: true, force: true }));
+  let runs = 0;
+  const app = createServer({
+    port: 0,
+    provider: "mock",
+    cacheRoot: cacheDir,
+    processJob: async () => {
+      runs += 1;
+      const lines = [{ startMs: 0, endMs: 1_000, text: "签名缓存", translated: "签名缓存" }];
+      return { lines, vtt: `WEBVTT\n\n1\n00:00:00.000 --> 00:00:01.000\n签名缓存\n签名缓存\n` };
+    }
+  });
+  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
+  t.after(() => app.server.close());
+  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
+
+  const first = await createJob({ sourceUrl: "https://cdn.example.com/v.mp4?secure=token-a&x=1" });
+  assert.equal((await waitForJob(baseUrl, first.id)).status, "ready");
+  assert.equal(runs, 1);
+
+  const second = await createJob({ sourceUrl: "https://cdn.example.com/v.mp4?secure=token-b&x=1" });
+  assert.equal(second.status, "ready");
+  assert.equal(second.fromCache, true);
+  assert.equal(runs, 1);
+
+  const third = await createJob({ sourceUrl: "https://cdn.example.com/v.mp4?secure=token-c&x=2" });
+  assert.equal(third.status, "queued");
+  assert.equal((await waitForJob(baseUrl, third.id)).status, "ready");
+  assert.equal(runs, 2);
+
+  async function createJob(body) {
+    return fetch(`${baseUrl}/api/jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pageUrl: "https://www.pornhub.com/view_video.php?viewkey=test", filename: "signed.mp4", ...body })
+    }).then((response) => response.json());
+  }
+});
+
 test("seeds cached subtitles and continues analysis from the covered region", async (t) => {
   const cacheDir = await mkdtemp(join(tmpdir(), "koe-cache-seed-"));
   t.after(() => rm(cacheDir, { recursive: true, force: true }));

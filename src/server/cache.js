@@ -14,7 +14,7 @@ export function createSubtitleCache({ cacheRoot } = {}) {
   }
 
   function fileFor(sourceUrl) {
-    const key = createHash("sha256").update(String(sourceUrl || "")).digest("hex");
+    const key = createHash("sha256").update(normalizeSourceUrl(sourceUrl)).digest("hex");
     return join(root, `${key}.json`);
   }
 
@@ -131,4 +131,23 @@ function squashNearDuplicates(lines) {
 
 function normalizeText(value) {
   return String(value || "").trim().replace(/\s+/g, " ");
+}
+
+function normalizeSourceUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    url.hash = "";
+    const volatile = new Set([
+      "secure", "token", "signature", "sig", "expires", "expiration", "expiry", "e",
+      "key", "auth", "access_token", "x-id", "x-amz-signature", "x-amz-credential",
+      "x-amz-date", "x-amz-expires", "x-amz-signedheaders", "x-amz-security-token",
+      "awsaccesskeyid", "policy", "credential"
+    ]);
+    for (const param of [...url.searchParams.keys()]) {
+      if (volatile.has(String(param).toLowerCase())) url.searchParams.delete(param);
+    }
+    return url.toString();
+  } catch {
+    return String(value || "");
+  }
 }
