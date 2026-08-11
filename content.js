@@ -70,7 +70,6 @@
       if (message.status === "analyzing") {
         analysisDone = false;
         autoPlayedPartial = false;
-        tryAutoPlay();
         if (!showingCue) {
           const percent = Math.round(Number(message.progress || 0) * 100);
           const elapsed = message.startedAt

@@ -64,7 +64,7 @@ export async function streamExtractAndTranscribe({
       const chunkStartMs = offsetMs;
       offsetMs += chunkMs;
       chunkCount += 1;
-      if (process.env.ASR_VAD !== "0") {
+      if (process.env.ASR_VAD !== "0" && index !== 0) {
         try {
           const rangesSec = await detectSpeechRanges({ inputPath: path, ffmpegBin });
           if (!rangesSec.length) {
