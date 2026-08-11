@@ -118,7 +118,7 @@ async function beginWatching({ tabId, frameId = 0, serverUrl, apiToken, job, pag
   tabStates.set(tabId, state);
   await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: state.jobStatus, stageDetail: state.stageDetail, hasDuration: state.hasDuration, startedAt: state.startedAt }, frameId);
   if (job.status === "ready") await publishReady(state);
-  else pollers.set(tabId, setInterval(() => pollJob(tabId).catch((error) => failJob(tabId, error)), 1_000));
+  else pollers.set(tabId, setInterval(() => pollJob(tabId).catch((error) => failJob(tabId, error)), 500));
   return { ok: true, state: publicState(state) };
 }
 

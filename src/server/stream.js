@@ -100,7 +100,8 @@ async function streamRealtimeTranscribe({
         const text = String(sentence.text || "").trim();
         if (!onPartial || !text) return;
         const begin = Number(sentence.begin_time) || 0;
-        const end = Math.max(begin + 2_000, Number(sentence.end_time) || begin + 2_000);
+        const estimatedEnd = begin + Math.max(2_000, Math.min(12_000, text.length * 400));
+        const end = Math.max(estimatedEnd, Number(sentence.end_time) || estimatedEnd);
         onPartial([{ startMs: begin + offsetMs, endMs: end + offsetMs, text }]);
       }
     });
