@@ -19,6 +19,8 @@ export async function streamExtractAndTranscribe({
   onProgress,
   startMs = 0,
   durationMs = null,
+  getPositionMs = null,
+  isPlaying = () => false,
   signal = null
 }) {
   if (!/^https?:/i.test(sourceUrl || "")) {
@@ -40,6 +42,8 @@ export async function streamExtractAndTranscribe({
         onProgress,
         startMs,
         durationMs,
+        getPositionMs,
+        isPlaying,
         signal
       });
     } catch (error) {
@@ -71,6 +75,8 @@ async function streamRealtimeTranscribe({
   onProgress,
   startMs = 0,
   durationMs = null,
+  getPositionMs = null,
+  isPlaying = () => false,
   signal = null
 }) {
   const startedAt = Date.now();
@@ -100,6 +106,8 @@ async function streamRealtimeTranscribe({
     const waited = Math.floor((Date.now() - startedAt) / 1_000);
     onProgress(0.08, `正在连接视频源 · ${waited}s`);
   }, 1_000);
+  const aheadMs = Number(process.env.KOE_DOWNLOAD_AHEAD_MS || 30_000);
+  let paced = false;
   const onAbort = () => {
     asr.terminate();
     spawned.kill();
@@ -139,7 +147,7 @@ async function streamRealtimeTranscribe({
     let lastAudioAt = Date.now();
     const stallMs = Number(process.env.KOE_REALTIME_STALL_MS || 60_000);
     const stallWatchdog = setInterval(() => {
-      if (Date.now() - lastAudioAt > stallMs) {
+      if (!paced && Date.now() - lastAudioAt > stallMs) {
         asr.terminate();
         spawned.kill();
       }
@@ -159,6 +167,16 @@ async function streamRealtimeTranscribe({
       while (frame.length >= REALTIME_FRAME_BYTES) {
         await asr.sendFrame(frame.subarray(0, REALTIME_FRAME_BYTES));
         frame = frame.subarray(REALTIME_FRAME_BYTES);
+      }
+      if (getPositionMs && isPlaying?.() && totalAudioMs - getPositionMs() > aheadMs) {
+        paced = true;
+        spawned.pause();
+        while (getPositionMs && isPlaying?.() && totalAudioMs - getPositionMs() > aheadMs) {
+          if (signal?.aborted) throw abortError();
+          await delay(500);
+        }
+        spawned.resume();
+        paced = false;
       }
     }
     clearInterval(stallWatchdog);
@@ -385,13 +403,23 @@ function spawnFfmpeg(ffmpegBin, args) {
       try { child.kill("SIGTERM"); } catch { /* ignore */ }
     }
   };
+  const pause = () => {
+    for (const child of children) {
+      try { child.kill("SIGSTOP"); } catch { /* ignore */ }
+    }
+  };
+  const resume = () => {
+    for (const child of children) {
+      try { child.kill("SIGCONT"); } catch { /* ignore */ }
+    }
+  };
   const closePromise = Promise.all(children.map((child) => new Promise((resolve) => {
     child.on("close", (code) => {
       diagnostics.push({ command: String(child.spawnargs?.[0] || "child").split("/").pop(), code });
       resolve();
     });
   })));
-  return { stream: ff.stdout, closePromise, diagnostics, kill };
+  return { stream: ff.stdout, closePromise, diagnostics, kill, pause, resume };
 }
 
 function sentenceToLines(sentence) {

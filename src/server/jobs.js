@@ -51,6 +51,8 @@ export function createJobManager(options = {}) {
       startMs: Number(input.startMs) || 0,
       streamStartMs: Number(input.startMs) || 0,
       positionMs: Number(input.startMs) || 0,
+      playing: false,
+      positionUpdatedAt: 0,
       hasDuration: Boolean(Number(input.durationMs)),
       translate: input.translate !== undefined ? Boolean(input.translate) : process.env.KOE_TRANSLATE !== "0",
       provider,
@@ -330,10 +332,12 @@ export function createJobManager(options = {}) {
       if (job?.prioritize) job.prioritize(Number(timeMs));
       return Boolean(job);
     },
-    setPosition: (id, timeMs) => {
+    setPosition: (id, timeMs, playing) => {
       const job = jobs.get(String(id));
       if (!job) return false;
       job.positionMs = Math.max(0, Number(timeMs) || 0);
+      job.playing = Boolean(playing);
+      job.positionUpdatedAt = Date.now();
       return true;
     },
     jobs,
@@ -390,6 +394,8 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
         durationMs: job.durationMs,
         asrAcquire,
         startMs: job.streamStartMs ?? job.startMs,
+        getPositionMs: () => job.positionMs,
+        isPlaying: () => job.playing && (Date.now() - job.positionUpdatedAt < 30_000),
         onLines: (segmentLines) => {
           job.lines.push(...lineFilter(segmentLines));
           job.lines.sort((left, right) => left.startMs - right.startMs);

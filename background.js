@@ -66,7 +66,7 @@ async function handlePositionUpdate(message, sender) {
     await fetch(`${state.serverUrl}/api/jobs/${state.jobId}/position`, {
       method: "POST",
       headers: { "content-type": "application/json", ...authHeaders(state.apiToken) },
-      body: JSON.stringify({ timeMs })
+      body: JSON.stringify({ timeMs, playing: Boolean(message.playing) })
     });
   } catch {
     // 本地助手旧版本没有 position 接口时静默跳过

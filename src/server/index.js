@@ -123,7 +123,7 @@ export function createServer(options = {}) {
       if (request.method === "POST" && positionMatch) {
         if (!isAuthorized(request, config.apiToken)) return unauthorized(response);
         const body = await readJson(request);
-        if (!jobs.setPosition(positionMatch[1], Number(body.timeMs || 0))) return sendJson(response, 404, { error: "job_not_found" });
+        if (!jobs.setPosition(positionMatch[1], Number(body.timeMs || 0), body.playing)) return sendJson(response, 404, { error: "job_not_found" });
         sendJson(response, 202, { ok: true });
         return;
       }

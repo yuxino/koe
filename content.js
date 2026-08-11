@@ -178,7 +178,7 @@
     if (Math.abs(timeMs - lastPositionSentMs) < 1_000) return;
     lastPositionSentAt = now;
     lastPositionSentMs = timeMs;
-    chrome.runtime.sendMessage({ type: "POSITION_UPDATE", timeMs }).catch(() => undefined);
+    chrome.runtime.sendMessage({ type: "POSITION_UPDATE", timeMs, playing: !video.paused }).catch(() => undefined);
   }, 5_000);
 
   // 视频切换：清掉旧字幕并通知后台
