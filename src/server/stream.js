@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { transcribeWav } from "./asr.js";
 import { MEDIA_USER_AGENT } from "./media.js";
 
-const CHUNK_SECONDS = Math.max(10, Number(process.env.KOE_STREAM_CHUNK_SECONDS || 30));
+const CHUNK_SECONDS = Math.max(10, Number(process.env.KOE_STREAM_CHUNK_SECONDS || 10));
 
 export async function streamExtractAndTranscribe({
   pageUrl,
