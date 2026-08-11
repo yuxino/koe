@@ -9,6 +9,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  const state = tabStates.get(tabId);
+  if (state) void cancelJob(state);
   tabStates.delete(tabId);
   stopPolling(tabId);
 });

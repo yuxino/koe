@@ -127,6 +127,7 @@ async function streamRealtimeTranscribe({
 
     log(`task started, pumping audio`);
     let frame = Buffer.alloc(0);
+    let sentFirst = false;
     let lastAudioAt = Date.now();
     const stallMs = Number(process.env.KOE_REALTIME_STALL_MS || 60_000);
     const stallWatchdog = setInterval(() => {
@@ -140,6 +141,11 @@ async function streamRealtimeTranscribe({
       if (!chunk.length) continue;
       lastAudioAt = Date.now();
       totalAudioMs += Math.round(chunk.length / 32);
+      if (!sentFirst) {
+        await asr.sendFrame(chunk);
+        sentFirst = true;
+        continue;
+      }
       frame = Buffer.concat([frame, chunk]);
       while (frame.length >= REALTIME_FRAME_BYTES) {
         await asr.sendFrame(frame.subarray(0, REALTIME_FRAME_BYTES));
