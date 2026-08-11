@@ -212,24 +212,13 @@
 
   analyzeBtn.addEventListener("click", () => {
     if (!findVideo()) return;
-    analysisActive = true;
-    updateAnalyzeButton();
     chrome.runtime.sendMessage({ type: "ANALYZE_VIDEO", pageUrl: location.href, serverUrl: "http://127.0.0.1:8787", apiToken: "" })
-      .then((response) => {
-        if (!response?.ok) {
-          analysisActive = false;
-          updateAnalyzeButton();
-        }
-      })
-      .catch(() => {
-        analysisActive = false;
-        updateAnalyzeButton();
-      });
+      .catch(() => undefined);
   });
 
   function updateAnalyzeButton() {
     const fullscreenVideo = (document.fullscreenElement || document.webkitFullscreenElement) instanceof HTMLVideoElement;
-    const show = !analysisActive && !fullscreenVideo && Boolean(findVideo());
+    const show = !fullscreenVideo && Boolean(findVideo());
     analyzeBtn.classList.toggle("visible", show);
   }
   window.setInterval(updateAnalyzeButton, 1_000);
