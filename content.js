@@ -88,6 +88,7 @@
         analysisDone = false;
         autoPlayedPartial = false;
         updateAnalyzeButton();
+        if (!subtitleTimer) startSubtitleClock();
       }
       if (message.status === "ready") {
         errorShown = false;
