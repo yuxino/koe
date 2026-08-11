@@ -171,8 +171,10 @@ async function streamRealtimeTranscribe({
       if (getPositionMs && isPlaying?.() && totalAudioMs - getPositionMs() > aheadMs) {
         paced = true;
         spawned.pause();
+        const silence = Buffer.alloc(REALTIME_FRAME_BYTES);
         while (getPositionMs && isPlaying?.() && totalAudioMs - getPositionMs() > aheadMs) {
           if (signal?.aborted) throw abortError();
+          await asr.sendFrame(silence).catch(() => undefined);
           await delay(500);
         }
         spawned.resume();
