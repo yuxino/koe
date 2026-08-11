@@ -168,6 +168,19 @@ test("fails clearly when there is no direct media URL", async (t) => {
   }), /没有可直接获取/);
 });
 
+test("explains extraction failures in plain language", async (t) => {
+  const outputDir = await mkdtemp(join(tmpdir(), "koe-media-test-"));
+  t.after(() => rm(outputDir, { recursive: true, force: true }));
+
+  await assert.rejects(() => extractAudioLocally({
+    pageUrl: "https://video.example/watch/1",
+    sourceUrl: "https://cdn.example/video.mp4",
+    outputDir,
+    ffmpegBin: "ffmpeg-test",
+    run: async () => { throw new Error("ffmpeg_failed:[out#0/ipod] Output file does not contain any stream"); }
+  }), /没有可提取的音轨/);
+});
+
 test("extracts direct media with ffmpeg and reports progress", async (t) => {
   const outputDir = await mkdtemp(join(tmpdir(), "koe-media-test-"));
   t.after(() => rm(outputDir, { recursive: true, force: true }));

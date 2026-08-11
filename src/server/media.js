@@ -103,15 +103,26 @@ export async function extractAudioLocally({
     throw new Error("页面没有可直接获取的视频地址，无法提取声音。");
   }
   const inputUrl = await resolveHlsAudioVariant(sourceUrl, { pageUrl, fetchImpl });
-  await normalizeToAac({
-    input: inputUrl,
-    outputPath,
-    pageUrl,
-    ffmpegBin,
-    run,
-    durationMs,
-    onProgress
-  });
+  try {
+    await normalizeToAac({
+      input: inputUrl,
+      outputPath,
+      pageUrl,
+      ffmpegBin,
+      run,
+      durationMs,
+      onProgress
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/does not contain any stream|no stream/i.test(message)) {
+      throw new Error("这个视频源里没有可提取的音轨（无声音视频，或直链已失效）。");
+    }
+    if (/403|forbidden|denied|unavailable/i.test(message)) {
+      throw new Error("视频直链被网站拦截或已过期，请刷新页面后重新选择视频再试。");
+    }
+    throw new Error(`提取声音失败：${message}`);
+  }
   return outputPath;
 }
 
