@@ -53,6 +53,8 @@
   let autoPlayedPartial = false;
   let lastAutoPlayAt = 0;
   let processing = false;
+  let lastErrorShown = "";
+  let errorShown = false;
 
   const STAGE_TEXT = {
     downloading: "正在下载 / 提取声音",
@@ -76,16 +78,19 @@
     }
     if (message.type === "JOB_STATUS") {
       if (message.status === "analyzing") {
+        errorShown = false;
         processing = true;
         analysisDone = false;
         autoPlayedPartial = false;
       }
       if (message.status === "ready") {
+        errorShown = false;
         processing = false;
         subtitleReady = true;
         analysisDone = true;
       }
       if (message.status === "idle") {
+        errorShown = false;
         processing = false;
         subtitleReady = false;
         analysisDone = false;
@@ -96,6 +101,7 @@
       return false;
     }
     if (message.type === "SUBTITLE_READY") {
+      errorShown = false;
       processing = false;
       cues = parseVtt(message.vtt || "");
       activeVideo = findVideo();
@@ -113,6 +119,7 @@
       return false;
     }
     if (message.type === "PARTIAL_SUBTITLES") {
+      errorShown = false;
       cues = parseVtt(message.vtt || "");
       subtitleReady = true;
       if (cues.length) tryAutoPlay();
@@ -122,7 +129,11 @@
     }
     if (message.type === "CAPTURE_ERROR") {
       processing = false;
-      showStatus("视频分析失败", message.error || "请检查视频来源和服务配置。", "ERROR");
+      errorShown = true;
+      const detail = message.error || "请检查视频来源和服务配置。";
+      if (detail === lastErrorShown) return false;
+      lastErrorShown = detail;
+      showStatus("视频分析失败", detail, "ERROR");
       return false;
     }
     return false;
@@ -136,6 +147,7 @@
     if (now - lastSeekAt < 1_500) return;
     lastSeekAt = now;
     cues = [];
+    errorShown = false;
     showingCue = false;
     hide();
     chrome.runtime.sendMessage({ type: "SEEK_PRIORITIZE", timeMs: Math.round(video.currentTime * 1_000) }).catch(() => undefined);
@@ -158,6 +170,7 @@
   document.addEventListener("emptied", () => {
     cues = [];
     processing = false;
+    errorShown = false;
     subtitleReady = false;
     analysisDone = false;
     autoPlayedPartial = false;
@@ -260,6 +273,7 @@
       if (activeVideo && !activeVideo.isConnected) activeVideo = null;
       activeVideo ||= findVideo();
       if (!activeVideo) return;
+      if (errorShown) return;
       const timeMs = activeVideo.currentTime * 1_000;
       const cue = cues.find((item) => timeMs >= item.startMs && timeMs < item.endMs);
       if (cue) {

@@ -1,5 +1,6 @@
 const tabStates = new Map();
 const pollers = new Map();
+const recoveryAttempts = new Map();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender)
@@ -12,6 +13,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   const state = tabStates.get(tabId);
   if (state) void cancelJob(state);
   tabStates.delete(tabId);
+  recoveryAttempts.delete(tabId);
   stopPolling(tabId);
 });
 
@@ -139,6 +141,7 @@ async function pollJob(tabId) {
   state.hasDuration = Boolean(job.hasDuration);
   if (job.status === "ready") {
     stopPolling(tabId);
+    recoveryAttempts.delete(tabId);
     state.status = "ready";
     await publishReady(state);
     return;
@@ -250,7 +253,9 @@ async function failJob(tabId, error) {
   const message = error instanceof Error ? error.message : String(error);
   await forwardToTab(tabId, { type: "CAPTURE_ERROR", tabId, error: message }, state.frameId);
   const transient = /job_not_found|fetch failed|未启动|ECONNREFUSED|EAI_AGAIN|network/i.test(message);
-  if (transient && !state.recoveryScheduled) {
+  const attempts = (recoveryAttempts.get(tabId) || 0) + 1;
+  recoveryAttempts.set(tabId, attempts);
+  if (transient && attempts <= 2 && !state.recoveryScheduled) {
     state.recoveryScheduled = true;
     setTimeout(() => {
       const current = tabStates.get(tabId);
