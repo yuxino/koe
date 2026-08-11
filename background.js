@@ -42,13 +42,7 @@ async function handleVideoChanged(sender) {
   if (now - (lastVideoChangeAt.get(tabId) || 0) < 1_500) return { ok: true, skipped: true };
   lastVideoChangeAt.set(tabId, now);
   if (tabStates.has(tabId)) await stopAnalysis(tabId);
-  const pageUrl = String(sender.tab?.url || "");
-  if (!/^https?:/i.test(pageUrl)) return { ok: true, skipped: true };
-  try {
-    return await analyzeVideo({ tabId, serverUrl: LOCAL_SERVER_URL, apiToken: "", pageUrl });
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
-  }
+  return { ok: true, skipped: true };
 }
 
 async function handlePlayAnalyze(message, sender) {
