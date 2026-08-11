@@ -28,6 +28,8 @@ elements.translateToggle.addEventListener("change", async () => {
 chrome.tabs.onActivated.addListener(refreshActiveTab);
 
 async function init() {
+  const version = document.querySelector("#version");
+  if (version) version.textContent = `v${chrome.runtime.getManifest().version}`;
   await refreshActiveTab();
   await checkHealth();
   await refreshState();
