@@ -125,6 +125,15 @@
       refreshNativeTrack();
       return false;
     }
+    if (message.type === "LIVE_CAPTION") {
+      translated.textContent = message.translated || message.text || "";
+      original.textContent = "";
+      meta.textContent = "";
+      label.textContent = "KOE · LIVE";
+      stage.classList.remove("compact");
+      stage.classList.add("visible");
+      return false;
+    }
     if (message.type === "CAPTURE_ERROR") {
       showStatus("视频分析失败", message.error || "请检查视频来源和服务配置。", "ERROR");
       return false;

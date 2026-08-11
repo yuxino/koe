@@ -1,5 +1,6 @@
 const tabStates = new Map();
 const pollers = new Map();
+let captureState = null;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender)
@@ -10,6 +11,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabStates.delete(tabId);
+  if (captureState?.tabId === tabId) captureState = null;
   stopPolling(tabId);
 });
 
@@ -19,11 +21,101 @@ async function handleMessage(message) {
   if (message.type === "STOP_ANALYSIS") return stopAnalysis(Number(message.tabId));
   if (message.type === "LIST_VIDEOS") return listVideos(Number(message.tabId));
   if (message.type === "SEEK_PRIORITIZE") return seekPrioritize(Number(message.tabId), Number(message.timeMs));
+  if (message.type === "CAPTURE_START") return startCapture(message);
+  if (message.type === "CAPTURE_STOP") return stopCapture(Number(message.tabId) || captureState?.tabId);
+  if (message.type === "GET_CAPTURE_STATE") return { ok: true, capture: captureState ? { tabId: captureState.tabId, startedAt: captureState.startedAt } : null };
+  if (message.type === "CAPTURE_LINES") return handleCaptureLines(message);
   if (message.type === "GET_STATE") {
     const state = tabStates.get(Number(message.tabId));
     return { ok: true, state: state ? publicState(state) : { status: "idle" } };
   }
   return { ok: true };
+}
+
+async function startCapture({ tabId, streamId, serverUrl, pageUrl }) {
+  tabId = Number(tabId);
+  if (!Number.isInteger(tabId) || !streamId) throw new Error("无法开始采集：缺少标签页或音频流。");
+  await stopCapture(tabId);
+  await ensureOffscreen();
+  let frameId = 0;
+  let offsetMs = 0;
+  try {
+    const source = await discoverVideoSource(tabId, pageUrl);
+    frameId = Number(source?.frameId || 0);
+    offsetMs = Number(source?.currentTimeMs || 0);
+  } catch {
+    frameId = 0;
+  }
+  const started = await chrome.runtime.sendMessage({
+    type: "CAPTURE_START",
+    streamId,
+    serverUrl: String(serverUrl || "").replace(/\/+$/, ""),
+    offsetMs
+  });
+  if (!started?.ok) throw new Error(started?.error || "无法开始采集声音。");
+  captureState = { tabId, frameId, pageUrl: String(pageUrl || ""), startedAt: Date.now(), lines: [], offsetMs };
+  return { ok: true, capture: { tabId, startedAt: captureState.startedAt } };
+}
+
+async function stopCapture(tabId) {
+  if (!captureState || captureState.tabId !== tabId) return { ok: true, capture: null };
+  const frameId = captureState.frameId;
+  captureState = null;
+  await chrome.runtime.sendMessage({ type: "CAPTURE_STOP" }).catch(() => undefined);
+  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: "idle", progress: 0 }, frameId);
+  return { ok: true, capture: null };
+}
+
+async function handleCaptureLines({ lines }) {
+  if (!captureState?.tabId) return { ok: true, ignored: true };
+  captureState.lines.push(...(Array.isArray(lines) ? lines : []));
+  const vtt = linesToVtt(captureState.lines);
+  await forwardToTab(captureState.tabId, { type: "PARTIAL_SUBTITLES", vtt, lineCount: captureState.lines.length }, captureState.frameId);
+  const last = [...captureState.lines].sort((left, right) => right.startMs - left.startMs)[0];
+  if (last) {
+    await forwardToTab(captureState.tabId, {
+      type: "LIVE_CAPTION",
+      text: String(last.text || ""),
+      translated: String(last.translated || "")
+    }, captureState.frameId);
+  }
+  return { ok: true };
+}
+
+function linesToVtt(lines) {
+  const sorted = [...lines].sort((left, right) => left.startMs - right.startMs);
+  const cues = sorted
+    .filter((line) => String(line.text || "").trim())
+    .map((line, index) => [
+      String(index + 1),
+      `${formatVttTime(line.startMs)} --> ${formatVttTime(Math.max(Number(line.startMs || 0) + 200, Number(line.endMs || 0)))}`,
+      [String(line.text || "").trim(), String(line.translated || "").trim()].filter(Boolean).join("\n")
+    ].join("\n"));
+  return `WEBVTT\n\n${cues.join("\n\n")}\n`;
+}
+
+function formatVttTime(value) {
+  const ms = Math.max(0, Math.round(Number(value || 0)));
+  const hours = Math.floor(ms / 3_600_000);
+  const minutes = Math.floor((ms % 3_600_000) / 60_000);
+  const seconds = Math.floor((ms % 60_000) / 1_000);
+  const rest = ms % 1_000;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(rest).padStart(3, "0")}`;
+}
+
+async function ensureOffscreen() {
+  const url = chrome.runtime.getURL("offscreen.html");
+  const contexts = await chrome.runtime.getContexts?.({ contextTypes: ["OFFSCREEN_DOCUMENT"] }).catch(() => []);
+  if (contexts?.some((context) => context.documentUrl === url)) return;
+  try {
+    await chrome.offscreen.createDocument({
+      url: "offscreen.html",
+      reasons: ["USER_MEDIA"],
+      justification: "采集标签页正在播放的声音用于实时字幕"
+    });
+  } catch (error) {
+    if (!String(error).includes("only a single offscreen document")) throw error;
+  }
 }
 
 async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl, selection, translate }) {
