@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const CACHE_VERSION = 1;
@@ -7,6 +7,7 @@ const CACHE_VERSION = 1;
 export function createSubtitleCache({ cacheRoot } = {}) {
   const root = String(cacheRoot || "");
   const pendingWrites = new Map();
+  let saveCount = 0;
 
   async function ensureRoot() {
     await mkdir(root, { recursive: true });
@@ -15,6 +16,28 @@ export function createSubtitleCache({ cacheRoot } = {}) {
   function fileFor(sourceUrl) {
     const key = createHash("sha256").update(String(sourceUrl || "")).digest("hex");
     return join(root, `${key}.json`);
+  }
+
+  async function pruneIfNeeded() {
+    if (saveCount % 25 !== 0) return;
+    try {
+      const files = await readdir(root);
+      if (files.length <= 600) return;
+      const entries = await Promise.all(files.map(async (file) => {
+        const path = join(root, file);
+        try {
+          return { path, mtime: (await stat(path)).mtimeMs };
+        } catch {
+          return null;
+        }
+      }));
+      const sorted = entries.filter(Boolean).sort((left, right) => right.mtime - left.mtime);
+      for (const entry of sorted.slice(600)) {
+        await rm(entry.path, { force: true }).catch(() => undefined);
+      }
+    } catch {
+      // 清理失败不影响主流程
+    }
   }
 
   async function lookup(sourceUrl) {
@@ -58,6 +81,8 @@ export function createSubtitleCache({ cacheRoot } = {}) {
           const temp = `${target}.tmp`;
           await writeFile(temp, JSON.stringify(entry));
           await rename(temp, target);
+          saveCount += 1;
+          await pruneIfNeeded();
         })
         .catch(() => undefined);
       pendingWrites.set(sourceUrl, current);

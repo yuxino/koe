@@ -114,6 +114,9 @@ export function createJobManager(options = {}) {
             job.streamStartMs = Math.max(job.startMs, cursor);
             job.seededFromCache = true;
             job.fromCache = true;
+            if (Number(job.durationMs) > 0) {
+              job.progress = Math.min(0.85, job.streamStartMs / Number(job.durationMs));
+            }
             console.log(`[koe] job ${id.slice(0, 8)} seeded ${seeded.length} cached lines, continuing from ${job.streamStartMs}ms`);
             if (job.translate && seeded.some((line) => !line.translated)) {
               void translateSegment(seeded.filter((line) => !line.translated), {
