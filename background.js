@@ -1,5 +1,6 @@
 const tabStates = new Map();
 const pollers = new Map();
+let captureState = null;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender)
@@ -10,6 +11,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabStates.delete(tabId);
+  if (captureState?.tabId === tabId) captureState = null;
   stopPolling(tabId);
 });
 
@@ -19,11 +21,70 @@ async function handleMessage(message) {
   if (message.type === "STOP_ANALYSIS") return stopAnalysis(Number(message.tabId));
   if (message.type === "LIST_VIDEOS") return listVideos(Number(message.tabId));
   if (message.type === "SEEK_PRIORITIZE") return seekPrioritize(Number(message.tabId), Number(message.timeMs));
+  if (message.type === "CAPTURE_START") return startCapture(message);
+  if (message.type === "CAPTURE_STOP") return stopCapture(Number(message.tabId) || captureState?.tabId);
+  if (message.type === "GET_CAPTURE_STATE") return { ok: true, capture: captureState ? { tabId: captureState.tabId, startedAt: captureState.startedAt } : null };
   if (message.type === "GET_STATE") {
     const state = tabStates.get(Number(message.tabId));
     return { ok: true, state: state ? publicState(state) : { status: "idle" } };
   }
   return { ok: true };
+}
+
+async function startCapture({ tabId, streamId, serverUrl, pageUrl }) {
+  tabId = Number(tabId);
+  if (!Number.isInteger(tabId) || !streamId) throw new Error("无法开始采集：缺少标签页或音频流。");
+  await stopCapture(tabId);
+  await ensureOffscreen();
+  const response = await chrome.runtime.sendMessage({
+    type: "CAPTURE_START",
+    streamId,
+    serverUrl: String(serverUrl || "").replace(/\/+$/, "")
+  });
+  if (!response?.ok) throw new Error(response?.error || "无法开始采集声音。");
+  let frameId = 0;
+  try {
+    const source = await discoverVideoSource(tabId, pageUrl);
+    frameId = Number(source?.frameId || 0);
+  } catch {
+    frameId = 0;
+  }
+  captureState = { tabId, frameId, pageUrl: String(pageUrl || ""), startedAt: Date.now() };
+  return { ok: true, capture: { tabId, startedAt: captureState.startedAt } };
+}
+
+async function stopCapture(tabId) {
+  if (!captureState || captureState.tabId !== tabId) return { ok: true, capture: null };
+  const capture = captureState;
+  captureState = null;
+  const response = await chrome.runtime.sendMessage({ type: "CAPTURE_STOP" }).catch((error) => ({ ok: false, error: String(error) }));
+  if (!response?.ok) throw new Error(response?.error || "停止采集失败。");
+  if (!response.jobId) return { ok: true, capture: null };
+  const job = await getJob(LOCAL_SERVER_URL, "", response.jobId);
+  const watching = await beginWatching({
+    tabId,
+    frameId: capture.frameId,
+    serverUrl: LOCAL_SERVER_URL,
+    apiToken: "",
+    job,
+    pageUrl: capture.pageUrl
+  });
+  return { ok: true, state: watching.state, capture: null };
+}
+
+async function ensureOffscreen() {
+  const url = chrome.runtime.getURL("offscreen.html");
+  const contexts = await chrome.runtime.getContexts?.({ contextTypes: ["OFFSCREEN_DOCUMENT"] }).catch(() => []);
+  if (contexts?.some((context) => context.documentUrl === url)) return;
+  try {
+    await chrome.offscreen.createDocument({
+      url: "offscreen.html",
+      reasons: ["USER_MEDIA"],
+      justification: "采集标签页正在播放的声音用于字幕分析"
+    });
+  } catch (error) {
+    if (!String(error).includes("only a single offscreen document")) throw error;
+  }
 }
 
 async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl, selection, translate }) {
