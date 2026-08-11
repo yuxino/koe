@@ -16,9 +16,25 @@ export async function streamExtractAndTranscribe({
   onLines,
   onProgress
 }) {
+  const attempts = [];
+  const direct = await makeDirectPipeline({ pageUrl, sourceUrl, ffmpegBin, ytdlpBin });
+  if (direct) attempts.push(direct);
+  attempts.push(() => makePipePipeline({ pageUrl, sourceUrl, ffmpegBin, ytdlpBin }));
+  let lastError = null;
+  for (const factory of attempts) {
+    try {
+      return await runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, onProgress });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("stream pipeline failed");
+}
+
+async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, onProgress }) {
   const startedAt = Date.now();
   const log = (message) => console.log(`[koe] stream +${((Date.now() - startedAt) / 1_000).toFixed(1)}s ${message}`);
-  const { stream, closePromise, diagnostics } = startPipeline({ pageUrl, sourceUrl, ffmpegBin, ytdlpBin });
+  const { stream, closePromise, diagnostics } = factory();
   const queue = [];
   const failures = [];
   const processed = new Set();
@@ -132,7 +148,32 @@ export async function streamExtractAndTranscribe({
   return { chunks: chunkCount };
 }
 
-function startPipeline({ pageUrl, sourceUrl, ffmpegBin, ytdlpBin }) {
+async function makeDirectPipeline({ pageUrl, sourceUrl, ffmpegBin, ytdlpBin }) {
+  let url = sourceUrl;
+  if (pageUrl && pageUrl !== sourceUrl && ytdlpBin) {
+    try {
+      const { stdout } = await runCapture(ytdlpBin, [
+        "-g",
+        "--no-playlist",
+        "--no-warnings",
+        "-f",
+        "bestaudio/worst",
+        pageUrl
+      ], 30_000);
+      const candidate = String(stdout).trim().split(/\s+/)[0];
+      if (/^https?:/i.test(candidate)) url = candidate;
+    } catch {
+      return null;
+    }
+  }
+  if (!/^https?:/i.test(url)) return null;
+  const headers = pageUrl
+    ? ["-headers", `Referer: ${pageUrl}\r\nUser-Agent: ${MEDIA_USER_AGENT}\r\n`]
+    : [];
+  return () => spawnFfmpeg(ffmpegBin, [...headers, "-i", url]);
+}
+
+function makePipePipeline({ pageUrl, sourceUrl, ffmpegBin, ytdlpBin }) {
   const children = [];
   const diagnostics = [];
   const useYtDlp = Boolean(pageUrl) && pageUrl !== sourceUrl && Boolean(ytdlpBin);
@@ -172,28 +213,7 @@ function startPipeline({ pageUrl, sourceUrl, ffmpegBin, ytdlpBin }) {
     yt.stdout.pipe(ff.stdin);
     children.push(yt, ff);
   } else {
-    const headers = pageUrl
-      ? ["-headers", `Referer: ${pageUrl}\r\nUser-Agent: ${MEDIA_USER_AGENT}\r\n`]
-      : [];
-    ff = spawn(ffmpegBin, [
-      "-nostdin",
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      ...headers,
-      "-i",
-      sourceUrl,
-      "-ac",
-      "1",
-      "-ar",
-      "16000",
-      "-c:a",
-      "pcm_s16le",
-      "-f",
-      "wav",
-      "pipe:1"
-    ], { stdio: ["ignore", "pipe", "ignore"] });
-    children.push(ff);
+    return spawnFfmpeg(ffmpegBin, ["-i", sourceUrl]);
   }
   const closePromise = Promise.all(children.map((child) => new Promise((resolve) => {
     child.on("close", (code) => {
@@ -202,6 +222,55 @@ function startPipeline({ pageUrl, sourceUrl, ffmpegBin, ytdlpBin }) {
     });
   })));
   return { stream: ff.stdout, closePromise, diagnostics };
+}
+
+function spawnFfmpeg(ffmpegBin, args) {
+  const children = [];
+  const diagnostics = [];
+  const ff = spawn(ffmpegBin, [
+    "-nostdin",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    ...args,
+    "-ac",
+    "1",
+    "-ar",
+    "16000",
+    "-c:a",
+    "pcm_s16le",
+    "-f",
+    "wav",
+    "pipe:1"
+  ], { stdio: ["ignore", "pipe", "ignore"] });
+  children.push(ff);
+  const closePromise = Promise.all(children.map((child) => new Promise((resolve) => {
+    child.on("close", (code) => {
+      diagnostics.push({ command: String(child.spawnargs?.[0] || "child").split("/").pop(), code });
+      resolve();
+    });
+  })));
+  return { stream: ff.stdout, closePromise, diagnostics };
+}
+
+function runCapture(command, args, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("yt-dlp -g timed out"));
+    }, timeoutMs);
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new Error(String(stderr || `exit ${code}`).trim().slice(-200)));
+    });
+  });
 }
 
 async function transcribeChunk(audio, chunkMs, apiKey, asrAcquire) {
