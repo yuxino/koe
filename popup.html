@@ -11,45 +11,27 @@
       <header class="masthead">
         <img class="avatar" src="assets/koe-avatar-48.png" alt="Koe">
         <div>
-          <div class="kicker">VOICE / CAPTION LAB</div>
+          <div class="kicker">KOE</div>
           <h1>Koe</h1>
         </div>
         <span class="version" id="version"></span>
-        <span class="batch-mark" id="batch-mark">BATCH</span>
       </header>
 
-      <section class="current-tab">
-        <span class="section-label">CURRENT TAB</span>
-        <strong id="tab-host">正在读取…</strong>
-        <span id="tab-title">先完整分析，再加载字幕。</span>
+      <section class="status-card">
+        <span class="section-label">状态</span>
+        <strong id="engine-status">准备就绪</strong>
+        <span id="engine-detail">本地助手 · 检查中</span>
       </section>
 
-      <section class="video-picker">
-        <span class="section-label">VIDEO</span>
-        <select id="video-select" disabled>
-          <option value="">正在扫描视频…</option>
-        </select>
-        <label class="auto-toggle" for="translate-toggle">
-          <input type="checkbox" id="translate-toggle" checked>
-          <span>双语字幕：原文 + 中文翻译</span>
-        </label>
-        <label class="auto-toggle" for="auto-toggle">
-          <input type="checkbox" id="auto-toggle">
-          <span>自动分析：打开/刷新页面自动开始</span>
-        </label>
-      </section>
+      <label class="toggle-row" for="translate-toggle">
+        <input type="checkbox" id="translate-toggle" checked>
+        <span>双语字幕</span>
+      </label>
 
-      <section class="control-card">
-        <div class="control-copy">
-          <span class="section-label">CAPTION ENGINE</span>
-          <strong id="engine-status">准备就绪</strong>
-          <span id="engine-detail">批处理服务 · 检查中</span>
-        </div>
-        <button id="toggle" class="toggle" type="button">Analyze video</button>
-      </section>
+      <button id="toggle" class="toggle primary" type="button">分析字幕</button>
 
       <footer>
-        <span id="hint">选好视频后点击 Analyze video，整段分析完再加载字幕。</span>
+        <span id="hint"></span>
       </footer>
     </main>
     <script src="popup.js"></script>

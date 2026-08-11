@@ -60,7 +60,6 @@
   let processing = false;
   let lastErrorShown = "";
   let errorShown = false;
-  let analysisActive = false;
 
   const STAGE_TEXT = {
     downloading: "正在下载 / 提取声音",
@@ -86,7 +85,6 @@
       if (message.status === "analyzing") {
         errorShown = false;
         processing = true;
-        analysisActive = true;
         analysisDone = false;
         autoPlayedPartial = false;
         updateAnalyzeButton();
@@ -94,7 +92,6 @@
       if (message.status === "ready") {
         errorShown = false;
         processing = false;
-        analysisActive = false;
         subtitleReady = true;
         analysisDone = true;
         updateAnalyzeButton();
@@ -102,7 +99,6 @@
       if (message.status === "idle") {
         errorShown = false;
         processing = false;
-        analysisActive = false;
         subtitleReady = false;
         analysisDone = false;
         autoPlayedPartial = false;
@@ -142,7 +138,6 @@
     if (message.type === "CAPTURE_ERROR") {
       processing = false;
       errorShown = true;
-      analysisActive = false;
       const detail = message.error || "请检查视频来源和服务配置。";
       if (detail === lastErrorShown) return false;
       lastErrorShown = detail;
@@ -167,19 +162,6 @@
     chrome.runtime.sendMessage({ type: "SEEK_PRIORITIZE", timeMs: Math.round(video.currentTime * 1_000) }).catch(() => undefined);
   }, true);
 
-  // 自动分析：打开/刷新页面时通知后台
-  chrome.runtime.sendMessage({ type: "PAGE_READY" }).catch(() => undefined);
-  window.setTimeout(() => {
-    chrome.runtime.sendMessage({ type: "PAGE_READY" }).catch(() => undefined);
-  }, 3_000);
-  let lastPlayReadyAt = 0;
-  document.addEventListener("play", () => {
-    const now = Date.now();
-    if (now - lastPlayReadyAt < 2_000) return;
-    lastPlayReadyAt = now;
-    chrome.runtime.sendMessage({ type: "PAGE_READY" }).catch(() => undefined);
-  }, true);
-
   // 周期性上报播放位置，服务端据此只翻译当前位置附近的字幕
   let lastPositionSentAt = 0;
   let lastPositionSentMs = 0;
@@ -200,7 +182,6 @@
     cues = [];
     processing = false;
     errorShown = false;
-    analysisActive = false;
     subtitleReady = false;
     analysisDone = false;
     autoPlayedPartial = false;

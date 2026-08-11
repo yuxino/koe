@@ -23,7 +23,6 @@ async function handleMessage(message, sender) {
   if (message.type === "STOP_ANALYSIS") return stopAnalysis(Number(message.tabId));
   if (message.type === "LIST_VIDEOS") return listVideos(Number(message.tabId));
   if (message.type === "SEEK_PRIORITIZE") return seekPrioritize(Number(message.tabId), Number(message.timeMs));
-  if (message.type === "PAGE_READY") return handlePageReady(message, sender);
   if (message.type === "VIDEO_CHANGED") return handleVideoChanged(sender);
   if (message.type === "POSITION_UPDATE") return handlePositionUpdate(message, sender);
   if (message.type === "GET_STATE") {
@@ -37,21 +36,7 @@ async function handleVideoChanged(sender) {
   const tabId = sender?.tab?.id;
   if (!tabId) return { ok: true, skipped: true };
   if (tabStates.has(tabId)) await stopAnalysis(tabId);
-  let auto;
-  let translate;
-  try {
-    ({ koeAutoAnalyze: auto, koeTranslate: translate } = await chrome.storage.local.get(["koeAutoAnalyze", "koeTranslate"]));
-  } catch {
-    auto = undefined;
-  }
-  const pageUrl = String(sender.tab?.url || "");
-  if (!/^https?:/i.test(pageUrl)) return { ok: true, skipped: true };
-  if (!resolveAutoPreference(auto, pageUrl)) return { ok: true, skipped: true };
-  try {
-    return await analyzeVideo({ tabId, serverUrl: LOCAL_SERVER_URL, apiToken: "", pageUrl, translate });
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
-  }
+  return { ok: true, skipped: true };
 }
 
 async function handlePositionUpdate(message, sender) {
@@ -72,27 +57,6 @@ async function handlePositionUpdate(message, sender) {
     // 本地助手旧版本没有 position 接口时静默跳过
   }
   return { ok: true };
-}
-
-async function handlePageReady(message, sender) {
-  const tabId = sender?.tab?.id;
-  if (!tabId) return { ok: true, skipped: true };
-  let auto;
-  let translate;
-  try {
-    ({ koeAutoAnalyze: auto, koeTranslate: translate } = await chrome.storage.local.get(["koeAutoAnalyze", "koeTranslate"]));
-  } catch {
-    auto = undefined;
-  }
-  if (tabStates.has(tabId)) return { ok: true, skipped: true };
-  const pageUrl = String(sender.tab?.url || "");
-  if (!/^https?:/i.test(pageUrl)) return { ok: true, skipped: true };
-  if (!resolveAutoPreference(auto, pageUrl)) return { ok: true, skipped: true };
-  try {
-    return await analyzeVideo({ tabId, serverUrl: LOCAL_SERVER_URL, apiToken: "", pageUrl, translate });
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
-  }
 }
 
 async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl, selection, translate, startMs }) {
@@ -417,10 +381,6 @@ function isUsableMediaSource(video) {
   } catch {
     return true;
   }
-}
-
-function resolveAutoPreference(preference, pageUrl) {
-  return preference === true;
 }
 
 function videoScore(video) {
