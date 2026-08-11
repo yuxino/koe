@@ -110,7 +110,7 @@
         const alreadyStarted = activeVideo.currentTime > 0 || !activeVideo.paused;
         if (!alreadyStarted) {
           activeVideo.currentTime = 0;
-          activeVideo.play().catch(() => showStatus("字幕已就绪", "请点击视频播放", "READY"));
+          activeVideo.play().catch(() => undefined);
         }
       }
       startSubtitleClock();
