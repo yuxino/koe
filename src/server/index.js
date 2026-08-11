@@ -111,6 +111,14 @@ export function createServer(options = {}) {
         return;
       }
 
+      const cancelMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/cancel$/);
+      if (request.method === "POST" && cancelMatch) {
+        if (!isAuthorized(request, config.apiToken)) return unauthorized(response);
+        if (!jobs.cancel(cancelMatch[1])) return sendJson(response, 404, { error: "job_not_found" });
+        sendJson(response, 202, { ok: true });
+        return;
+      }
+
       const vttMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/vtt$/);
       if (request.method === "GET" && vttMatch) {
         if (!isAuthorized(request, config.apiToken)) return unauthorized(response);

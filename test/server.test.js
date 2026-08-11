@@ -168,6 +168,46 @@ test("reports in-flight job count in health", async (t) => {
   assert.equal(idle.activeJobs, 0);
 });
 
+test("cancels a running job and marks it cancelled", async (t) => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const app = createServer({
+    port: 0,
+    provider: "mock",
+    processJob: async (job, context) => {
+      await gate;
+      if (context.signal?.aborted) {
+        const error = new Error("job_cancelled");
+        error.name = "AbortError";
+        throw error;
+      }
+      return { lines: [], vtt: "WEBVTT\n\n" };
+    }
+  });
+  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
+  t.after(() => app.server.close());
+  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
+
+  const created = await fetch(`${baseUrl}/api/jobs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ upload: true, filename: "cancel.wav" })
+  }).then((response) => response.json());
+  await fetch(`${baseUrl}/api/jobs/${created.id}/source`, {
+    method: "POST",
+    headers: { "content-type": "audio/wav" },
+    body: Buffer.from("x")
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const cancelled = await fetch(`${baseUrl}/api/jobs/${created.id}/cancel`, { method: "POST" });
+  assert.equal(cancelled.status, 202);
+  release();
+
+  const job = await waitForJob(baseUrl, created.id);
+  assert.equal(job.status, "cancelled");
+});
+
 test("streams partial subtitles and accepts seek prioritization", async (t) => {
   const app = createServer({
     port: 0,
@@ -280,7 +320,7 @@ test("local relay mode relays an uploaded audio file", { skip: !ffmpegBin && "ff
 async function waitForJob(baseUrl, id) {
   for (let attempt = 0; attempt < 30; attempt += 1) {
     const job = await fetch(`${baseUrl}/api/jobs/${id}`).then((response) => response.json());
-    if (job.status === "ready" || job.status === "error") return job;
+    if (job.status === "ready" || job.status === "error" || job.status === "cancelled") return job;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error("job did not finish in time");

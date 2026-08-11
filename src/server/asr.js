@@ -93,7 +93,8 @@ export async function transcribeCompleteWav({
   control = null,
   onLines = null,
   fetchImpl = fetch,
-  onProgress = () => undefined
+  onProgress = () => undefined,
+  signal = null
 }) {
   const wav = parsePcmWav(audio);
   const bytesPerMs = wav.sampleRate * wav.channels * wav.bitsPerSample / 8 / 1_000;
@@ -116,6 +117,11 @@ export async function transcribeCompleteWav({
 
   async function worker() {
     while (pending.length) {
+      if (signal?.aborted) {
+        const error = new Error("job_cancelled");
+        error.name = "AbortError";
+        throw error;
+      }
       const index = pending.shift();
       const segment = segments[index];
       const runCall = acquire

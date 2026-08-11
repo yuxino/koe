@@ -53,7 +53,8 @@ export function createJobManager(options = {}) {
       createdAt: Date.now(),
       startedAt: null,
       completedAt: null,
-      running: false
+      running: false,
+      controller: new AbortController()
     };
     jobs.set(id, job);
     if (source.sourceUrl) {
@@ -152,6 +153,15 @@ export function createJobManager(options = {}) {
     activeCount += 1;
     job.startedAt = Date.now();
     let lastStatus = "";
+    const signal = job.controller.signal;
+    if (signal.aborted) {
+      job.status = "cancelled";
+      job.completedAt = Date.now();
+      job.running = false;
+      activeCount = Math.max(0, activeCount - 1);
+      await rm(job.directory, { recursive: true, force: true }).catch(() => undefined);
+      return;
+    }
     console.log(`[koe] job ${job.id.slice(0, 8)} started (${job.filename}, ${provider})`);
     try {
       const result = await processJob(job, {
@@ -161,6 +171,7 @@ export function createJobManager(options = {}) {
         ytdlpBin: options.ytdlpBin ?? (process.env.YTDLP_BIN !== undefined ? process.env.YTDLP_BIN : "yt-dlp"),
         remoteUrl: options.remoteUrl || process.env.KOE_REMOTE_URL || "",
         remoteToken: options.remoteToken || process.env.KOE_REMOTE_TOKEN || "",
+        signal,
         asrAcquire: () => asrSemaphore.acquire(),
         extractAcquire: () => extractSemaphore.acquire(),
         translateAcquire: () => translateSemaphore.acquire(),
@@ -174,6 +185,12 @@ export function createJobManager(options = {}) {
           job.stageDetail = String(detail || "");
         }
       });
+      if (signal.aborted) {
+        job.status = "cancelled";
+        job.completedAt = Date.now();
+        console.log(`[koe] job ${job.id.slice(0, 8)} cancelled`);
+        return;
+      }
       job.lines = result.lines || job.lines || [];
       job.vtt = result.vtt || toWebVtt(job.lines);
       if (job.sourceUrl && !job.startMs) {
@@ -192,10 +209,11 @@ export function createJobManager(options = {}) {
       job.completedAt = Date.now();
       console.log(`[koe] job ${job.id.slice(0, 8)} ready in ${((job.completedAt - job.startedAt) / 1_000).toFixed(1)}s (${job.lines.length} lines)`);
     } catch (error) {
-      job.status = "error";
-      job.error = error instanceof Error ? error.message : String(error);
+      const aborted = error?.name === "AbortError" || signal.aborted;
+      job.status = aborted ? "cancelled" : "error";
+      job.error = aborted ? "" : error instanceof Error ? error.message : String(error);
       job.completedAt = Date.now();
-      console.log(`[koe] job ${job.id.slice(0, 8)} error in ${((job.completedAt - job.startedAt) / 1_000).toFixed(1)}s: ${job.error}`);
+      console.log(`[koe] job ${job.id.slice(0, 8)} ${aborted ? "cancelled" : "error"} in ${((job.completedAt - job.startedAt) / 1_000).toFixed(1)}s: ${job.error}`);
     } finally {
       job.running = false;
       activeCount = Math.max(0, activeCount - 1);
@@ -216,6 +234,12 @@ export function createJobManager(options = {}) {
     get,
     getVtt,
     getPartial,
+    cancel: (id) => {
+      const job = jobs.get(String(id));
+      if (!job) return false;
+      job.controller?.abort();
+      return true;
+    },
     prioritize: (id, timeMs) => {
       const job = jobs.get(String(id));
       if (job?.prioritize) job.prioritize(Number(timeMs));
@@ -226,7 +250,7 @@ export function createJobManager(options = {}) {
   };
 }
 
-async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, remoteUrl, remoteToken, asrAcquire, extractAcquire, translateAcquire, updateProgress }) {
+async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, remoteUrl, remoteToken, signal, asrAcquire, extractAcquire, translateAcquire, updateProgress }) {
   if (provider === "mock") {
     updateProgress("analyzing", 0.75, "模拟识别");
     const lines = [{ startMs: 0, endMs: 3_000, text: `演示字幕 · ${job.filename}`, provider: "mock" }];
@@ -272,6 +296,7 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
         sourceUrl: job.sourceUrl,
         ffmpegBin,
         apiKey,
+        signal,
         asrAcquire,
         startMs: job.startMs,
         onLines: (segmentLines) => {
@@ -328,6 +353,7 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
   const lines = await transcribeCompleteWav({
     audio,
     apiKey,
+    signal,
     baseUrl: process.env.DASHSCOPE_BASE_URL,
     model: process.env.ASR_MODEL,
     segmentMs: Number(process.env.ASR_SEGMENT_SECONDS || 60) * 1_000,

@@ -179,6 +179,7 @@ async function seekPrioritize(tabId, timeMs) {
   if (!state?.jobId) return { ok: true, ignored: true };
   stopPolling(tabId);
   try {
+    void cancelJob(state);
     const source = await discoverVideoSource(tabId, state.pageUrl, undefined);
     if (!source?.hasVideo) return { ok: true, ignored: true };
     const job = await createJob({
@@ -245,8 +246,21 @@ async function stopAnalysis(tabId) {
   const state = tabStates.get(tabId);
   stopPolling(tabId);
   tabStates.delete(tabId);
+  if (state) void cancelJob(state);
   await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: "idle", progress: 0 }, state?.frameId);
   return { ok: true, state: { status: "idle" } };
+}
+
+async function cancelJob(state) {
+  if (!state?.serverUrl || !state?.jobId) return;
+  try {
+    await fetch(`${state.serverUrl}/api/jobs/${state.jobId}/cancel`, {
+      method: "POST",
+      headers: authHeaders(state.apiToken)
+    });
+  } catch {
+    // 本地助手旧版本没有 cancel 接口时静默跳过
+  }
 }
 
 function stopPolling(tabId) {

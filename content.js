@@ -121,6 +121,9 @@
     const now = Date.now();
     if (now - lastSeekAt < 1_500) return;
     lastSeekAt = now;
+    cues = [];
+    showingCue = false;
+    hide();
     chrome.runtime.sendMessage({ type: "SEEK_PRIORITIZE", timeMs: Math.round(video.currentTime * 1_000) }).catch(() => undefined);
   }, true);
 

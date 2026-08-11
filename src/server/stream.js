@@ -17,7 +17,8 @@ export async function streamExtractAndTranscribe({
   onLines,
   onPartial,
   onProgress,
-  startMs = 0
+  startMs = 0,
+  signal = null
 }) {
   if (!/^https?:/i.test(sourceUrl || "")) {
     throw new Error("页面没有可直接获取的视频地址，无法分析。");
@@ -36,9 +37,11 @@ export async function streamExtractAndTranscribe({
         },
         onPartial,
         onProgress,
-        startMs
+        startMs,
+        signal
       });
     } catch (error) {
+      if (error?.name === "AbortError") throw error;
       if (emittedLines > 0) {
         console.log(`[koe] realtime partial success with ${emittedLines} lines, keeping them`);
         return { chunks: emittedLines, realtime: true, partial: true };
@@ -54,7 +57,8 @@ export async function streamExtractAndTranscribe({
     asrAcquire,
     onLines,
     onProgress,
-    startMs
+    startMs,
+    signal
   });
 }
 
@@ -66,7 +70,8 @@ async function streamRealtimeTranscribe({
   onLines,
   onPartial,
   onProgress,
-  startMs = 0
+  startMs = 0,
+  signal = null
 }) {
   const startedAt = Date.now();
   const log = (message) => console.log(`[koe] realtime +${((Date.now() - startedAt) / 1_000).toFixed(1)}s ${message}`);
@@ -89,6 +94,11 @@ async function streamRealtimeTranscribe({
   });
   let sentenceCount = 0;
   let totalAudioMs = 0;
+  const onAbort = () => {
+    asr.terminate();
+    spawned.kill();
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
 
   try {
     await asr.connect({
@@ -126,6 +136,7 @@ async function streamRealtimeTranscribe({
       }
     }, 10_000);
     for await (const chunk of spawned.stream) {
+      if (signal?.aborted) throw abortError();
       if (!chunk.length) continue;
       lastAudioAt = Date.now();
       totalAudioMs += Math.round(chunk.length / 32);
@@ -137,6 +148,7 @@ async function streamRealtimeTranscribe({
     }
     clearInterval(stallWatchdog);
     if (frame.length) await asr.sendFrame(frame);
+    if (signal?.aborted) throw abortError();
     const failed = spawned.diagnostics.filter((entry) => entry.code !== 0);
     if (failed.length) {
       throw new Error(`realtime pipeline failed (${failed.map((entry) => `${entry.command} exit ${entry.code}`).join(", ")})`);
@@ -150,6 +162,7 @@ async function streamRealtimeTranscribe({
       asr.finish().then(() => true).catch(() => false),
       delay(finishTimeoutMs).then(() => false)
     ]);
+    if (signal?.aborted) throw abortError();
     if (!finished) {
       log(`finish timeout after ${(finishTimeoutMs / 1_000).toFixed(0)}s, keeping ${sentenceCount} lines`);
       asr.terminate();
@@ -162,6 +175,8 @@ async function streamRealtimeTranscribe({
     asr.terminate();
     spawned.kill();
     throw error;
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
   }
 }
 
@@ -173,7 +188,8 @@ async function streamChunkedTranscribe({
   asrAcquire,
   onLines,
   onProgress,
-  startMs = 0
+  startMs = 0,
+  signal = null
 }) {
   if (!/^https?:/i.test(sourceUrl || "")) {
     throw new Error("页面没有可直接获取的视频地址，无法分析。");
@@ -189,14 +205,17 @@ async function streamChunkedTranscribe({
     asrAcquire,
     onLines,
     onProgress,
-    startMs
+    startMs,
+    signal
   });
 }
 
-async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, onProgress, startMs = 0 }) {
+async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, onProgress, startMs = 0, signal = null }) {
   const startedAt = Date.now();
   const log = (message) => console.log(`[koe] stream +${((Date.now() - startedAt) / 1_000).toFixed(1)}s ${message}`);
-  const { stream, closePromise, diagnostics } = factory();
+  const spawned = factory();
+  const { stream, closePromise, diagnostics } = spawned;
+  signal?.addEventListener("abort", () => spawned.kill(), { once: true });
   const queue = [];
   const failures = [];
   const processed = new Set();
@@ -252,6 +271,7 @@ async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, on
 
   async function worker() {
     while (true) {
+      if (signal?.aborted) throw abortError();
       const item = queue.shift();
       if (!item) {
         if (collectorDone) break;
@@ -280,6 +300,7 @@ async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, on
   }
 
   await Promise.all([collector(), ...Array.from({ length: workerCount }, () => worker())]);
+  if (signal?.aborted) throw abortError();
   const failed = diagnostics.filter((entry) => entry.code !== 0);
   if (failed.length) {
     throw new Error(`stream pipeline failed (${failed.map((entry) => `${entry.command} exit ${entry.code}`).join(", ")})`);
@@ -388,4 +409,10 @@ function wrapWav(pcm, header) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function abortError() {
+  const error = new Error("job_cancelled");
+  error.name = "AbortError";
+  return error;
 }
