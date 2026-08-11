@@ -11,29 +11,31 @@
   <img src="https://img.shields.io/badge/node-20%2B-5FA04E" alt="Node.js 20 or later">
 </p>
 
-Koe（こえ / 声）是一个批处理优先的 Chrome 视频字幕项目。它会先取得完整视频，分析整段音频，生成带时间轴的 WebVTT，然后把字幕加载回原视频。
+Koe（こえ / 声）是一个本地媒体、批处理优先的 Chrome 视频字幕项目。视频下载和音频提取发生在你的电脑上；只有压缩后的音频会发送给 Koe API 做完整识别，完成后再把 WebVTT 加载回原视频。
 
 Koe 不做边播边听写，也不会在分析过程中显示不完整的中间字幕。项目参考了 `ding-frame` 的时间轴思路，优先使用 Fun-ASR 的词级时间戳，再按标点、停顿和句长整理字幕。
 
 ## 工作方式
 
 ```text
-视频来源 → 下载 / 上传 → FFmpeg 提取音频 → Fun-ASR 分段识别
-        → 合并完整时间轴 → 生成 WebVTT → 视频加载字幕
+浏览器真实媒体地址 → 本地 FFmpeg 提取音频 ─┐
+拿不到媒体地址时 → 本地 yt-dlp 兜底 ───────┤
+                                              ↓
+                       仅上传音频 → Fun-ASR 完整识别
+                       → 生成 WebVTT → 视频加载字幕
 ```
 
 ## 快速开始
 
-### 1. 启动服务端
+### 1. 安装本地助手
 
-需要 Node.js 20+；真实视频分析还需要 `ffmpeg` 和 `yt-dlp`。
+需要 Node.js 20+、`ffmpeg` 和 `yt-dlp`。`yt-dlp` 不是主流程，只在浏览器没有暴露真实媒体地址或直链失效时兜底。
 
 ```bash
-npm install
-cp .env.example .env
-# 编辑 .env，至少填入 DASHSCOPE_API_KEY
-npm start
+./scripts/install-local-helper.sh
 ```
+
+安装程序会把远端 Koe Token 保存到 macOS 钥匙串，创建用户级 LaunchAgent，并启动 `http://127.0.0.1:8787`。完整视频不会上传到 Koe API。
 
 ### 2. 加载 Chrome 插件
 
@@ -45,11 +47,11 @@ npm start
 4. 打开视频页面，点击 Koe
 5. 点击 `Analyze video`
 
-插件默认连接 `https://koe-api.yuxino.cn`。本地开发时，在插件面板将服务地址改为 `http://127.0.0.1:8787`。
+插件固定连接本机 `http://127.0.0.1:8787`，无需在面板选择文件、服务地址或 Token。
 
 ## 配置
 
-服务端配置写在 `.env` 中：
+线上识别服务配置写在 `.env` 中：
 
 ```env
 PORT=8787
@@ -62,7 +64,7 @@ FFMPEG_BIN=ffmpeg
 YTDLP_BIN=yt-dlp
 ```
 
-当服务端设置了 `KOE_API_TOKEN`，插件会把面板中保存的 token 以 Bearer Token 发送。真实 ASR Key 只保留在服务端，不会写入插件。
+真实 ASR Key 只保留在线上服务端。本地助手从 macOS 钥匙串读取远端 Koe Token；扩展面板不再保存或显示任何 Token。
 
 ## API
 
@@ -94,6 +96,7 @@ content.js          视频源发现与 VTT 时间轴覆盖层
 popup.*             批处理控制面板
 src/server/media.js 视频来源与 FFmpeg 适配
 src/server/jobs.js  异步分析任务
+src/server/relay.js 本地音频上传与远端任务中继
 src/server/asr.js   Fun-ASR 与完整音频分段
 src/server/transcript.js
                     字幕聚合与 WebVTT

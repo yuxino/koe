@@ -12,15 +12,20 @@ const MAX_VIDEO_BYTES = 512 * 1024 * 1024;
 
 export function createServer(options = {}) {
   const apiKey = options.apiKey ?? process.env.DASHSCOPE_API_KEY ?? "";
+  const remoteUrl = options.remoteUrl ?? process.env.KOE_REMOTE_URL ?? "";
+  const remoteToken = options.remoteToken ?? process.env.KOE_REMOTE_TOKEN ?? "";
+  const localRelay = Boolean(remoteUrl);
   const requestedProvider = options.provider || process.env.ASR_PROVIDER || (apiKey ? "dashscope" : "mock");
   const config = {
     port: Number(options.port ?? process.env.PORT ?? DEFAULT_PORT),
-    provider: requestedProvider === "dashscope" && !apiKey ? "mock" : requestedProvider,
+    provider: localRelay ? "relay" : requestedProvider === "dashscope" && !apiKey ? "mock" : requestedProvider,
     apiKey,
     apiToken: options.apiToken ?? process.env.KOE_API_TOKEN ?? "",
     ffmpegBin: options.ffmpegBin || process.env.FFMPEG_BIN || "ffmpeg",
     ytdlpBin: options.ytdlpBin || process.env.YTDLP_BIN || "yt-dlp",
-    mode: "batch"
+    remoteUrl,
+    remoteToken,
+    mode: localRelay ? "local-relay" : "batch"
   };
   const jobs = createJobManager({
     provider: config.provider,
@@ -28,7 +33,10 @@ export function createServer(options = {}) {
     processJob: options.processJob,
     tempRoot: options.tempRoot,
     ffmpegBin: config.ffmpegBin,
-    ytdlpBin: config.ytdlpBin
+    ytdlpBin: config.ytdlpBin,
+    remoteUrl: config.remoteUrl,
+    remoteToken: config.remoteToken,
+    allowAnyPage: localRelay
   });
 
   const server = createHttpServer(async (request, response) => {
@@ -47,6 +55,7 @@ export function createServer(options = {}) {
           service: "koe",
           provider: config.provider,
           mode: config.mode,
+          localProcessing: localRelay,
           authRequired: Boolean(config.apiToken),
           tools: { ffmpeg: config.ffmpegBin, ytDlp: config.ytdlpBin }
         });

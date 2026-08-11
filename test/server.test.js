@@ -84,6 +84,32 @@ test("protects batch jobs when an API token is configured", async (t) => {
   assert.equal(authorized.status, 202);
 });
 
+test("local relay mode accepts a generic public video page", async (t) => {
+  const app = createServer({
+    port: 0,
+    remoteUrl: "https://koe-api.example.test",
+    remoteToken: "remote-secret",
+    processJob: async () => ({ vtt: "WEBVTT\n\n", lines: [] })
+  });
+  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
+  t.after(() => app.server.close());
+  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
+
+  const health = await fetch(`${baseUrl}/health`).then((response) => response.json());
+  assert.equal(health.mode, "local-relay");
+  assert.equal(health.localProcessing, true);
+  assert.equal(health.provider, "relay");
+
+  const response = await fetch(`${baseUrl}/api/jobs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ pageUrl: "https://unknown.example/watch/1", filename: "generic-video" })
+  });
+  assert.equal(response.status, 202);
+  const created = await response.json();
+  assert.equal((await waitForJob(baseUrl, created.id)).status, "ready");
+});
+
 async function waitForJob(baseUrl, id) {
   for (let attempt = 0; attempt < 30; attempt += 1) {
     const job = await fetch(`${baseUrl}/api/jobs/${id}`).then((response) => response.json());

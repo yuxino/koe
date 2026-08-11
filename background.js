@@ -32,7 +32,7 @@ async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl }) {
   if (!source?.hasVideo) throw new Error("当前页面没有找到视频，请先打开包含视频的页面。");
 
   const jobPageUrl = source.pageUrl || pageUrl;
-  const sourceUrl = isExtractorPage(jobPageUrl) ? "" : source.sourceUrl || "";
+  const sourceUrl = source.sourceUrl || "";
   const job = await createJob({
     serverUrl,
     apiToken,
@@ -94,11 +94,16 @@ async function publishReady(state) {
 }
 
 async function createJob({ serverUrl, apiToken, pageUrl, sourceUrl, filename }) {
-  const response = await fetch(`${serverUrl}/api/jobs`, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...authHeaders(apiToken) },
-    body: JSON.stringify({ pageUrl, sourceUrl, filename })
-  });
+  let response;
+  try {
+    response = await fetch(`${serverUrl}/api/jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...authHeaders(apiToken) },
+      body: JSON.stringify({ pageUrl, sourceUrl, filename })
+    });
+  } catch {
+    throw new Error("Koe 本地助手未启动。请先运行本地安装程序。");
+  }
   return parseResponse(response, "创建分析任务失败");
 }
 
@@ -154,13 +159,4 @@ async function parseResponse(response, fallback) {
 
 function authHeaders(apiToken) {
   return apiToken ? { Authorization: `Bearer ${apiToken}` } : {};
-}
-
-function isExtractorPage(value) {
-  try {
-    const hostname = new URL(value).hostname.toLowerCase();
-    return hostname === "pornhub.com" || hostname.endsWith(".pornhub.com") || hostname === "xvideos.com" || hostname.endsWith(".xvideos.com");
-  } catch {
-    return false;
-  }
 }

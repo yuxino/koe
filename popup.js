@@ -1,7 +1,7 @@
-const DEFAULT_SERVER_URL = "https://koe-api.yuxino.cn";
+const LOCAL_SERVER_URL = "http://127.0.0.1:8787";
 let activeTab;
 let currentState = { status: "idle" };
-let healthState = { ok: false, provider: "", authRequired: false };
+let healthState = { ok: false, provider: "" };
 
 const elements = {
   tabHost: document.querySelector("#tab-host"),
@@ -9,25 +9,18 @@ const elements = {
   engineStatus: document.querySelector("#engine-status"),
   engineDetail: document.querySelector("#engine-detail"),
   toggle: document.querySelector("#toggle"),
-  serverUrl: document.querySelector("#server-url"),
-  apiToken: document.querySelector("#api-token"),
   batchMark: document.querySelector("#batch-mark"),
   hint: document.querySelector("#hint")
 };
 
 document.addEventListener("DOMContentLoaded", init);
 elements.toggle.addEventListener("click", analyze);
-elements.serverUrl.addEventListener("change", saveServerUrl);
-elements.apiToken.addEventListener("change", saveApiToken);
 
 async function init() {
   [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   elements.tabHost.textContent = hostName(activeTab?.url);
   elements.tabTitle.textContent = activeTab?.title || "当前标签页";
-  const stored = await chrome.storage.local.get({ serverUrl: DEFAULT_SERVER_URL, apiToken: "" });
-  elements.serverUrl.value = stored.serverUrl || DEFAULT_SERVER_URL;
-  elements.apiToken.value = stored.apiToken;
-  await checkHealth(elements.serverUrl.value);
+  await checkHealth();
   const response = await chrome.runtime.sendMessage({ type: "GET_STATE", tabId: activeTab?.id });
   currentState = response?.state || { status: "idle" };
   renderState();
@@ -35,10 +28,6 @@ async function init() {
 
 async function analyze() {
   if (!activeTab?.id) return;
-  const serverUrl = elements.serverUrl.value.trim().replace(/\/+$/, "");
-  const apiToken = elements.apiToken.value.trim();
-  await saveServerUrl();
-  await saveApiToken();
   elements.toggle.disabled = true;
   elements.engineStatus.textContent = "正在创建任务…";
   try {
@@ -46,8 +35,8 @@ async function analyze() {
       type: "ANALYZE_VIDEO",
       tabId: activeTab.id,
       pageUrl: activeTab.url,
-      serverUrl,
-      apiToken
+      serverUrl: LOCAL_SERVER_URL,
+      apiToken: ""
     });
     if (!response?.ok) throw new Error(response?.error || "无法创建分析任务。");
     currentState = response.state;
@@ -56,43 +45,29 @@ async function analyze() {
     const message = error instanceof Error ? error.message : String(error);
     elements.engineStatus.textContent = "创建失败";
     elements.engineDetail.textContent = message;
-    elements.hint.textContent = message.includes("KOE_API_TOKEN")
-      ? "这里需要 Koe 服务访问 Token，不是语音识别服务的 Key。"
-      : "请检查视频来源、服务地址和 API token。";
+    elements.hint.textContent = message.includes("本地助手")
+      ? "本地助手未连接，请重新运行 Koe 安装程序。"
+      : "请确认当前页面的视频已经开始播放。";
   } finally {
     elements.toggle.disabled = false;
   }
 }
 
-async function checkHealth(serverUrl) {
+async function checkHealth() {
   try {
-    const response = await fetch(`${serverUrl.replace(/\/+$/, "")}/health`);
+    const response = await fetch(`${LOCAL_SERVER_URL}/health`);
     const body = await response.json();
     if (!response.ok || !body.ok) throw new Error("unhealthy");
-    healthState = { ok: true, provider: body.provider || "mock", authRequired: Boolean(body.authRequired) };
-    elements.engineDetail.textContent = healthState.authRequired ? "批处理服务 · 需要 API token" : `批处理服务 · ${healthState.provider}`;
-    elements.hint.textContent = healthState.authRequired && !elements.apiToken.value
-      ? "请填入服务端 KOE_API_TOKEN 后分析当前视频。"
-      : body.provider === "mock"
+    healthState = { ok: true, provider: body.provider || "relay" };
+    elements.engineDetail.textContent = body.localProcessing ? "本地提取 · 整段识别" : `本地服务 · ${healthState.provider}`;
+    elements.hint.textContent = body.provider === "mock"
       ? "当前是 mock 模式；真实字幕需要 Fun-ASR。"
-      : "自动分析当前页面视频，整段完成后才加载字幕。";
+      : "视频留在本机，仅发送提取后的音频。";
   } catch {
-    healthState = { ok: false, provider: "", authRequired: false };
-    elements.engineDetail.textContent = "批处理服务 · 未连接";
-    elements.hint.textContent = "请检查服务地址和部署状态。";
+    healthState = { ok: false, provider: "" };
+    elements.engineDetail.textContent = "本地助手 · 未连接";
+    elements.hint.textContent = "请先启动 Koe 本地助手。";
   }
-}
-
-async function saveServerUrl() {
-  const serverUrl = elements.serverUrl.value.trim().replace(/\/+$/, "") || DEFAULT_SERVER_URL;
-  elements.serverUrl.value = serverUrl;
-  await chrome.storage.local.set({ serverUrl });
-}
-
-async function saveApiToken() {
-  const apiToken = elements.apiToken.value.trim();
-  elements.apiToken.value = apiToken;
-  await chrome.storage.local.set({ apiToken });
 }
 
 function renderState() {
@@ -106,22 +81,9 @@ function renderState() {
     ? "不会显示中间字幕 · 等待完整结果"
     : status === "ready"
       ? "完整 VTT 已加载到视频"
-      : healthState.authRequired && !elements.apiToken.value
-        ? "批处理服务 · 需要 API token"
-        : healthState.ok
-          ? `批处理服务 · ${healthState.provider}`
-          : "批处理服务 · 未连接";
-}
-
-function parseResponse(response, fallback) {
-  return response.json().catch(() => ({})).then((body) => {
-    if (!response.ok) throw new Error(body.error || `${fallback}（${response.status}）`);
-    return body;
-  });
-}
-
-function authHeaders(apiToken) {
-  return apiToken ? { Authorization: `Bearer ${apiToken}` } : {};
+      : healthState.ok
+        ? "本地提取 · 整段识别"
+        : "本地助手 · 未连接";
 }
 
 function hostName(value) {

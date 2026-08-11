@@ -17,11 +17,14 @@ export function isSupportedPageUrl(value) {
   }
 }
 
-export function validateSourceRequest({ pageUrl = "", sourceUrl = "" } = {}) {
+export function validateSourceRequest({ pageUrl = "", sourceUrl = "" } = {}, { allowAnyPage = false } = {}) {
   if (!pageUrl && !sourceUrl) throw new Error("video_source_required");
   if (pageUrl) assertHttpUrl(pageUrl, "page_url");
-  if (sourceUrl) assertPublicHttpUrl(sourceUrl, "source_url");
-  if (!sourceUrl && !isSupportedPageUrl(pageUrl)) {
+  if (sourceUrl) {
+    if (allowAnyPage) assertHttpUrl(sourceUrl, "source_url");
+    else assertPublicHttpUrl(sourceUrl, "source_url");
+  }
+  if (!sourceUrl && !allowAnyPage && !isSupportedPageUrl(pageUrl)) {
     throw new Error("unsupported_page_source");
   }
   return { pageUrl: String(pageUrl || ""), sourceUrl: String(sourceUrl || "") };
@@ -58,6 +61,43 @@ export async function acquireSource({ pageUrl, sourceUrl, outputDir, ytdlpBin = 
   return join(outputDir, files[0]);
 }
 
+export async function extractAudioLocally({
+  pageUrl,
+  sourceUrl,
+  outputDir,
+  ffmpegBin = "ffmpeg",
+  ytdlpBin = "yt-dlp",
+  run = runCommand
+}) {
+  await mkdir(outputDir, { recursive: true });
+  const outputPath = join(outputDir, "audio.m4a");
+
+  if (sourceUrl) {
+    try {
+      await normalizeToAac({
+        input: sourceUrl,
+        outputPath,
+        pageUrl,
+        ffmpegBin,
+        run
+      });
+      return outputPath;
+    } catch (error) {
+      if (!pageUrl) throw error;
+    }
+  }
+
+  const sourcePath = await acquireSource({
+    pageUrl,
+    sourceUrl: "",
+    outputDir,
+    ytdlpBin,
+    run
+  });
+  await normalizeToAac({ input: sourcePath, outputPath, ffmpegBin, run });
+  return outputPath;
+}
+
 export async function normalizeToWav({ inputPath, outputPath, ffmpegBin = "ffmpeg", run = runCommand }) {
   await run(ffmpegBin, [
     "-nostdin",
@@ -77,6 +117,35 @@ export async function normalizeToWav({ inputPath, outputPath, ffmpegBin = "ffmpe
     outputPath
   ]);
   return outputPath;
+}
+
+async function normalizeToAac({ input, outputPath, pageUrl = "", ffmpegBin, run }) {
+  const inputOptions = pageUrl
+    ? [
+        "-headers",
+        `Referer: ${pageUrl}\r\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/136 Safari/537.36\r\n`
+      ]
+    : [];
+  await run(ffmpegBin, [
+    "-nostdin",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-y",
+    ...inputOptions,
+    "-i",
+    input,
+    "-vn",
+    "-ac",
+    "1",
+    "-ar",
+    "16000",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "48k",
+    outputPath
+  ]);
 }
 
 export function runCommand(command, args, { cwd } = {}) {

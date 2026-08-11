@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { acquireSource, normalizeToWav, validateSourceRequest } from "./media.js";
+import { acquireSource, extractAudioLocally, normalizeToWav, validateSourceRequest } from "./media.js";
 import { transcribeCompleteWav } from "./asr.js";
+import { relayAudioToKoe } from "./relay.js";
 import { toWebVtt } from "./transcript.js";
 
 export function createJobManager(options = {}) {
@@ -17,7 +18,7 @@ export function createJobManager(options = {}) {
   async function createJob(input = {}) {
     const source = input.upload
       ? { pageUrl: String(input.pageUrl || ""), sourceUrl: "" }
-      : validateSourceRequest(input);
+      : validateSourceRequest(input, { allowAnyPage: Boolean(options.allowAnyPage) });
     const id = randomUUID();
     const directory = await mkdtemp(join(options.tempRoot || tmpdir(), "koe-job-"));
     const job = {
@@ -98,6 +99,8 @@ export function createJobManager(options = {}) {
         apiKey: options.apiKey || process.env.DASHSCOPE_API_KEY || "",
         ffmpegBin: options.ffmpegBin || process.env.FFMPEG_BIN || "ffmpeg",
         ytdlpBin: options.ytdlpBin || process.env.YTDLP_BIN || "yt-dlp",
+        remoteUrl: options.remoteUrl || process.env.KOE_REMOTE_URL || "",
+        remoteToken: options.remoteToken || process.env.KOE_REMOTE_TOKEN || "",
         updateProgress: (status, progress) => {
           job.status = status;
           job.progress = Math.max(0, Math.min(1, progress));
@@ -127,11 +130,30 @@ export function createJobManager(options = {}) {
   return { createJob, attachSource, attachSourceStream, get, getVtt, jobs };
 }
 
-async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, updateProgress }) {
+async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, remoteUrl, remoteToken, updateProgress }) {
   if (provider === "mock") {
     updateProgress("analyzing", 0.75);
     const lines = [{ startMs: 0, endMs: 3_000, text: `演示字幕 · ${job.filename}`, provider: "mock" }];
     return { lines, vtt: toWebVtt(lines) };
+  }
+
+  if (provider === "relay") {
+    updateProgress("downloading", 0.08);
+    const audioPath = await extractAudioLocally({
+      pageUrl: job.pageUrl,
+      sourceUrl: job.sourceUrl,
+      outputDir: job.directory,
+      ffmpegBin,
+      ytdlpBin
+    });
+    updateProgress("uploading_audio", 0.32);
+    const result = await relayAudioToKoe({
+      audioPath,
+      remoteUrl,
+      remoteToken,
+      onProgress: (value) => updateProgress("analyzing", 0.32 + Number(value || 0) * 0.64)
+    });
+    return { lines: [], vtt: result.vtt };
   }
 
   updateProgress("downloading", 0.1);
