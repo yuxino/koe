@@ -9,11 +9,15 @@ import { acquireSource, detectSpeechRanges, extractAudioLocally, normalizeToAac,
 import { transcribeCompleteWav } from "./asr.js";
 import { relayAudioToKoe } from "./relay.js";
 import { toWebVtt } from "./transcript.js";
+import { createSemaphore } from "./semaphore.js";
 
 export function createJobManager(options = {}) {
   const jobs = new Map();
   const provider = options.provider || "mock";
   const processJob = options.processJob || ((job, context) => processDefaultJob(job, context));
+  const asrSemaphore = createSemaphore(options.asrMaxConcurrent ?? process.env.ASR_MAX_CONCURRENT ?? 8);
+  const extractSemaphore = createSemaphore(options.localExtractConcurrency ?? process.env.LOCAL_EXTRACT_CONCURRENCY ?? 4);
+  let activeCount = 0;
 
   async function createJob(input = {}) {
     const source = input.upload
@@ -92,6 +96,7 @@ export function createJobManager(options = {}) {
   async function run(job) {
     if (job.running) return;
     job.running = true;
+    activeCount += 1;
     job.startedAt = Date.now();
     let lastStatus = "";
     console.log(`[koe] job ${job.id.slice(0, 8)} started (${job.filename}, ${provider})`);
@@ -103,6 +108,8 @@ export function createJobManager(options = {}) {
         ytdlpBin: options.ytdlpBin || process.env.YTDLP_BIN || "yt-dlp",
         remoteUrl: options.remoteUrl || process.env.KOE_REMOTE_URL || "",
         remoteToken: options.remoteToken || process.env.KOE_REMOTE_TOKEN || "",
+        asrAcquire: () => asrSemaphore.acquire(),
+        extractAcquire: () => extractSemaphore.acquire(),
         updateProgress: (status, progress) => {
           if (status !== lastStatus) {
             console.log(`[koe] job ${job.id.slice(0, 8)} -> ${status} at +${((Date.now() - job.startedAt) / 1_000).toFixed(1)}s`);
@@ -125,6 +132,7 @@ export function createJobManager(options = {}) {
       console.log(`[koe] job ${job.id.slice(0, 8)} error in ${((job.completedAt - job.startedAt) / 1_000).toFixed(1)}s: ${job.error}`);
     } finally {
       job.running = false;
+      activeCount = Math.max(0, activeCount - 1);
       if (job.directory) await rm(job.directory, { recursive: true, force: true }).catch(() => undefined);
     }
   }
@@ -135,10 +143,10 @@ export function createJobManager(options = {}) {
     return job;
   }
 
-  return { createJob, attachSource, attachSourceStream, get, getVtt, jobs };
+  return { createJob, attachSource, attachSourceStream, get, getVtt, jobs, get activeCount() { return activeCount; } };
 }
 
-async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, remoteUrl, remoteToken, updateProgress }) {
+async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, remoteUrl, remoteToken, asrAcquire, extractAcquire, updateProgress }) {
   if (provider === "mock") {
     updateProgress("analyzing", 0.75);
     const lines = [{ startMs: 0, endMs: 3_000, text: `演示字幕 · ${job.filename}`, provider: "mock" }];
@@ -153,14 +161,14 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
       await normalizeToAac({ input: job.sourcePath, outputPath: audioPath, ffmpegBin });
       updateProgress("downloading", 0.3);
     } else {
-      audioPath = await extractAudioLocally({
+      audioPath = await withSemaphore(extractAcquire, () => extractAudioLocally({
         pageUrl: job.pageUrl,
         sourceUrl: job.sourceUrl,
         outputDir: job.directory,
         ffmpegBin,
         ytdlpBin,
         onProgress: (value) => updateProgress("downloading", 0.08 + Number(value || 0) * 0.22)
-      });
+      }));
     }
     updateProgress("uploading_audio", 0.32);
     const result = await relayAudioToKoe({
@@ -173,23 +181,23 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
   }
 
   updateProgress("downloading", 0.1);
-  const sourcePath = job.sourcePath || await acquireSource({
+  const sourcePath = job.sourcePath || await withSemaphore(extractAcquire, () => acquireSource({
     pageUrl: job.pageUrl,
     sourceUrl: job.sourceUrl,
     outputDir: job.directory,
     ytdlpBin
-  });
+  }));
   updateProgress("analyzing", 0.35);
   const wavPath = join(job.directory, "audio.wav");
-  await normalizeToWav({
+  await withSemaphore(extractAcquire, () => normalizeToWav({
     inputPath: sourcePath,
     outputPath: wavPath,
     ffmpegBin
-  });
+  }));
   const audio = await readFile(wavPath);
   let speechRangesMs = null;
   if (process.env.ASR_VAD !== "0") {
-    const rangesSec = await detectSpeechRanges({ inputPath: wavPath, ffmpegBin });
+    const rangesSec = await withSemaphore(extractAcquire, () => detectSpeechRanges({ inputPath: wavPath, ffmpegBin }));
     speechRangesMs = rangesSec.map(([startSec, endSec]) => [Math.round(startSec * 1_000), Math.round(endSec * 1_000)]);
   }
   const lines = await transcribeCompleteWav({
@@ -198,11 +206,22 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
     baseUrl: process.env.DASHSCOPE_BASE_URL,
     model: process.env.ASR_MODEL,
     segmentMs: Number(process.env.ASR_SEGMENT_SECONDS || 60) * 1_000,
-    concurrency: Number(process.env.ASR_CONCURRENCY || 5),
+    concurrency: Number(process.env.ASR_CONCURRENCY || 8),
     speechRangesMs,
+    acquire: asrAcquire,
     onProgress: (value) => updateProgress("analyzing", 0.35 + value * 0.6)
   });
   return { lines, vtt: toWebVtt(lines) };
+}
+
+async function withSemaphore(acquire, task) {
+  if (!acquire) return task();
+  const release = await acquire();
+  try {
+    return await task();
+  } finally {
+    release();
+  }
 }
 
 function publicJob(job) {

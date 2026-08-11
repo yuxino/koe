@@ -88,6 +88,42 @@ test("protects batch jobs when an API token is configured", async (t) => {
   assert.equal(authorized.status, 202);
 });
 
+test("reports in-flight job count in health", async (t) => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const app = createServer({
+    port: 0,
+    provider: "mock",
+    processJob: async () => {
+      await gate;
+      return { vtt: "WEBVTT\n\n", lines: [] };
+    }
+  });
+  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
+  t.after(() => app.server.close());
+  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
+
+  const created = await fetch(`${baseUrl}/api/jobs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ upload: true, filename: "busy.wav" })
+  }).then((response) => response.json());
+  await fetch(`${baseUrl}/api/jobs/${created.id}/source`, {
+    method: "POST",
+    headers: { "content-type": "audio/wav" },
+    body: Buffer.from("x")
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const busy = await fetch(`${baseUrl}/health`).then((response) => response.json());
+  assert.equal(busy.activeJobs, 1);
+
+  release();
+  assert.equal((await waitForJob(baseUrl, created.id)).status, "ready");
+  const idle = await fetch(`${baseUrl}/health`).then((response) => response.json());
+  assert.equal(idle.activeJobs, 0);
+});
+
 test("local relay mode accepts a generic public video page", async (t) => {
   const app = createServer({
     port: 0,

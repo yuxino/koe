@@ -33,6 +33,35 @@ test("maps Fun-ASR word timestamps back onto the tab timeline", async () => {
   }]);
 });
 
+test("retries rate-limited ASR requests with backoff", async () => {
+  let calls = 0;
+  const lines = await transcribeWav({
+    audio: Buffer.from("RIFF-test"),
+    startMs: 0,
+    endMs: 1_000,
+    apiKey: "test-key",
+    fetchImpl: async () => {
+      calls += 1;
+      if (calls === 1) return { ok: false, status: 429, json: async () => ({ message: "throttled" }) };
+      return {
+        ok: true,
+        json: async () => ({
+          output: {
+            output: {
+              sentence: {
+                words: [{ begin_time: 0, end_time: 200, text: "好", punctuation: "" }]
+              }
+            }
+          }
+        })
+      };
+    }
+  });
+  assert.equal(calls, 2);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].text, "好");
+});
+
 test("transcribes a complete PCM WAV in internal segments while keeping absolute offsets", async () => {
   const audio = createWav(16_000 * 2);
   const starts = [];

@@ -57,6 +57,7 @@ export function createServer(options = {}) {
           mode: config.mode,
           localProcessing: localRelay,
           authRequired: Boolean(config.apiToken),
+          activeJobs: jobs.activeCount,
           tools: { ffmpeg: config.ffmpegBin, ytDlp: config.ytdlpBin }
         });
         return;

@@ -65,6 +65,16 @@ jobs:
             "cd '$DEPLOY_PATH' \
               && npm ci --omit=dev \
               && if pm2 describe koe-api >/dev/null 2>&1; then \
+                   active_jobs=\$(curl --silent http://127.0.0.1:$DEPLOY_APP_PORT/health | grep -o '\"activeJobs\":[0-9]*' | cut -d: -f2); \
+                   if [ -n \"\$active_jobs\" ] && [ \"\$active_jobs\" -gt 0 ]; then \
+                     echo \"waiting for \$active_jobs in-flight jobs before restart\"; \
+                     wait_attempt=0; \
+                     until [ \"\$(curl --silent http://127.0.0.1:$DEPLOY_APP_PORT/health | grep -o '\"activeJobs\":[0-9]*' | cut -d: -f2)\" = \"0\" ]; do \
+                       wait_attempt=\$((wait_attempt + 1)); \
+                       if [ \"\$wait_attempt\" -ge 300 ]; then echo 'timed out waiting for jobs; restarting anyway'; break; fi; \
+                       sleep 2; \
+                     done; \
+                   fi; \
                    pm2 restart koe-api --update-env; \
                  else \
                    pm2 start src/server/start.js --name koe-api --cwd '$DEPLOY_PATH'; \

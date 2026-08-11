@@ -10,58 +10,75 @@ export async function transcribeWav({
   baseUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1",
   model = DEFAULT_MODEL,
   timeoutMs = 120_000,
-  fetchImpl = fetch
+  fetchImpl = fetch,
+  retries = 2
 }) {
   if (!apiKey) throw new Error("DASHSCOPE_API_KEY is not configured.");
 
-  const response = await fetchImpl(
-    `${nativeBaseUrl(baseUrl)}/services/aigc/multimodal-generation/generation`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "content-type": "application/json",
-        "X-DashScope-SSE": "disable"
-      },
-      body: JSON.stringify({
-        model,
-        input: {
-          messages: [{
-            role: "user",
-            content: [{
-              type: "input_audio",
-              input_audio: {
-                data: `data:audio/wav;base64,${audio.toString("base64")}`
-              }
-            }]
-          }]
+  const url = `${nativeBaseUrl(baseUrl)}/services/aigc/multimodal-generation/generation`;
+  const payload = JSON.stringify({
+    model,
+    input: {
+      messages: [{
+        role: "user",
+        content: [{
+          type: "input_audio",
+          input_audio: {
+            data: `data:audio/wav;base64,${audio.toString("base64")}`
+          }
+        }]
+      }]
+    },
+    parameters: { format: "wav", sample_rate: 16_000 }
+  });
+
+  let lastError = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    if (attempt > 0) await delay(500 * 2 ** (attempt - 1));
+    let response;
+    try {
+      response = await fetchImpl(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "content-type": "application/json",
+          "X-DashScope-SSE": "disable"
         },
-        parameters: { format: "wav", sample_rate: 16_000 }
-      }),
-      signal: AbortSignal.timeout(timeoutMs)
+        body: payload,
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+    } catch (error) {
+      lastError = error;
+      if (attempt < retries) continue;
+      throw error;
     }
-  );
 
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const message = body?.output?.message || body?.message || body?.code || `ASR request failed: ${response.status}`;
-    if (/ASR_RESPONSE_HAVE_NO_WORDS/.test(String(message))) return [];
-    throw new Error(String(message));
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const message = body?.output?.message || body?.message || body?.code || `ASR request failed: ${response.status}`;
+      if (/ASR_RESPONSE_HAVE_NO_WORDS/.test(String(message))) return [];
+      if ((response.status === 429 || response.status >= 500) && attempt < retries) {
+        lastError = new Error(String(message));
+        continue;
+      }
+      throw new Error(String(message));
+    }
+
+    const sentence = body?.output?.output?.sentence || body?.output?.sentence;
+    const words = Array.isArray(sentence?.words) ? sentence.words : [];
+    if (!words.length) {
+      const text = compactTranscriptText(sentence?.text);
+      return text ? [{ startMs, endMs: Math.max(startMs, endMs), text, provider: "dashscope" }] : [];
+    }
+
+    return groupWordsToSubtitles(words).map((line) => ({
+      ...line,
+      startMs: startMs + line.startMs,
+      endMs: Math.min(endMs, startMs + line.endMs),
+      provider: "dashscope"
+    }));
   }
-
-  const sentence = body?.output?.output?.sentence || body?.output?.sentence;
-  const words = Array.isArray(sentence?.words) ? sentence.words : [];
-  if (!words.length) {
-    const text = compactTranscriptText(sentence?.text);
-    return text ? [{ startMs, endMs: Math.max(startMs, endMs), text, provider: "dashscope" }] : [];
-  }
-
-  return groupWordsToSubtitles(words).map((line) => ({
-    ...line,
-    startMs: startMs + line.startMs,
-    endMs: Math.min(endMs, startMs + line.endMs),
-    provider: "dashscope"
-  }));
+  throw lastError || new Error("ASR request failed");
 }
 
 export async function transcribeCompleteWav({
@@ -72,6 +89,7 @@ export async function transcribeCompleteWav({
   segmentMs = 60_000,
   concurrency = 5,
   speechRangesMs = null,
+  acquire = null,
   fetchImpl = fetch,
   onProgress = () => undefined
 }) {
@@ -89,15 +107,17 @@ export async function transcribeCompleteWav({
       const index = cursor;
       cursor += 1;
       const segment = segments[index];
-      const lines = await transcribeWav({
-        audio: segment.audio,
-        startMs: segment.startMs,
-        endMs: segment.endMs,
-        apiKey,
-        baseUrl,
-        model,
-        fetchImpl
-      });
+      const runCall = acquire
+        ? async () => {
+            const release = await acquire();
+            try {
+              return await transcribeWav({ audio: segment.audio, startMs: segment.startMs, endMs: segment.endMs, apiKey, baseUrl, model, fetchImpl });
+            } finally {
+              release();
+            }
+          }
+        : () => transcribeWav({ audio: segment.audio, startMs: segment.startMs, endMs: segment.endMs, apiKey, baseUrl, model, fetchImpl });
+      const lines = await runCall();
       results[index] = lines;
       completed += 1;
       onProgress(Math.min(1, completed / Math.max(1, segments.length)));
@@ -201,4 +221,8 @@ function nativeBaseUrl(compatibleBaseUrl) {
     return cleaned.replace(/\/compatible-mode\/v1$/, "/api/v1");
   }
   return "https://dashscope.aliyuncs.com/api/v1";
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
