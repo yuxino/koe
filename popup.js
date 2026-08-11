@@ -65,6 +65,14 @@ async function analyze() {
   }
   const selection = elements.videoSelect?.value || undefined;
   const translate = elements.translateToggle.checked;
+  const selectedVideo = selection
+    ? videos.find((video) => `${video.frameId}:${video.index}` === selection)
+    : videos[0];
+  if (selectedVideo && (!selectedVideo.sourceUrl || selectedVideo.sourceUrl === activeTab.url)) {
+    elements.captureStatus.textContent = "这个网站拿不到视频直链，已自动切换为采集模式";
+    await toggleCapture();
+    return;
+  }
   elements.toggle.disabled = true;
   elements.engineStatus.textContent = "正在创建任务…";
   try {
