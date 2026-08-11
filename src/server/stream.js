@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { transcribeCompleteWav } from "./asr.js";
-import { detectSpeechRanges, MEDIA_USER_AGENT } from "./media.js";
+import { transcribeWav } from "./asr.js";
+import { MEDIA_USER_AGENT } from "./media.js";
 
 const CHUNK_SECONDS = Math.max(10, Number(process.env.KOE_STREAM_CHUNK_SECONDS || 30));
 
@@ -24,6 +24,7 @@ export async function streamExtractAndTranscribe({
   const processed = new Set();
   let offsetMs = 0;
   let chunkCount = 0;
+  const failures = [];
   let closed = false;
   void closePromise.then(() => { closed = true; });
 
@@ -33,40 +34,62 @@ export async function streamExtractAndTranscribe({
       if (processed.has(index)) continue;
       processed.add(index);
       chunkCount += 1;
+      let audio;
       try {
-        const audio = await readFile(path);
-        let speechRangesMs = null;
-        if (process.env.ASR_VAD !== "0") {
-          const rangesSec = await detectSpeechRanges({ inputPath: path, ffmpegBin });
-          speechRangesMs = rangesSec.map(([startSec, endSec]) => [Math.round(startSec * 1_000), Math.round(endSec * 1_000)]);
-        }
-        await rm(path, { force: true }).catch(() => undefined);
-        const chunkMs = Math.max(1_000, Math.round((audio.length - 44) / 32));
-        const lines = await transcribeCompleteWav({
-          audio,
-          apiKey,
-          segmentMs: CHUNK_SECONDS * 1_000,
-          concurrency: 2,
-          speechRangesMs,
-          acquire: asrAcquire
-        });
-        const offsetLines = lines.map((line) => ({
+        audio = await readFile(path);
+      } catch {
+        continue;
+      }
+      await rm(path, { force: true }).catch(() => undefined);
+      const chunkMs = Math.max(1_000, Math.round((audio.length - 44) / 32));
+      const chunkStartMs = offsetMs;
+      offsetMs += chunkMs;
+      try {
+        const lines = await transcribeChunk(audio, chunkMs, apiKey, asrAcquire);
+        onLines(lines.map((line) => ({
           ...line,
-          startMs: line.startMs + offsetMs,
-          endMs: line.endMs + offsetMs
-        }));
-        onLines(offsetLines);
-        offsetMs += chunkMs;
+          startMs: line.startMs + chunkStartMs,
+          endMs: line.endMs + chunkStartMs
+        })));
         onProgress(Math.min(1, chunkCount * 0.05));
-        console.log(`[koe] stream chunk ${index} done (${offsetLines.length} lines)`);
+        console.log(`[koe] stream chunk ${index} done`);
       } catch (error) {
-        console.log(`[koe] stream chunk ${index} skipped: ${error instanceof Error ? error.message : String(error)}`);
+        console.log(`[koe] stream chunk ${index} failed, will retry: ${error instanceof Error ? error.message : String(error)}`);
+        failures.push({ index, audio, chunkStartMs });
       }
     }
     if (closed) break;
     await delay(400);
   }
+  for (const failure of failures) {
+    try {
+      const lines = await transcribeChunk(failure.audio, chunkMsOf(failure.audio), apiKey, asrAcquire);
+      onLines(lines.map((line) => ({
+        ...line,
+        startMs: line.startMs + failure.chunkStartMs,
+        endMs: line.endMs + failure.chunkStartMs
+      })));
+      console.log(`[koe] stream chunk ${failure.index} recovered`);
+    } catch (error) {
+      throw new Error(`stream chunk ${failure.index} failed after retry: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   return { chunks: chunkCount };
+}
+
+async function transcribeChunk(audio, chunkMs, apiKey, asrAcquire) {
+  const run = () => transcribeWav({ audio, startMs: 0, endMs: chunkMs, apiKey });
+  if (!asrAcquire) return run();
+  const release = await asrAcquire();
+  try {
+    return await run();
+  } finally {
+    release();
+  }
+}
+
+function chunkMsOf(audio) {
+  return Math.max(1_000, Math.round((audio.length - 44) / 32));
 }
 
 function startPipeline({ pageUrl, sourceUrl, segDir, ffmpegBin, ytdlpBin }) {

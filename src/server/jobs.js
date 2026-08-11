@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { detectSpeechRanges, extractAudioLocally, normalizeToAac, normalizeToWav, validateSourceRequest } from "./media.js";
+import { extractAudioLocally, normalizeToAac, normalizeToWav, validateSourceRequest } from "./media.js";
 import { transcribeCompleteWav } from "./asr.js";
 import { relayAudioToKoe } from "./relay.js";
 import { toWebVtt } from "./transcript.js";
@@ -271,11 +271,6 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
     ffmpegBin
   }));
   const audio = await readFile(wavPath);
-  let speechRangesMs = null;
-  if (process.env.ASR_VAD !== "0") {
-    const rangesSec = await withSemaphore(extractAcquire, () => detectSpeechRanges({ inputPath: wavPath, ffmpegBin }));
-    speechRangesMs = rangesSec.map(([startSec, endSec]) => [Math.round(startSec * 1_000), Math.round(endSec * 1_000)]);
-  }
   const control = {};
   job.prioritize = (timeMs) => control.setPriority?.(Number(timeMs));
   const lines = await transcribeCompleteWav({
@@ -285,7 +280,6 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
     model: process.env.ASR_MODEL,
     segmentMs: Number(process.env.ASR_SEGMENT_SECONDS || 60) * 1_000,
     concurrency: Number(process.env.ASR_CONCURRENCY || 8),
-    speechRangesMs,
     acquire: asrAcquire,
     control,
     onProgress: (value, detail) => updateProgress("analyzing", 0.35 + value * 0.6, detail || "整段识别中"),
