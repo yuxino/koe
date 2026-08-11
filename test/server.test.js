@@ -125,6 +125,45 @@ test("reports in-flight job count in health", async (t) => {
   assert.equal(idle.activeJobs, 0);
 });
 
+test("streams partial subtitles and accepts seek prioritization", async (t) => {
+  const app = createServer({
+    port: 0,
+    provider: "mock",
+    processJob: async (job) => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      job.lines.push({ startMs: 0, endMs: 1_000, text: "你好" });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      return { lines: job.lines, vtt: "WEBVTT\n\n1\n00:00:00.000 --> 00:00:01.000\n你好\n" };
+    }
+  });
+  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
+  t.after(() => app.server.close());
+  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
+
+  const created = await fetch(`${baseUrl}/api/jobs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ upload: true, filename: "progressive.wav" })
+  }).then((response) => response.json());
+  await fetch(`${baseUrl}/api/jobs/${created.id}/source`, {
+    method: "POST",
+    headers: { "content-type": "audio/wav" },
+    body: Buffer.from("x")
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  const partial = await fetch(`${baseUrl}/api/jobs/${created.id}/partial`).then((response) => response.json());
+  assert.equal(partial.lineCount, 1);
+  assert.match(partial.vtt, /你好/);
+
+  const prioritize = await fetch(`${baseUrl}/api/jobs/${created.id}/prioritize`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ timeMs: 12_000 })
+  });
+  assert.equal(prioritize.status, 202);
+});
+
 test("local relay mode accepts a generic public video page", async (t) => {
   const app = createServer({
     port: 0,

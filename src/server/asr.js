@@ -90,6 +90,8 @@ export async function transcribeCompleteWav({
   concurrency = 16,
   speechRangesMs = null,
   acquire = null,
+  control = null,
+  onLines = null,
   fetchImpl = fetch,
   onProgress = () => undefined
 }) {
@@ -99,13 +101,22 @@ export async function transcribeCompleteWav({
     ? buildSpeechSegments(speechRangesMs, segmentMs, wav, bytesPerMs)
     : buildFixedSegments(wav, segmentMs, bytesPerMs);
   const results = new Array(segments.length);
-  let cursor = 0;
+  const pending = segments.map((_segment, index) => index);
   let completed = 0;
 
+  if (control) {
+    control.setPriority = (targetMs) => {
+      const target = Number(targetMs) || 0;
+      pending.sort((left, right) => (
+        Math.abs(segments[left].startMs - target) - Math.abs(segments[right].startMs - target)
+      ));
+    };
+    if (onLines) control.onLines = onLines;
+  }
+
   async function worker() {
-    while (cursor < segments.length) {
-      const index = cursor;
-      cursor += 1;
+    while (pending.length) {
+      const index = pending.shift();
       const segment = segments[index];
       const runCall = acquire
         ? async () => {
@@ -121,6 +132,7 @@ export async function transcribeCompleteWav({
       results[index] = lines;
       completed += 1;
       onProgress(Math.min(1, completed / Math.max(1, segments.length)), `第 ${completed}/${segments.length} 段`);
+      control?.onLines?.(lines, segment);
     }
   }
 

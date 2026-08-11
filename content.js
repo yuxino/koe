@@ -36,6 +36,7 @@
   let activeVideo;
   let subtitleTimer;
   let subtitleReady = false;
+  let analysisDone = false;
 
   const STAGE_TEXT = {
     downloading: "正在下载 / 提取声音",
@@ -45,7 +46,7 @@
   const STAGE_HINT = {
     downloading: "视频越大这一步越久；长时间不动通常是网站限速",
     uploading_audio: "视频不出本机，只上传音频",
-    analyzing: "整段识别中，完成后自动加载字幕"
+    analyzing: "已识别部分即时显示 · 跳到哪优先补哪"
   };
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -59,6 +60,7 @@
     }
     if (message.type === "JOB_STATUS") {
       if (message.status === "analyzing") {
+        analysisDone = false;
         if (message.jobStatus === "downloading" && !message.hasDuration) {
           showStatus("正在下载 / 提取声音…", message.stageDetail || STAGE_HINT.downloading, "ANALYZING");
         } else {
@@ -69,10 +71,12 @@
       }
       if (message.status === "ready") {
         subtitleReady = true;
+        analysisDone = true;
         showStatus("字幕已就绪", "点击播放后自动显示字幕", "READY");
       }
       if (message.status === "idle") {
         subtitleReady = false;
+        analysisDone = false;
         hide();
       }
       return false;
@@ -81,12 +85,24 @@
       cues = parseVtt(message.vtt || "");
       activeVideo = findVideo();
       subtitleReady = true;
+      analysisDone = true;
       if (activeVideo) {
-        activeVideo.currentTime = 0;
-        activeVideo.play().catch(() => showStatus("字幕已就绪", "请点击视频播放", "READY"));
+        const alreadyStarted = activeVideo.currentTime > 0 || !activeVideo.paused;
+        if (!alreadyStarted) {
+          activeVideo.currentTime = 0;
+          activeVideo.play().catch(() => showStatus("字幕已就绪", "请点击视频播放", "READY"));
+        } else {
+          showStatus("字幕已就绪", "已补全当前进度", "READY");
+        }
       } else {
         showStatus("字幕已就绪", "请回到视频页面", "READY");
       }
+      startSubtitleClock();
+      return false;
+    }
+    if (message.type === "PARTIAL_SUBTITLES") {
+      cues = parseVtt(message.vtt || "");
+      subtitleReady = true;
       startSubtitleClock();
       return false;
     }
@@ -96,6 +112,16 @@
     }
     return false;
   });
+
+  let lastSeekAt = 0;
+  document.addEventListener("seeked", () => {
+    const video = activeVideo || findVideo();
+    if (!video) return;
+    const now = Date.now();
+    if (now - lastSeekAt < 1_500) return;
+    lastSeekAt = now;
+    chrome.runtime.sendMessage({ type: "SEEK_PRIORITIZE", timeMs: Math.round(video.currentTime * 1_000) }).catch(() => undefined);
+  }, true);
 
   function findVideo() {
     return [...document.querySelectorAll("video")]
@@ -122,7 +148,7 @@
       const timeMs = activeVideo.currentTime * 1_000;
       const cue = cues.find((item) => timeMs >= item.startMs && timeMs < item.endMs);
       if (cue) show(cue.text, `KOE · ${formatTime(cue.startMs)}`, "READY");
-      else if (activeVideo.paused && subtitleReady) showStatus("字幕已就绪", "点击播放后自动显示字幕", "READY");
+      else if (activeVideo.paused && analysisDone) showStatus("字幕已就绪", "点击播放后自动显示字幕", "READY");
       else hide();
     }, 100);
   }

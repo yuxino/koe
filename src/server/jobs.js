@@ -18,6 +18,7 @@ export function createJobManager(options = {}) {
   const processJob = options.processJob || ((job, context) => processDefaultJob(job, context));
   const asrSemaphore = createSemaphore(options.asrMaxConcurrent ?? process.env.ASR_MAX_CONCURRENT ?? 16);
   const extractSemaphore = createSemaphore(options.localExtractConcurrency ?? process.env.LOCAL_EXTRACT_CONCURRENCY ?? 4);
+  const translateSemaphore = createSemaphore(Number(options.translateConcurrency ?? (process.env.KOE_TRANSLATE_CONCURRENCY || 4)));
   let activeCount = 0;
 
   async function createJob(input = {}) {
@@ -98,6 +99,16 @@ export function createJobManager(options = {}) {
     return job.vtt;
   }
 
+  function getPartial(id) {
+    const job = getJobOrThrow(id);
+    return {
+      status: job.status,
+      progress: job.progress,
+      lineCount: job.lines.length,
+      vtt: toWebVtt(job.lines)
+    };
+  }
+
   async function run(job) {
     if (job.running) return;
     job.running = true;
@@ -115,6 +126,7 @@ export function createJobManager(options = {}) {
         remoteToken: options.remoteToken || process.env.KOE_REMOTE_TOKEN || "",
         asrAcquire: () => asrSemaphore.acquire(),
         extractAcquire: () => extractSemaphore.acquire(),
+        translateAcquire: () => translateSemaphore.acquire(),
         updateProgress: (status, progress, detail = "") => {
           if (status !== lastStatus) {
             console.log(`[koe] job ${job.id.slice(0, 8)} -> ${status} at +${((Date.now() - job.startedAt) / 1_000).toFixed(1)}s`);
@@ -125,7 +137,7 @@ export function createJobManager(options = {}) {
           job.stageDetail = String(detail || "");
         }
       });
-      job.lines = result.lines || [];
+      job.lines = result.lines || job.lines || [];
       job.vtt = result.vtt || toWebVtt(job.lines);
       job.status = "ready";
       job.progress = 1;
@@ -149,10 +161,24 @@ export function createJobManager(options = {}) {
     return job;
   }
 
-  return { createJob, attachSource, attachSourceStream, get, getVtt, jobs, get activeCount() { return activeCount; } };
+  return {
+    createJob,
+    attachSource,
+    attachSourceStream,
+    get,
+    getVtt,
+    getPartial,
+    prioritize: (id, timeMs) => {
+      const job = jobs.get(String(id));
+      if (job?.prioritize) job.prioritize(Number(timeMs));
+      return Boolean(job);
+    },
+    jobs,
+    get activeCount() { return activeCount; }
+  };
 }
 
-async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, remoteUrl, remoteToken, asrAcquire, extractAcquire, updateProgress }) {
+async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, remoteUrl, remoteToken, asrAcquire, extractAcquire, translateAcquire, updateProgress }) {
   if (provider === "mock") {
     updateProgress("analyzing", 0.75, "模拟识别");
     const lines = [{ startMs: 0, endMs: 3_000, text: `演示字幕 · ${job.filename}`, provider: "mock" }];
@@ -218,7 +244,10 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
     const rangesSec = await withSemaphore(extractAcquire, () => detectSpeechRanges({ inputPath: wavPath, ffmpegBin }));
     speechRangesMs = rangesSec.map(([startSec, endSec]) => [Math.round(startSec * 1_000), Math.round(endSec * 1_000)]);
   }
-  let lines = await transcribeCompleteWav({
+  const control = {};
+  job.prioritize = (timeMs) => control.setPriority?.(Number(timeMs));
+  const translationTasks = [];
+  const lines = await transcribeCompleteWav({
     audio,
     apiKey,
     baseUrl: process.env.DASHSCOPE_BASE_URL,
@@ -227,23 +256,39 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
     concurrency: Number(process.env.ASR_CONCURRENCY || 16),
     speechRangesMs,
     acquire: asrAcquire,
-    onProgress: (value, detail) => updateProgress("analyzing", 0.35 + value * 0.6, detail || "整段识别中")
-  });
-  if (job.translate) {
-    updateProgress("analyzing", 0.98, "正在翻译字幕");
-    try {
-      lines = await translateLines({
-        lines,
-        apiKey,
-        model: process.env.KOE_TRANSLATE_MODEL,
-        target: process.env.KOE_TRANSLATE_TARGET || "zh",
-        concurrency: Number(process.env.KOE_TRANSLATE_CONCURRENCY || 4)
-      });
-    } catch (error) {
-      console.log(`[koe] job ${job.id.slice(0, 8)} translation failed: ${error instanceof Error ? error.message : String(error)}`);
+    control,
+    onProgress: (value, detail) => updateProgress("analyzing", 0.35 + value * 0.6, detail || "整段识别中"),
+    onLines: (segmentLines, segment) => {
+      job.lines.push(...segmentLines);
+      job.lines.sort((left, right) => left.startMs - right.startMs);
+      if (job.translate && segmentLines.length) {
+        const task = translateSegment(segmentLines, { apiKey, translateAcquire }).catch(() => undefined);
+        translationTasks.push(task);
+      }
     }
+  });
+  await Promise.allSettled(translationTasks);
+  return { lines: job.lines, vtt: toWebVtt(job.lines) };
+}
+
+async function translateSegment(segmentLines, { apiKey, translateAcquire }) {
+  const release = await translateAcquire();
+  try {
+    const translated = await translateLines({
+      lines: segmentLines,
+      apiKey,
+      model: process.env.KOE_TRANSLATE_MODEL,
+      target: process.env.KOE_TRANSLATE_TARGET || "zh",
+      concurrency: 1
+    });
+    for (let index = 0; index < segmentLines.length; index += 1) {
+      if (translated[index]?.translated) segmentLines[index].translated = translated[index].translated;
+    }
+  } catch {
+    // 翻译失败时保留原文
+  } finally {
+    release();
   }
-  return { lines, vtt: toWebVtt(lines) };
 }
 
 async function withSemaphore(acquire, task) {

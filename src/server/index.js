@@ -88,6 +88,28 @@ export function createServer(options = {}) {
         return;
       }
 
+      const partialMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/partial$/);
+      if (request.method === "GET" && partialMatch) {
+        if (!isAuthorized(request, config.apiToken)) return unauthorized(response);
+        try {
+          sendJson(response, 200, jobs.getPartial(partialMatch[1]));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          sendJson(response, message === "job_not_found" ? 404 : 409, { error: message });
+        }
+        return;
+      }
+
+      const prioritizeMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/prioritize$/);
+      if (request.method === "POST" && prioritizeMatch) {
+        if (!isAuthorized(request, config.apiToken)) return unauthorized(response);
+        const body = await readJson(request);
+        const found = jobs.prioritize(prioritizeMatch[1], Number(body.timeMs || 0));
+        if (!found) return sendJson(response, 404, { error: "job_not_found" });
+        sendJson(response, 202, { ok: true });
+        return;
+      }
+
       const vttMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/vtt$/);
       if (request.method === "GET" && vttMatch) {
         if (!isAuthorized(request, config.apiToken)) return unauthorized(response);

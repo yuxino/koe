@@ -18,6 +18,7 @@ async function handleMessage(message) {
   if (message.type === "WATCH_JOB") return watchJob(message);
   if (message.type === "STOP_ANALYSIS") return stopAnalysis(Number(message.tabId));
   if (message.type === "LIST_VIDEOS") return listVideos(Number(message.tabId));
+  if (message.type === "SEEK_PRIORITIZE") return seekPrioritize(Number(message.tabId), Number(message.timeMs));
   if (message.type === "GET_STATE") {
     const state = tabStates.get(Number(message.tabId));
     return { ok: true, state: state ? publicState(state) : { status: "idle" } };
@@ -64,7 +65,8 @@ async function beginWatching({ tabId, frameId = 0, serverUrl, apiToken, job }) {
     progress: Number(job.progress || 0),
     jobStatus: job.status || "analyzing",
     stageDetail: job.stageDetail || "",
-    hasDuration: Boolean(job.hasDuration)
+    hasDuration: Boolean(job.hasDuration),
+    lastPartialVtt: ""
   };
   tabStates.set(tabId, state);
   await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: state.jobStatus, stageDetail: state.stageDetail, hasDuration: state.hasDuration }, frameId);
@@ -93,6 +95,36 @@ async function pollJob(tabId) {
   }
   state.status = "analyzing";
   await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: job.status, stageDetail: state.stageDetail, hasDuration: state.hasDuration }, state.frameId);
+  void pollPartial(state);
+}
+
+async function pollPartial(state) {
+  try {
+    const response = await fetch(`${state.serverUrl}/api/jobs/${state.jobId}/partial`, { headers: authHeaders(state.apiToken) });
+    if (!response.ok) return;
+    const partial = await response.json();
+    if (partial?.vtt && partial.vtt !== state.lastPartialVtt) {
+      state.lastPartialVtt = partial.vtt;
+      await forwardToTab(state.tabId, { type: "PARTIAL_SUBTITLES", vtt: partial.vtt, lineCount: Number(partial.lineCount || 0) }, state.frameId);
+    }
+  } catch {
+    // 本地助手旧版本没有 /partial 接口时静默跳过
+  }
+}
+
+async function seekPrioritize(tabId, timeMs) {
+  const state = tabStates.get(tabId);
+  if (!state?.jobId) return { ok: true, ignored: true };
+  try {
+    await fetch(`${state.serverUrl}/api/jobs/${state.jobId}/prioritize`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...authHeaders(state.apiToken) },
+      body: JSON.stringify({ timeMs: Math.max(0, Number(timeMs) || 0) })
+    });
+  } catch {
+    // 忽略失败，下一轮轮询会继续推进
+  }
+  return { ok: true };
 }
 
 async function publishReady(state) {

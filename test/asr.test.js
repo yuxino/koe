@@ -154,6 +154,47 @@ test("transcribes only provided speech ranges with absolute offsets", async () =
   assert.deepEqual(lines.map((line) => line.startMs), [1_000, 7_000]);
 });
 
+test("streams completed segments through control.onLines", async () => {
+  const audio = createWav(16_000 * 3);
+  const streamed = [];
+  const control = {};
+  await transcribeCompleteWav({
+    audio,
+    apiKey: "test-key",
+    segmentMs: 1_000,
+    control,
+    onLines: (lines) => streamed.push(...lines.map((line) => line.startMs)),
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({ output: { output: { sentence: { words: [{ begin_time: 0, end_time: 100, text: "字", punctuation: "" }] } } } })
+    })
+  });
+  assert.equal(streamed.length, 3);
+  assert.deepEqual([...streamed].sort((a, b) => a - b), [0, 1_000, 2_000]);
+});
+
+test("reprioritizes pending segments toward a seek target", async () => {
+  const audio = createWav(16_000 * 3);
+  const order = [];
+  const control = {};
+  await transcribeCompleteWav({
+    audio,
+    apiKey: "test-key",
+    segmentMs: 1_000,
+    concurrency: 1,
+    control,
+    onLines: (lines) => {
+      for (const line of lines) order.push(line.startMs);
+      if (order.length === 1) control.setPriority(2_100);
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({ output: { output: { sentence: { words: [{ begin_time: 0, end_time: 100, text: "字", punctuation: "" }] } } } })
+    })
+  });
+  assert.deepEqual(order, [0, 2_000, 1_000]);
+});
+
 test("reports segment progress detail", async () => {
   const audio = createWav(16_000 * 3);
   const details = [];
