@@ -35,6 +35,9 @@ async function init() {
   await refreshState();
   await refreshVideos();
   await initPrefs();
+  window.setInterval(() => {
+    void refreshState();
+  }, 1_000);
 }
 
 async function initPrefs() {
