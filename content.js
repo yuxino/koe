@@ -29,17 +29,22 @@
       .processing span:nth-child(2) { animation-delay: .2s; }
       .processing span:nth-child(3) { animation-delay: .4s; }
       @keyframes koe-blink { 0%, 100% { opacity: .25; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-3px); } }
+      .analyze-btn { position: fixed; right: 18px; bottom: 18px; display: none; align-items: center; gap: 6px; padding: 9px 15px; border: 1px solid rgba(255, 248, 224, .25); border-radius: 99px; background: rgba(25, 35, 30, .85); color: #fbf4df; font: 600 13px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .02em; cursor: pointer; backdrop-filter: blur(12px); box-shadow: 0 8px 30px rgba(0, 0, 0, .35); pointer-events: auto; z-index: 1; }
+      .analyze-btn:hover { background: rgba(43, 49, 37, .95); }
+      .analyze-btn.visible { display: inline-flex; }
     </style>
     <div class="stage" aria-live="polite" aria-atomic="true">
       <div class="eyebrow"><span class="dot"></span><span class="label">KOE · READY</span></div>
       <div class="card"><p class="translated"></p><p class="original"></p><div class="meta"></div></div>
       <div class="processing"><span></span><span></span><span></span></div>
     </div>
+    <button class="analyze-btn" type="button">分析字幕</button>
   `;
 
   const stage = shadow.querySelector(".stage");
   const card = shadow.querySelector(".card");
   const processingEl = shadow.querySelector(".processing");
+  const analyzeBtn = shadow.querySelector(".analyze-btn");
   const translated = shadow.querySelector(".translated");
   const original = shadow.querySelector(".original");
   const meta = shadow.querySelector(".meta");
@@ -55,6 +60,7 @@
   let processing = false;
   let lastErrorShown = "";
   let errorShown = false;
+  let analysisActive = false;
 
   const STAGE_TEXT = {
     downloading: "正在下载 / 提取声音",
@@ -80,23 +86,29 @@
       if (message.status === "analyzing") {
         errorShown = false;
         processing = true;
+        analysisActive = true;
         analysisDone = false;
         autoPlayedPartial = false;
+        updateAnalyzeButton();
       }
       if (message.status === "ready") {
         errorShown = false;
         processing = false;
+        analysisActive = false;
         subtitleReady = true;
         analysisDone = true;
+        updateAnalyzeButton();
       }
       if (message.status === "idle") {
         errorShown = false;
         processing = false;
+        analysisActive = false;
         subtitleReady = false;
         analysisDone = false;
         autoPlayedPartial = false;
         showingCue = false;
         hide();
+        updateAnalyzeButton();
       }
       return false;
     }
@@ -130,10 +142,12 @@
     if (message.type === "CAPTURE_ERROR") {
       processing = false;
       errorShown = true;
+      analysisActive = false;
       const detail = message.error || "请检查视频来源和服务配置。";
       if (detail === lastErrorShown) return false;
       lastErrorShown = detail;
       showStatus("视频分析失败", detail, "ERROR");
+      updateAnalyzeButton();
       return false;
     }
     return false;
@@ -186,13 +200,39 @@
     cues = [];
     processing = false;
     errorShown = false;
+    analysisActive = false;
     subtitleReady = false;
     analysisDone = false;
     autoPlayedPartial = false;
     showingCue = false;
     hide();
     chrome.runtime.sendMessage({ type: "VIDEO_CHANGED" }).catch(() => undefined);
+    updateAnalyzeButton();
   }, true);
+
+  analyzeBtn.addEventListener("click", () => {
+    if (!findVideo()) return;
+    analysisActive = true;
+    updateAnalyzeButton();
+    chrome.runtime.sendMessage({ type: "ANALYZE_VIDEO", pageUrl: location.href, serverUrl: "http://127.0.0.1:8787", apiToken: "" })
+      .then((response) => {
+        if (!response?.ok) {
+          analysisActive = false;
+          updateAnalyzeButton();
+        }
+      })
+      .catch(() => {
+        analysisActive = false;
+        updateAnalyzeButton();
+      });
+  });
+
+  function updateAnalyzeButton() {
+    const fullscreenVideo = (document.fullscreenElement || document.webkitFullscreenElement) instanceof HTMLVideoElement;
+    const show = !analysisActive && !fullscreenVideo && Boolean(findVideo());
+    analyzeBtn.classList.toggle("visible", show);
+  }
+  window.setInterval(updateAnalyzeButton, 1_000);
 
   function tryAutoPlay() {
     const now = Date.now();

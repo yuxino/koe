@@ -17,8 +17,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   stopPolling(tabId);
 });
 
-async function handleMessage(message) {
-  if (message.type === "ANALYZE_VIDEO") return analyzeVideo(message);
+async function handleMessage(message, sender) {
+  if (message.type === "ANALYZE_VIDEO") return analyzeVideo({ ...message, tabId: message.tabId ?? sender?.tab?.id });
   if (message.type === "WATCH_JOB") return watchJob(message);
   if (message.type === "STOP_ANALYSIS") return stopAnalysis(Number(message.tabId));
   if (message.type === "LIST_VIDEOS") return listVideos(Number(message.tabId));
@@ -98,6 +98,13 @@ async function handlePageReady(message, sender) {
 async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl, selection, translate, startMs }) {
   tabId = Number(tabId);
   if (!Number.isInteger(tabId)) throw new Error("没有找到当前标签页。");
+  if (translate === undefined) {
+    try {
+      ({ koeTranslate: translate } = await chrome.storage.local.get("koeTranslate"));
+    } catch {
+      translate = undefined;
+    }
+  }
   const source = await discoverVideoSource(tabId, pageUrl, selection);
   if (!source?.hasVideo) throw new Error("当前页面没有找到视频，请先打开包含视频的页面。");
   await ensureContentScript(tabId, source.frameId);
