@@ -1,10 +1,7 @@
-import { createWriteStream } from "node:fs";
-import { mkdir, readdir } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { isIP } from "node:net";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
 
 export const MEDIA_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/136 Safari/537.36";
 const SUPPORTED_PAGE_HOSTS = ["pornhub.com", "xvideos.com"];
@@ -29,62 +26,6 @@ export function validateSourceRequest({ pageUrl = "", sourceUrl = "" } = {}, { a
     throw new Error("unsupported_page_source");
   }
   return { pageUrl: String(pageUrl || ""), sourceUrl: String(sourceUrl || "") };
-}
-
-export async function acquireSource({
-  pageUrl,
-  sourceUrl,
-  outputDir,
-  ytdlpBin = "yt-dlp",
-  audioOnly = false,
-  onProgress = () => undefined,
-  fetchImpl = fetch,
-  run = runCommand
-}) {
-  await mkdir(outputDir, { recursive: true });
-  if (sourceUrl) {
-    const extension = mediaExtension(sourceUrl);
-    const target = join(outputDir, `source${extension}`);
-    const response = await fetchImpl(sourceUrl, {
-      redirect: "follow",
-      headers: pageUrl ? { referer: pageUrl } : undefined
-    });
-    if (!response.ok || !response.body) throw new Error(`source_download_failed:${response.status}`);
-    await pipeline(Readable.fromWeb(response.body), createWriteStream(target));
-    return target;
-  }
-
-  if (!ytdlpBin) {
-    throw new Error("yt_dlp_missing:页面没有可直接获取的媒体地址，且未安装 yt-dlp 兜底。");
-  }
-  const template = join(outputDir, "source.%(ext)s");
-  await run(ytdlpBin, [
-    "--no-playlist",
-    "--no-warnings",
-    "--newline",
-    "--no-color",
-    "--progress-template",
-    "download:%(progress._percent_str)s",
-    "--restrict-filenames",
-    "--concurrent-fragments",
-    "8",
-    ...(audioOnly ? ["-f", "bestaudio/worst"] : ["--merge-output-format", "mp4"]),
-    "-o",
-    template,
-    pageUrl
-  ], {
-    onStdout: reportProgress,
-    onStderr: reportProgress
-  });
-
-  function reportProgress(chunk) {
-      for (const match of String(chunk).matchAll(/download:\s*([\d.]+)%/g)) {
-        onProgress(Math.max(0, Math.min(1, Number(match[1]) / 100)));
-      }
-  }
-  const files = (await readdir(outputDir)).filter((file) => file.startsWith("source."));
-  if (!files.length) throw new Error("source_extraction_empty");
-  return join(outputDir, files[0]);
 }
 
 export async function extractAudioLocally({

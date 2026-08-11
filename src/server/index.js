@@ -60,7 +60,7 @@ export function createServer(options = {}) {
           localProcessing: localDashscope || localRelay,
           authRequired: Boolean(config.apiToken),
           activeJobs: jobs.activeCount,
-          tools: { ffmpeg: config.ffmpegBin, ytDlp: config.ytdlpBin || null }
+          tools: { ffmpeg: config.ffmpegBin }
         });
         return;
       }
