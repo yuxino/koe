@@ -122,6 +122,25 @@ test("splits long speech ranges into capped chunks", async () => {
   assert.deepEqual(lines.map((line) => line.startMs), [0, 5_000, 10_000]);
 });
 
+test("merges a tiny tail into the previous speech chunk", async () => {
+  const audio = createWav(16_000 * 20);
+  let calls = 0;
+  await transcribeCompleteWav({
+    audio,
+    apiKey: "test-key",
+    segmentMs: 5_000,
+    speechRangesMs: [[0, 5_400]],
+    fetchImpl: async () => {
+      calls += 1;
+      return {
+        ok: true,
+        json: async () => ({ output: { output: { sentence: { words: [{ begin_time: 0, end_time: 100, text: "字", punctuation: "" }] } } } })
+      };
+    }
+  });
+  assert.equal(calls, 1);
+});
+
 function createWav(sampleCount) {
   const data = Buffer.alloc(sampleCount * 2);
   const wav = Buffer.alloc(44 + data.length);

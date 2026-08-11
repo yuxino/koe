@@ -128,9 +128,16 @@ function buildSpeechSegments(rangesMs, segmentMs, wav, bytesPerMs) {
   for (const [rangeStart, rangeEnd] of rangesMs) {
     const start = Math.max(0, Math.min(rangeStart, rangeEnd));
     const end = Math.min(Math.max(start, rangeEnd), durationMs);
+    const pieces = [];
     for (let cursor = start; cursor < end; cursor += segmentMs) {
-      const pieceStart = cursor;
       const pieceEnd = Math.min(end, cursor + segmentMs);
+      if (pieces.length && pieceEnd - cursor < 1_000) {
+        pieces[pieces.length - 1][1] = pieceEnd;
+        continue;
+      }
+      pieces.push([cursor, pieceEnd]);
+    }
+    for (const [pieceStart, pieceEnd] of pieces) {
       const offset = Math.max(0, Math.round(pieceStart * bytesPerMs / wav.blockAlign) * wav.blockAlign);
       const length = Math.max(wav.blockAlign, Math.round((pieceEnd - pieceStart) * bytesPerMs / wav.blockAlign) * wav.blockAlign);
       const data = wav.data.subarray(offset, Math.min(wav.data.length, offset + length));
