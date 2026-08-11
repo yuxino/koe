@@ -42,9 +42,18 @@ test("formats bilingual cues with original and translated lines", () => {
     "WEBVTT",
     "",
     "1",
-    "00:00:01.000 --> 00:00:02.500",
+    "00:00:01.000 --> 00:00:03.750",
     "Hello world",
     "你好世界",
     ""
   ].join("\n"));
+});
+
+test("enforces a minimum display duration without overlapping the next cue", () => {
+  const vtt = toWebVtt([
+    { startMs: 1_000, endMs: 1_300, text: "嗯" },
+    { startMs: 1_500, endMs: 2_000, text: "好的" }
+  ]);
+  assert.match(vtt, /00:00:01\.000 --> 00:00:01\.420/);
+  assert.match(vtt, /00:00:01\.500 --> 00:00:02\.500/);
 });

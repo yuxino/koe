@@ -67,11 +67,22 @@ export function compactTranscriptText(value) {
 export function toWebVtt(lines) {
   const cues = lines
     .filter((line) => String(line.text || "").trim())
-    .map((line, index) => [
+    .sort((left, right) => Number(left.startMs || 0) - Number(right.startMs || 0))
+    .map((line, index, sorted) => {
+      const startMs = Number(line.startMs || 0);
+      const rawEndMs = Math.max(startMs + 200, Number(line.endMs || 0));
+      const textLength = String(line.text).trim().length;
+      const minDurationMs = Math.max(1_000, Math.min(4_000, textLength * 250));
+      const nextStart = sorted[index + 1] ? Number(sorted[index + 1].startMs || 0) : undefined;
+      let endMs = Math.max(rawEndMs, startMs + minDurationMs);
+      if (nextStart !== undefined) endMs = Math.min(endMs, nextStart - 80);
+      endMs = Math.max(endMs, startMs + 200);
+      return [
       String(index + 1),
-      `${formatVttTime(line.startMs)} --> ${formatVttTime(Math.max(Number(line.startMs || 0) + 200, Number(line.endMs || 0)))}`,
+      `${formatVttTime(startMs)} --> ${formatVttTime(endMs)}`,
       [String(line.text).trim(), String(line.translated || "").trim()].filter(Boolean).join("\n")
-    ].join("\n"));
+      ].join("\n");
+    });
   return `WEBVTT\n\n${cues.join("\n\n")}\n`;
 }
 
