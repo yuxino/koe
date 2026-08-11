@@ -109,6 +109,29 @@ test("transcribes segments concurrently while keeping timeline order", async () 
   assert.deepEqual(lines.map((line) => line.startMs), [0, 1_000, 2_000, 3_000]);
 });
 
+test("runs up to sixteen segments concurrently", async () => {
+  const audio = createWav(16_000 * 16);
+  let inFlight = 0;
+  let maxInFlight = 0;
+  await transcribeCompleteWav({
+    audio,
+    apiKey: "test-key",
+    segmentMs: 1_000,
+    concurrency: 16,
+    fetchImpl: async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      inFlight -= 1;
+      return {
+        ok: true,
+        json: async () => ({ output: { output: { sentence: { words: [{ begin_time: 0, end_time: 100, text: "字", punctuation: "" }] } } } })
+      };
+    }
+  });
+  assert.equal(maxInFlight, 16);
+});
+
 test("transcribes only provided speech ranges with absolute offsets", async () => {
   const audio = createWav(16_000 * 10);
   const calls = [];

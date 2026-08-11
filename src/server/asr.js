@@ -87,7 +87,7 @@ export async function transcribeCompleteWav({
   baseUrl,
   model,
   segmentMs = 60_000,
-  concurrency = 5,
+  concurrency = 16,
   speechRangesMs = null,
   acquire = null,
   fetchImpl = fetch,

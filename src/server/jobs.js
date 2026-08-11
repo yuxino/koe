@@ -16,7 +16,7 @@ export function createJobManager(options = {}) {
   const jobs = new Map();
   const provider = options.provider || "mock";
   const processJob = options.processJob || ((job, context) => processDefaultJob(job, context));
-  const asrSemaphore = createSemaphore(options.asrMaxConcurrent ?? process.env.ASR_MAX_CONCURRENT ?? 8);
+  const asrSemaphore = createSemaphore(options.asrMaxConcurrent ?? process.env.ASR_MAX_CONCURRENT ?? 16);
   const extractSemaphore = createSemaphore(options.localExtractConcurrency ?? process.env.LOCAL_EXTRACT_CONCURRENCY ?? 4);
   let activeCount = 0;
 
@@ -224,7 +224,7 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
     baseUrl: process.env.DASHSCOPE_BASE_URL,
     model: process.env.ASR_MODEL,
     segmentMs: Number(process.env.ASR_SEGMENT_SECONDS || 60) * 1_000,
-    concurrency: Number(process.env.ASR_CONCURRENCY || 8),
+    concurrency: Number(process.env.ASR_CONCURRENCY || 16),
     speechRangesMs,
     acquire: asrAcquire,
     onProgress: (value, detail) => updateProgress("analyzing", 0.35 + value * 0.6, detail || "整段识别中")
