@@ -413,15 +413,7 @@ function isUsableMediaSource(video) {
 }
 
 function resolveAutoPreference(preference, pageUrl) {
-  if (preference === true) return true;
-  if (preference === false) return false;
-  try {
-    const hostname = new URL(String(pageUrl || "")).hostname.replace(/^www\./, "").toLowerCase();
-    return hostname === "pornhub.com" || hostname.endsWith(".pornhub.com")
-      || hostname === "xvideos.com" || hostname.endsWith(".xvideos.com");
-  } catch {
-    return false;
-  }
+  return preference === true;
 }
 
 function videoScore(video) {
