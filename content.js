@@ -183,7 +183,10 @@
   }, 5_000);
 
   // 视频切换：清掉旧字幕并通知后台
-  document.addEventListener("emptied", () => {
+  document.addEventListener("emptied", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLVideoElement)) return;
+    if (activeVideo && activeVideo.isConnected && target !== activeVideo) return;
     cues = [];
     processing = false;
     errorShown = false;

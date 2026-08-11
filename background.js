@@ -1,6 +1,7 @@
 const tabStates = new Map();
 const pollers = new Map();
 const recoveryAttempts = new Map();
+const lastVideoChangeAt = new Map();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender)
@@ -14,6 +15,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   if (state) void cancelJob(state);
   tabStates.delete(tabId);
   recoveryAttempts.delete(tabId);
+  lastVideoChangeAt.delete(tabId);
   stopPolling(tabId);
 });
 
@@ -35,8 +37,17 @@ async function handleMessage(message, sender) {
 async function handleVideoChanged(sender) {
   const tabId = sender?.tab?.id;
   if (!tabId) return { ok: true, skipped: true };
+  const now = Date.now();
+  if (now - (lastVideoChangeAt.get(tabId) || 0) < 1_500) return { ok: true, skipped: true };
+  lastVideoChangeAt.set(tabId, now);
   if (tabStates.has(tabId)) await stopAnalysis(tabId);
-  return { ok: true, skipped: true };
+  const pageUrl = String(sender.tab?.url || "");
+  if (!/^https?:/i.test(pageUrl)) return { ok: true, skipped: true };
+  try {
+    return await analyzeVideo({ tabId, serverUrl: LOCAL_SERVER_URL, apiToken: "", pageUrl });
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 async function handlePositionUpdate(message, sender) {
