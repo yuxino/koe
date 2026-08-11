@@ -63,3 +63,23 @@ export function compactTranscriptText(value) {
     .replace(/\s+/g, " ")
     .trim();
 }
+
+export function toWebVtt(lines) {
+  const cues = lines
+    .filter((line) => String(line.text || "").trim())
+    .map((line, index) => [
+      String(index + 1),
+      `${formatVttTime(line.startMs)} --> ${formatVttTime(Math.max(Number(line.startMs || 0) + 200, Number(line.endMs || 0)))}`,
+      String(line.text).trim()
+    ].join("\n"));
+  return `WEBVTT\n\n${cues.join("\n\n")}\n`;
+}
+
+function formatVttTime(value) {
+  const milliseconds = Math.max(0, Math.round(Number(value || 0)));
+  const hours = Math.floor(milliseconds / 3_600_000);
+  const minutes = Math.floor(milliseconds % 3_600_000 / 60_000);
+  const seconds = Math.floor(milliseconds % 60_000 / 1_000);
+  const rest = milliseconds % 1_000;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(rest).padStart(3, "0")}`;
+}

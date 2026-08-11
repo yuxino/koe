@@ -8,6 +8,6 @@
     "start": "node src/server/start.js",
     "dev": "node --watch src/server/index.js",
     "test": "node --test",
-    "check": "npm test && node --check src/server/index.js && node --check src/server/start.js && node --check src/server/asr.js && node --check src/server/transcript.js"
+    "check": "npm test && node --check src/server/index.js && node --check src/server/start.js && node --check src/server/asr.js && node --check src/server/transcript.js && node --check src/server/media.js && node --check src/server/jobs.js && node --check background.js && node --check content.js && node --check popup.js"
   }
 }

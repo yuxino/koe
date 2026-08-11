@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { transcribeWav } from "../src/server/asr.js";
+import { transcribeCompleteWav, transcribeWav } from "../src/server/asr.js";
 
 test("maps Fun-ASR word timestamps back onto the tab timeline", async () => {
   const lines = await transcribeWav({
@@ -32,3 +32,43 @@ test("maps Fun-ASR word timestamps back onto the tab timeline", async () => {
     provider: "dashscope"
   }]);
 });
+
+test("transcribes a complete PCM WAV in internal segments while keeping absolute offsets", async () => {
+  const audio = createWav(16_000 * 2);
+  const starts = [];
+  const lines = await transcribeCompleteWav({
+    audio,
+    apiKey: "test-key",
+    segmentMs: 1_000,
+    fetchImpl: async (_url, options) => {
+      const payload = JSON.parse(options.body);
+      const data = Buffer.from(payload.input.messages[0].content[0].input_audio.data.split(",")[1], "base64");
+      starts.push(data.length);
+      return {
+        ok: true,
+        json: async () => ({ output: { output: { sentence: { words: [{ begin_time: 0, end_time: 200, text: "字", punctuation: "" }] } } } })
+      };
+    }
+  });
+  assert.equal(starts.length, 2);
+  assert.deepEqual(lines.map((line) => line.startMs), [0, 1_000]);
+});
+
+function createWav(sampleCount) {
+  const data = Buffer.alloc(sampleCount * 2);
+  const wav = Buffer.alloc(44 + data.length);
+  wav.write("RIFF", 0, "ascii");
+  wav.writeUInt32LE(36 + data.length, 4);
+  wav.write("WAVEfmt ", 8, "ascii");
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(16_000, 24);
+  wav.writeUInt32LE(32_000, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write("data", 36, "ascii");
+  wav.writeUInt32LE(data.length, 40);
+  data.copy(wav, 44);
+  return wav;
+}

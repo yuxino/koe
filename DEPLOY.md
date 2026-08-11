@@ -1,6 +1,6 @@
 # Deploy Koe API
 
-`koe-api.yuxino.cn` follows the same server layout as `ding-frame`:
+`koe-api.yuxino.cn` 使用 pm2 + nginx：
 
 ```text
 Chrome extension → https://koe-api.yuxino.cn
@@ -9,19 +9,39 @@ Chrome extension → https://koe-api.yuxino.cn
                  → pm2 koe-api
 ```
 
-## Server files
+## 服务器依赖
 
-Deploy the project to `/root/koe`, then create `/root/koe/.env` with mode `600`:
+批处理模式需要 Node.js 20+、FFmpeg 和 yt-dlp：
+
+```bash
+apt-get update
+apt-get install -y ffmpeg python3-pip
+python3 -m pip install --upgrade yt-dlp
+```
+
+确认：
+
+```bash
+ffmpeg -version
+yt-dlp --version
+```
+
+## 项目与环境变量
+
+将项目部署到 `/root/koe`，并创建权限为 `600` 的 `/root/koe/.env`：
 
 ```env
 PORT=3011
 ASR_PROVIDER=dashscope
 ASR_MODEL=fun-asr-flash-2026-06-15
-DASHSCOPE_API_KEY=your-dashscope-key
+ASR_SEGMENT_SECONDS=60
+DASHSCOPE_API_KEY=...
 KOE_API_TOKEN=long-random-client-token
+FFMPEG_BIN=ffmpeg
+YTDLP_BIN=yt-dlp
 ```
 
-Start or reload:
+启动或重载：
 
 ```bash
 cd /root/koe
@@ -32,7 +52,7 @@ pm2 save
 
 ## nginx
 
-The certificate already used by `ding-frame` covers `*.yuxino.cn`:
+证书沿用 `ding-frame` 的 `*.yuxino.cn` 证书：
 
 ```nginx
 server {
@@ -47,6 +67,7 @@ server {
 
     ssl_certificate /etc/nginx/ssl/fullchain.cer;
     ssl_certificate_key /etc/nginx/ssl/yuxino.cn.key;
+    client_max_body_size 512m;
 
     location / {
         proxy_pass http://127.0.0.1:3011;
@@ -55,19 +76,20 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 180s;
+        proxy_read_timeout 1800s;
+        proxy_send_timeout 1800s;
     }
 }
 ```
 
-Validate and reload with the server's nginx master process if systemd does not own it:
+校验并重载：
 
 ```bash
 nginx -t
 kill -HUP "$(ps -eo pid,cmd | awk '/nginx: master process/{print $1; exit}')"
 ```
 
-## Verification
+## 验证
 
 ```bash
 curl https://koe-api.yuxino.cn/health
@@ -75,4 +97,4 @@ pm2 status
 pm2 logs koe-api
 ```
 
-`/health` is public. Session start, audio chunks, and session stop require `Authorization: Bearer <KOE_API_TOKEN>` when the token is configured.
+`/health` 公开；任务创建、视频上传、任务查询和 VTT 下载在设置 `KOE_API_TOKEN` 后都需要 `Authorization: Bearer <KOE_API_TOKEN>`。

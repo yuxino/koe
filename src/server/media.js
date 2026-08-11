@@ -1,0 +1,140 @@
+import { createWriteStream } from "node:fs";
+import { mkdir, readdir } from "node:fs/promises";
+import { isIP } from "node:net";
+import { join } from "node:path";
+import { spawn } from "node:child_process";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+
+const SUPPORTED_PAGE_HOSTS = ["pornhub.com", "xvideos.com"];
+
+export function isSupportedPageUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && SUPPORTED_PAGE_HOSTS.some((host) => hostMatches(url.hostname, host));
+  } catch {
+    return false;
+  }
+}
+
+export function validateSourceRequest({ pageUrl = "", sourceUrl = "" } = {}) {
+  if (!pageUrl && !sourceUrl) throw new Error("video_source_required");
+  if (pageUrl) assertHttpUrl(pageUrl, "page_url");
+  if (sourceUrl) assertPublicHttpUrl(sourceUrl, "source_url");
+  if (!sourceUrl && !isSupportedPageUrl(pageUrl)) {
+    throw new Error("unsupported_page_source");
+  }
+  return { pageUrl: String(pageUrl || ""), sourceUrl: String(sourceUrl || "") };
+}
+
+export async function acquireSource({ pageUrl, sourceUrl, outputDir, ytdlpBin = "yt-dlp", fetchImpl = fetch, run = runCommand }) {
+  await mkdir(outputDir, { recursive: true });
+  if (sourceUrl) {
+    const extension = mediaExtension(sourceUrl);
+    const target = join(outputDir, `source${extension}`);
+    const response = await fetchImpl(sourceUrl, {
+      redirect: "follow",
+      headers: pageUrl ? { referer: pageUrl } : undefined
+    });
+    if (!response.ok || !response.body) throw new Error(`source_download_failed:${response.status}`);
+    await pipeline(Readable.fromWeb(response.body), createWriteStream(target));
+    return target;
+  }
+
+  const template = join(outputDir, "source.%(ext)s");
+  await run(ytdlpBin, [
+    "--no-playlist",
+    "--no-warnings",
+    "--no-progress",
+    "--restrict-filenames",
+    "--merge-output-format",
+    "mp4",
+    "-o",
+    template,
+    pageUrl
+  ]);
+  const files = (await readdir(outputDir)).filter((file) => file.startsWith("source."));
+  if (!files.length) throw new Error("source_extraction_empty");
+  return join(outputDir, files[0]);
+}
+
+export async function normalizeToWav({ inputPath, outputPath, ffmpegBin = "ffmpeg", run = runCommand }) {
+  await run(ffmpegBin, [
+    "-nostdin",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-y",
+    "-i",
+    inputPath,
+    "-vn",
+    "-ac",
+    "1",
+    "-ar",
+    "16000",
+    "-c:a",
+    "pcm_s16le",
+    outputPath
+  ]);
+  return outputPath;
+}
+
+export function runCommand(command, args, { cwd } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (error) => reject(new Error(`${command}_unavailable:${error.message}`)));
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+      } else {
+        reject(new Error(`${command}_failed:${compactError(stderr || stdout)}`));
+      }
+    });
+  });
+}
+
+function assertHttpUrl(value, field) {
+  let url;
+  try { url = new URL(value); } catch { throw new Error(`${field}_invalid`); }
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`${field}_scheme_not_allowed`);
+  if (isPrivateHostname(url.hostname)) throw new Error(`${field}_private_host_not_allowed`);
+}
+
+function assertPublicHttpUrl(value, field) {
+  assertHttpUrl(value, field);
+  if (new URL(value).protocol !== "https:") throw new Error(`${field}_https_required`);
+}
+
+function isPrivateHostname(hostname) {
+  const normalized = String(hostname || "").toLowerCase().replace(/[\[\]]/g, "");
+  if (["localhost", "localhost.localdomain"].includes(normalized) || normalized.endsWith(".local")) return true;
+  const family = isIP(normalized);
+  if (family === 4) {
+    const [a, b] = normalized.split(".").map(Number);
+    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  if (family === 6) return normalized === "::1" || normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe80:");
+  return false;
+}
+
+function hostMatches(hostname, root) {
+  return hostname === root || hostname.endsWith(`.${root}`);
+}
+
+function mediaExtension(value) {
+  try {
+    const pathname = new URL(value).pathname.toLowerCase();
+    const match = pathname.match(/\.(mp4|webm|mov|m4v|mkv|avi|mp3|m4a|wav)(?:$|\?)/);
+    return match ? `.${match[1]}` : ".media";
+  } catch {
+    return ".media";
+  }
+}
+
+function compactError(value) {
+  return String(value || "unknown").trim().replace(/\s+/g, " ").slice(-500);
+}

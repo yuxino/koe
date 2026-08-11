@@ -1,6 +1,6 @@
 const DEFAULT_SERVER_URL = "https://koe-api.yuxino.cn";
 let activeTab;
-let currentState = { running: false };
+let currentState = { status: "idle" };
 
 const elements = {
   tabHost: document.querySelector("#tab-host"),
@@ -10,12 +10,13 @@ const elements = {
   toggle: document.querySelector("#toggle"),
   serverUrl: document.querySelector("#server-url"),
   apiToken: document.querySelector("#api-token"),
-  liveMark: document.querySelector("#live-mark"),
+  videoFile: document.querySelector("#video-file"),
+  batchMark: document.querySelector("#batch-mark"),
   hint: document.querySelector("#hint")
 };
 
 document.addEventListener("DOMContentLoaded", init);
-elements.toggle.addEventListener("click", toggleCapture);
+elements.toggle.addEventListener("click", analyze);
 elements.serverUrl.addEventListener("change", saveServerUrl);
 
 async function init() {
@@ -23,64 +24,76 @@ async function init() {
   elements.tabHost.textContent = hostName(activeTab?.url);
   elements.tabTitle.textContent = activeTab?.title || "当前标签页";
   const stored = await chrome.storage.local.get({ serverUrl: DEFAULT_SERVER_URL, apiToken: "" });
-  const savedServerUrl = stored.serverUrl === "http://127.0.0.1:8787" || stored.serverUrl === "http://localhost:8787"
-    ? DEFAULT_SERVER_URL
-    : stored.serverUrl;
-  elements.serverUrl.value = savedServerUrl;
+  elements.serverUrl.value = stored.serverUrl || DEFAULT_SERVER_URL;
   elements.apiToken.value = stored.apiToken;
-  await checkHealth(savedServerUrl);
+  await checkHealth(elements.serverUrl.value);
   const response = await chrome.runtime.sendMessage({ type: "GET_STATE", tabId: activeTab?.id });
-  currentState = response?.state || { running: false };
+  currentState = response?.state || { status: "idle" };
   renderState();
 }
 
-async function toggleCapture() {
+async function analyze() {
   if (!activeTab?.id) return;
   const serverUrl = elements.serverUrl.value.trim().replace(/\/+$/, "");
+  const apiToken = elements.apiToken.value.trim();
   await saveServerUrl();
-  await chrome.storage.local.set({ apiToken: elements.apiToken.value.trim() });
-  if (currentState.running) {
-    await chrome.runtime.sendMessage({ type: "STOP_CAPTURE", tabId: activeTab.id });
-    currentState = { running: false };
-    renderState();
-    return;
-  }
-
+  await chrome.storage.local.set({ apiToken });
   elements.toggle.disabled = true;
-  elements.engineStatus.textContent = "正在连接…";
-  const response = await chrome.runtime.sendMessage({
-    type: "START_CAPTURE",
-    tabId: activeTab.id,
-    pageUrl: activeTab.url,
-    serverUrl,
-    apiToken: elements.apiToken.value.trim()
-  });
-  elements.toggle.disabled = false;
-  if (!response?.ok) {
-    elements.engineStatus.textContent = "连接失败";
-    elements.engineDetail.textContent = response?.error || "请先启动本地服务";
-    elements.hint.textContent = response?.error === "unauthorized" ? "服务器需要 API token，请在上方填写。" : "请检查服务地址和 API token。";
-    return;
+  elements.engineStatus.textContent = "正在创建任务…";
+  try {
+    if (elements.videoFile.files[0]) {
+      currentState = await uploadLocalVideo({ serverUrl, apiToken, file: elements.videoFile.files[0] });
+    } else {
+      const response = await chrome.runtime.sendMessage({
+        type: "ANALYZE_VIDEO",
+        tabId: activeTab.id,
+        pageUrl: activeTab.url,
+        serverUrl,
+        apiToken
+      });
+      if (!response?.ok) throw new Error(response?.error || "无法创建分析任务。");
+      currentState = response.state;
+    }
+    renderState();
+  } catch (error) {
+    elements.engineStatus.textContent = "创建失败";
+    elements.engineDetail.textContent = error instanceof Error ? error.message : String(error);
+    elements.hint.textContent = "请检查视频来源、服务地址和 API token。";
+  } finally {
+    elements.toggle.disabled = false;
   }
-  currentState = response.state;
-  await checkHealth(serverUrl);
-  renderState();
+}
+
+async function uploadLocalVideo({ serverUrl, apiToken, file }) {
+  const createResponse = await fetch(`${serverUrl}/api/jobs`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...authHeaders(apiToken) },
+    body: JSON.stringify({ upload: true, pageUrl: activeTab.url, filename: file.name })
+  });
+  const job = await parseResponse(createResponse, "无法创建本地视频任务");
+  const uploadResponse = await fetch(`${serverUrl}/api/jobs/${job.id}/source`, {
+    method: "POST",
+    headers: { "content-type": file.type || "application/octet-stream", "x-filename": file.name, ...authHeaders(apiToken) },
+    body: file
+  });
+  const uploaded = await parseResponse(uploadResponse, "本地视频上传失败");
+  const watch = await chrome.runtime.sendMessage({ type: "WATCH_JOB", tabId: activeTab.id, serverUrl, apiToken, jobId: uploaded.id });
+  if (!watch?.ok) throw new Error(watch?.error || "无法跟踪分析任务。");
+  return watch.state;
 }
 
 async function checkHealth(serverUrl) {
   try {
-    const response = await fetch(`${serverUrl}/health`);
+    const response = await fetch(`${serverUrl.replace(/\/+$/, "")}/health`);
     const body = await response.json();
     if (!response.ok || !body.ok) throw new Error("unhealthy");
-    elements.engineDetail.textContent = `本地服务 · ${body.provider || "mock"}`;
-    elements.hint.textContent = body.authRequired && !elements.apiToken.value.trim()
-      ? "服务器已开启保护，请填写 API token。"
-      : body.provider === "mock"
-        ? "默认 mock 模式，可先验证插件链路。"
-        : "真实 ASR 已接入，字幕会带词级时间戳。";
+    elements.engineDetail.textContent = `批处理服务 · ${body.provider || "mock"}`;
+    elements.hint.textContent = body.provider === "mock"
+      ? "当前是 mock 模式；真实字幕需要 Fun-ASR。"
+      : "整段视频分析完成后，字幕才会显示。";
   } catch {
-    elements.engineDetail.textContent = "本地服务 · 未连接";
-    elements.hint.textContent = "在项目目录运行 npm start，再点击开始。";
+    elements.engineDetail.textContent = "批处理服务 · 未连接";
+    elements.hint.textContent = "请检查服务地址和部署状态。";
   }
 }
 
@@ -91,16 +104,24 @@ async function saveServerUrl() {
 }
 
 function renderState() {
-  const running = Boolean(currentState.running);
-  elements.toggle.textContent = running ? "Stop captions" : "Start captions";
-  elements.toggle.classList.toggle("running", running);
-  elements.liveMark.classList.toggle("active", running);
-  if (running) {
-    elements.engineStatus.textContent = "正在听写";
-    elements.engineDetail.textContent = "音频已捕获 · 字幕会出现在视频下方";
-  } else if (elements.engineStatus.textContent === "正在听写") {
-    elements.engineStatus.textContent = "准备就绪";
-  }
+  const status = currentState.status || "idle";
+  const analyzing = status === "analyzing";
+  elements.toggle.textContent = analyzing ? "Analyzing…" : "Analyze video";
+  elements.toggle.classList.toggle("running", analyzing);
+  elements.batchMark.textContent = analyzing ? `${Math.round(Number(currentState.progress || 0) * 100)}%` : "BATCH";
+  elements.engineStatus.textContent = analyzing ? "整段分析中" : status === "ready" ? "字幕已就绪" : "准备就绪";
+  elements.engineDetail.textContent = analyzing ? "不会显示中间字幕 · 等待完整结果" : status === "ready" ? "完整 VTT 已加载到视频" : "批处理服务";
+}
+
+function parseResponse(response, fallback) {
+  return response.json().catch(() => ({})).then((body) => {
+    if (!response.ok) throw new Error(body.error || `${fallback}（${response.status}）`);
+    return body;
+  });
+}
+
+function authHeaders(apiToken) {
+  return apiToken ? { Authorization: `Bearer ${apiToken}` } : {};
 }
 
 function hostName(value) {

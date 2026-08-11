@@ -17,8 +17,7 @@ body::before { position: fixed; inset: 0; pointer-events: none; content: ""; opa
 .mark { display: grid; width: 35px; height: 35px; place-items: center; border: 1px solid rgba(203,220,119,.55); border-radius: 50%; color: var(--moss); font: 700 21px/1 Georgia, serif; transform: rotate(-8deg); }
 .kicker, .section-label { color: var(--moss); font: 600 9px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .14em; text-transform: uppercase; }
 h1 { margin: 3px 0 0; font-size: 22px; font-weight: 500; letter-spacing: -.02em; }
-.live-mark { width: 8px; height: 8px; margin-left: auto; border-radius: 50%; background: var(--muted); transition: background .2s, box-shadow .2s; }
-.live-mark.active { background: var(--rust); box-shadow: 0 0 0 5px rgba(220,128,93,.15); }
+.batch-mark { margin-left: auto; color: var(--moss); font: 700 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; }
 .current-tab { display: grid; gap: 7px; padding: 22px 2px 19px; }
 .current-tab strong { overflow: hidden; font-size: 18px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .current-tab span:last-child { overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
@@ -32,6 +31,9 @@ h1 { margin: 3px 0 0; font-size: 22px; font-weight: 500; letter-spacing: -.02em;
 .server-field { display: grid; gap: 8px; padding: 22px 2px 13px; }
 .server-field input { width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; outline: none; background: rgba(0,0,0,.16); color: var(--ink); font: 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .server-field input:focus { border-color: rgba(203,220,119,.62); }
+.file-field { padding-top: 4px; }
+.file-field input[type="file"] { padding: 8px; color: var(--muted); font: 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.file-field small { color: var(--muted); font-size: 10px; line-height: 1.4; }
 .token-field { padding-top: 5px; }
 .token-field em { color: var(--muted); font-style: normal; letter-spacing: .04em; }
 footer { display: flex; justify-content: space-between; gap: 12px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; line-height: 1.4; }

@@ -1,72 +1,81 @@
 # koe
 
-一个独立的 Chrome MV3 视频字幕实验项目：插件捕获当前标签页的声音，本地服务按片段识别，再把带时间戳的字幕叠加回网页。
+一个批处理优先的 Chrome 视频字幕实验项目：先取得完整视频，再分析整段音频并生成 VTT，最后把字幕加载回视频。它不做边播边听写，也不会在分析过程中显示中间字幕。
 
-`koe`（こえ / 声）第一版默认使用 `mock` 模式，所以不需要 API Key 就能验证完整链路。服务端同时预留了 `ding-frame` 使用的 Fun-ASR 词级时间戳适配器。
+`koe`（こえ / 声）参考 `ding-frame` 的时间轴思路，优先使用 Fun-ASR 的词级时间戳，再按标点、停顿和句长整理字幕。
+
+## 支持的来源
+
+- PornHub / XVideos 页面：服务端使用 `yt-dlp` 提取视频
+- 普通网页 HTML5 视频：插件尝试读取当前视频的直接源地址
+- 本地视频：在插件面板选择文件后上传分析
+
+站点改版、登录墙、DRM、不可下载的分片流会明确报错；项目不绕过 DRM 或访问控制。yt-dlp 的站点支持本身也会随网站变化，需要实际请求验证。
 
 ## 运行
 
-需要 Node.js 20+ 和 Chrome 116+。
+需要 Node.js 20+，真实视频分析还需要 `ffmpeg` 和 `yt-dlp`。
 
 ```bash
 npm install
+cp .env.example .env
+# 编辑 .env，填入 DASHSCOPE_API_KEY
 npm start
 ```
 
 然后在 Chrome 打开 `chrome://extensions`：
 
-1. 打开右上角「开发者模式」
+1. 打开「开发者模式」
 2. 点击「加载已解压的扩展程序」
 3. 选择本项目目录
-4. 打开一个有视频声音的网页
-5. 点击扩展图标，再点 `Start captions`
+4. 打开视频页面，点击 Koe
+5. 点击 `Analyze video`
 
-默认服务地址是 `https://koe-api.yuxino.cn`。本地开发时可以在插件面板里改成 `http://127.0.0.1:8787`。
+插件默认连接 `https://koe-api.yuxino.cn`；本地开发时可以改为 `http://127.0.0.1:8787`。
 
-## 使用真实 ASR
+分析流程是：创建任务 → 下载/上传视频 → FFmpeg 提取 16 kHz 单声道音频 → 服务端内部分段调用 Fun-ASR → 合并完整时间轴 → 生成 VTT → 插件加载字幕并从头播放。
 
-```bash
-cp .env.example .env
-# 编辑 .env，填入 DASHSCOPE_API_KEY，并把 ASR_PROVIDER 改为 dashscope
-npm start
-```
-
-真实模式会把插件生成的 16 kHz 单声道 WAV 片段交给 Fun-ASR，并使用词级时间戳按标点、停顿和最长句长聚合字幕。Key 只留在本地 Node 服务，不会放进插件；没有 Key 时服务会自动回到 `mock`。
-
-如果服务部署到公网，建议同时设置 `KOE_API_TOKEN`。插件面板的 `API TOKEN` 字段只保存在 Chrome 本地存储，请求字幕会话时通过 Bearer Token 发送。
-
-当前部署地址：`https://koe-api.yuxino.cn`
-
-## 服务器部署
-
-服务器沿用 ding-frame 的 pm2 + nginx 方式：Koe 在 `127.0.0.1:3011` 运行，nginx 将 `koe-api.yuxino.cn` 的 HTTPS 请求转发过去。一次性部署需要在服务器上准备 `.env`：
+## 服务端配置
 
 ```env
-PORT=3011
+PORT=8787
 ASR_PROVIDER=dashscope
 ASR_MODEL=fun-asr-flash-2026-06-15
+ASR_SEGMENT_SECONDS=60
 DASHSCOPE_API_KEY=...
 KOE_API_TOKEN=...
+FFMPEG_BIN=ffmpeg
+YTDLP_BIN=yt-dlp
 ```
 
-详见 [DEPLOY.md](DEPLOY.md)。
+API token 只保存在 Chrome 本地存储，并通过 Bearer Token 发送。真实 ASR 的 Key 只保留在服务端。
 
-## 当前 MVP 的边界
+## API
 
-- 插件通过用户主动点击开始，只处理当前标签页。
-- 默认每 15 秒发送一个音频片段，优先验证稳定性；后续再做更低延迟的流式提交。
-- 字幕覆盖层是页面内 Shadow DOM，不修改视频网站自己的播放器 DOM。
-- 视频暂停、倍速和 seek 的时间轴对齐目前是基础版，识别本身按捕获时钟运行。
-- 纯 mock 模式返回演示字幕，不代表模型识别结果。
+- `GET /health`：服务状态、模式、工具路径
+- `POST /api/jobs`：创建网页/直链任务，或用 `{ "upload": true }` 创建本地文件任务
+- `POST /api/jobs/:id/source`：上传本地视频二进制内容
+- `GET /api/jobs/:id`：查询任务进度
+- `GET /api/jobs/:id/vtt`：任务完成后获取完整 WebVTT
 
-## 目录
+## 部署
+
+服务器部署见 [DEPLOY.md](DEPLOY.md)。当前 API 地址是 `https://koe-api.yuxino.cn`。
+
+## 开发检查
+
+```bash
+npm run check
+```
+
+目录说明：
 
 - `manifest.json`：Chrome MV3 配置
-- `background.js`：插件 service worker 和标签页消息路由
-- `offscreen.html/js`：隐藏音频采集页
-- `audio-worklet.js`：PCM 音频采集
-- `content.js`：网页字幕覆盖层
-- `popup.*`：插件控制面板
-- `src/server/`：本地字幕服务与 ASR 适配器
-- `test/`：纯 Node 测试
-- `docs/plans/`：MVP 实现计划
+- `background.js`：分析任务创建、轮询和字幕发布
+- `content.js`：视频源发现与完整 VTT 的时间轴覆盖层
+- `popup.*`：批处理控制面板
+- `src/server/media.js`：视频来源与 FFmpeg 适配
+- `src/server/jobs.js`：异步分析任务
+- `src/server/asr.js`：Fun-ASR 与完整音频分段
+- `src/server/transcript.js`：字幕聚合与 WebVTT
+- `test/`：Node 测试

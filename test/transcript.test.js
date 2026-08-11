@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { groupWordsToSubtitles } from "../src/server/transcript.js";
+import { groupWordsToSubtitles, toWebVtt } from "../src/server/transcript.js";
 
 test("groups words at terminal punctuation", () => {
   const result = groupWordsToSubtitles([
@@ -24,4 +24,15 @@ test("groups words after a long pause", () => {
 
   assert.equal(result.length, 2);
   assert.equal(result[1].startMs, 2_200);
+});
+
+test("formats the complete transcript as WebVTT", () => {
+  assert.equal(toWebVtt([{ startMs: 1_000, endMs: 2_500, text: "你好" }]), [
+    "WEBVTT",
+    "",
+    "1",
+    "00:00:01.000 --> 00:00:02.500",
+    "你好",
+    ""
+  ].join("\n"));
 });

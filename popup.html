@@ -14,23 +14,29 @@
           <div class="kicker">VOICE / CAPTION LAB</div>
           <h1>Koe</h1>
         </div>
-        <span class="live-mark" id="live-mark"></span>
+        <span class="batch-mark" id="batch-mark">BATCH</span>
       </header>
 
       <section class="current-tab">
         <span class="section-label">CURRENT TAB</span>
         <strong id="tab-host">正在读取…</strong>
-        <span id="tab-title">点击开始，让字幕跟上视频。</span>
+        <span id="tab-title">先完整分析，再加载字幕。</span>
       </section>
 
       <section class="control-card">
         <div class="control-copy">
           <span class="section-label">CAPTION ENGINE</span>
           <strong id="engine-status">准备就绪</strong>
-          <span id="engine-detail">本地服务 · 检查中</span>
+          <span id="engine-detail">批处理服务 · 检查中</span>
         </div>
-        <button id="toggle" class="toggle" type="button">Start captions</button>
+        <button id="toggle" class="toggle" type="button">Analyze video</button>
       </section>
+
+      <label class="server-field file-field">
+        <span class="section-label">LOCAL VIDEO <em>OPTIONAL</em></span>
+        <input id="video-file" type="file" accept="video/*,.mp4,.webm,.mov,.mkv">
+        <small>网页拿不到源文件时，可直接选择本地视频。</small>
+      </label>
 
       <label class="server-field">
         <span class="section-label">LOCAL SERVICE</span>
@@ -43,7 +49,7 @@
       </label>
 
       <footer>
-        <span id="hint">默认 mock 模式，可先验证插件链路。</span>
+        <span id="hint">不会实时显示字幕，整段分析完成后才加载。</span>
         <a href="https://github.com/yuxino/ding-frame" target="_blank" rel="noreferrer">based on ding-frame ↗</a>
       </footer>
     </main>

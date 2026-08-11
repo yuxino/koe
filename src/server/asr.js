@@ -64,6 +64,74 @@ export async function transcribeWav({
   }));
 }
 
+export async function transcribeCompleteWav({
+  audio,
+  apiKey,
+  baseUrl,
+  model,
+  segmentMs = 60_000,
+  fetchImpl = fetch,
+  onProgress = () => undefined
+}) {
+  const wav = parsePcmWav(audio);
+  const bytesPerMs = wav.sampleRate * wav.channels * wav.bitsPerSample / 8 / 1_000;
+  const segmentBytes = Math.max(wav.channels, Math.floor(segmentMs * bytesPerMs / wav.blockAlign) * wav.blockAlign);
+  const lines = [];
+  for (let offset = 0; offset < wav.data.length; offset += segmentBytes) {
+    const data = wav.data.subarray(offset, Math.min(wav.data.length, offset + segmentBytes));
+    const startMs = Math.round(offset / bytesPerMs);
+    const endMs = Math.round((offset + data.length) / bytesPerMs);
+    const segment = encodePcmWav(data, wav);
+    lines.push(...await transcribeWav({ audio: segment, startMs, endMs, apiKey, baseUrl, model, fetchImpl }));
+    onProgress(Math.min(1, (offset + data.length) / wav.data.length));
+  }
+  return lines.sort((left, right) => left.startMs - right.startMs);
+}
+
+function parsePcmWav(audio) {
+  if (!Buffer.isBuffer(audio) || audio.length < 44 || audio.toString("ascii", 0, 4) !== "RIFF" || audio.toString("ascii", 8, 12) !== "WAVE") {
+    throw new Error("invalid_pcm_wav");
+  }
+  let offset = 12;
+  let fmt;
+  let data;
+  while (offset + 8 <= audio.length) {
+    const id = audio.toString("ascii", offset, offset + 4);
+    const size = audio.readUInt32LE(offset + 4);
+    const bodyStart = offset + 8;
+    if (id === "fmt ") fmt = audio.subarray(bodyStart, bodyStart + size);
+    if (id === "data") data = audio.subarray(bodyStart, bodyStart + size);
+    offset = bodyStart + size + (size % 2);
+  }
+  if (!fmt || !data || fmt.length < 16) throw new Error("invalid_pcm_wav");
+  const format = fmt.readUInt16LE(0);
+  const channels = fmt.readUInt16LE(2);
+  const sampleRate = fmt.readUInt32LE(4);
+  const blockAlign = fmt.readUInt16LE(12);
+  const bitsPerSample = fmt.readUInt16LE(14);
+  if (format !== 1 || !channels || !sampleRate || !blockAlign || bitsPerSample !== 16) throw new Error("unsupported_pcm_wav");
+  return { channels, sampleRate, blockAlign, bitsPerSample, data };
+}
+
+function encodePcmWav(data, format) {
+  const buffer = Buffer.alloc(44 + data.length);
+  buffer.write("RIFF", 0, "ascii");
+  buffer.writeUInt32LE(36 + data.length, 4);
+  buffer.write("WAVE", 8, "ascii");
+  buffer.write("fmt ", 12, "ascii");
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20);
+  buffer.writeUInt16LE(format.channels, 22);
+  buffer.writeUInt32LE(format.sampleRate, 24);
+  buffer.writeUInt32LE(format.sampleRate * format.blockAlign, 28);
+  buffer.writeUInt16LE(format.blockAlign, 32);
+  buffer.writeUInt16LE(format.bitsPerSample, 34);
+  buffer.write("data", 36, "ascii");
+  buffer.writeUInt32LE(data.length, 40);
+  data.copy(buffer, 44);
+  return buffer;
+}
+
 function nativeBaseUrl(compatibleBaseUrl) {
   const cleaned = String(compatibleBaseUrl || "").replace(/\/+$/, "");
   if (cleaned.includes("/compatible-mode/v1")) {

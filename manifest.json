@@ -2,13 +2,11 @@
   "manifest_version": 3,
   "name": "Koe",
   "version": "0.1.0",
-  "description": "Accurate, timestamped captions for the video in your current Chrome tab.",
+  "description": "Batch-analyze videos first, then load accurate timestamped captions.",
   "permissions": [
     "activeTab",
     "scripting",
-    "storage",
-    "tabCapture",
-    "offscreen"
+    "storage"
   ],
   "host_permissions": [
     "http://localhost/*",
@@ -30,10 +28,5 @@
       "run_at": "document_idle"
     }
   ],
-  "web_accessible_resources": [
-    {
-      "resources": ["audio-worklet.js"],
-      "matches": ["<all_urls>"]
-    }
-  ]
+  "web_accessible_resources": []
 }

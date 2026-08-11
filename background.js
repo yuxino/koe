@@ -1,6 +1,5 @@
-const OFFSCREEN_PATH = "offscreen.html";
 const tabStates = new Map();
-let offscreenCreation;
+const pollers = new Map();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender)
@@ -9,102 +8,123 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-async function handleMessage(message, sender) {
-  if (message.type === "START_CAPTURE") return startCapture(message);
-  if (message.type === "STOP_CAPTURE") return stopCapture(Number(message.tabId));
+chrome.tabs.onRemoved.addListener((tabId) => {
+  tabStates.delete(tabId);
+  stopPolling(tabId);
+});
+
+async function handleMessage(message) {
+  if (message.type === "ANALYZE_VIDEO") return analyzeVideo(message);
+  if (message.type === "WATCH_JOB") return watchJob(message);
+  if (message.type === "STOP_ANALYSIS") return stopAnalysis(Number(message.tabId));
   if (message.type === "GET_STATE") {
     const state = tabStates.get(Number(message.tabId));
-    return { ok: true, state: state ? publicState(state) : { running: false } };
-  }
-  if (message.type === "VIDEO_CLOCK" && sender.tab?.id !== undefined) {
-    const tabId = sender.tab.id;
-    const state = tabStates.get(tabId);
-    if (state?.running) {
-      state.videoClock = {
-        timeMs: Number(message.currentTimeMs) || 0,
-        paused: Boolean(message.paused),
-        rate: Number(message.playbackRate) || 1,
-        updatedAt: Date.now()
-      };
-      await sendToOffscreen({ target: "offscreen", type: "VIDEO_CLOCK", tabId, clock: state.videoClock });
-    }
-    return { ok: true };
-  }
-  if (message.type === "SUBTITLE" || message.type === "CAPTURE_STATUS" || message.type === "CAPTURE_ERROR") {
-    return forwardToTab(Number(message.tabId), message);
+    return { ok: true, state: state ? publicState(state) : { status: "idle" } };
   }
   return { ok: true };
 }
 
-async function startCapture({ tabId, serverUrl, apiToken, pageUrl }) {
+async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl }) {
   tabId = Number(tabId);
-  if (!Number.isInteger(tabId)) throw new Error("No active tab found.");
-  const current = tabStates.get(tabId);
-  if (current?.running) return { ok: true, state: publicState(current) };
-
+  if (!Number.isInteger(tabId)) throw new Error("没有找到当前标签页。");
   await ensureContentScript(tabId);
-  await ensureOffscreenDocument();
-  const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
+  const source = await chrome.tabs.sendMessage(tabId, { type: "GET_VIDEO_SOURCE" });
+  if (!source?.sourceUrl && !source?.pageUrl) throw new Error("当前页面没有找到可分析的视频。");
+
+  const jobPageUrl = source.pageUrl || pageUrl;
+  const sourceUrl = isExtractorPage(jobPageUrl) ? "" : source.sourceUrl || "";
+  const job = await createJob({
+    serverUrl,
+    apiToken,
+    pageUrl: jobPageUrl,
+    sourceUrl,
+    filename: source.filename || "video"
+  });
+  return beginWatching({ tabId, serverUrl, apiToken, job });
+}
+
+async function watchJob({ tabId, serverUrl, apiToken, jobId }) {
+  const job = await getJob(serverUrl, apiToken, jobId);
+  return beginWatching({ tabId: Number(tabId), serverUrl, apiToken, job });
+}
+
+async function beginWatching({ tabId, serverUrl, apiToken, job }) {
+  stopPolling(tabId);
   const state = {
     tabId,
-    running: true,
-    serverUrl: String(serverUrl || "http://127.0.0.1:8787").replace(/\/+$/, ""),
-    pageUrl: String(pageUrl || ""),
+    status: job.status === "ready" ? "ready" : "analyzing",
+    jobId: job.id,
+    serverUrl: String(serverUrl || "").replace(/\/+$/, ""),
+    apiToken: String(apiToken || ""),
     startedAt: Date.now(),
-    videoClock: null
+    progress: Number(job.progress || 0)
   };
   tabStates.set(tabId, state);
-
-  try {
-    const offscreenResponse = await sendToOffscreen({
-      target: "offscreen",
-      type: "START_CAPTURE",
-      tabId,
-      streamId,
-      serverUrl: state.serverUrl,
-      apiToken: String(apiToken || ""),
-      pageUrl: state.pageUrl
-    });
-    if (!offscreenResponse?.ok) throw new Error(offscreenResponse?.error || "音频采集页启动失败。");
-    await forwardToTab(tabId, { type: "CAPTURE_STATUS", tabId, status: "running" });
-    return { ok: true, state: publicState(state) };
-  } catch (error) {
-    tabStates.delete(tabId);
-    await forwardToTab(tabId, { type: "CAPTURE_ERROR", tabId, error: error instanceof Error ? error.message : String(error) });
-    throw error;
-  }
+  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress });
+  if (job.status === "ready") await publishReady(state);
+  else pollers.set(tabId, setInterval(() => pollJob(tabId).catch((error) => failJob(tabId, error)), 2_000));
+  return { ok: true, state: publicState(state) };
 }
 
-async function stopCapture(tabId) {
+async function pollJob(tabId) {
   const state = tabStates.get(tabId);
-  if (!state) return { ok: true, state: { running: false } };
-  await sendToOffscreen({ target: "offscreen", type: "STOP_CAPTURE", tabId }).catch(() => undefined);
-  tabStates.delete(tabId);
-  await forwardToTab(tabId, { type: "CAPTURE_STATUS", tabId, status: "idle" });
-  return { ok: true, state: { running: false } };
-}
-
-async function ensureOffscreenDocument() {
-  const offscreenUrl = chrome.runtime.getURL(OFFSCREEN_PATH);
-  const contexts = await chrome.runtime.getContexts({
-    contextTypes: ["OFFSCREEN_DOCUMENT"],
-    documentUrls: [offscreenUrl]
-  });
-  if (contexts.length) return;
-  if (!offscreenCreation) {
-    offscreenCreation = chrome.offscreen.createDocument({
-      url: OFFSCREEN_PATH,
-      reasons: ["USER_MEDIA"],
-      justification: "Capture and process current-tab video audio for captions."
-    });
+  if (!state) return stopPolling(tabId);
+  const job = await getJob(state.serverUrl, state.apiToken, state.jobId);
+  state.progress = Number(job.progress || 0);
+  if (job.status === "ready") {
+    stopPolling(tabId);
+    state.status = "ready";
+    await publishReady(state);
+    return;
   }
-  await offscreenCreation;
-  offscreenCreation = undefined;
+  if (job.status === "error") {
+    stopPolling(tabId);
+    return failJob(tabId, new Error(job.error || "视频分析失败。"));
+  }
+  state.status = "analyzing";
+  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: job.status });
 }
 
-async function sendToOffscreen(message) {
-  await ensureOffscreenDocument();
-  return chrome.runtime.sendMessage(message);
+async function publishReady(state) {
+  const response = await fetch(`${state.serverUrl}/api/jobs/${state.jobId}/vtt`, { headers: authHeaders(state.apiToken) });
+  const vtt = await response.text();
+  if (!response.ok) throw new Error(vtt || `字幕下载失败（${response.status}）`);
+  await forwardToTab(state.tabId, { type: "SUBTITLE_READY", tabId: state.tabId, vtt });
+  await forwardToTab(state.tabId, { type: "JOB_STATUS", tabId: state.tabId, status: "ready", progress: 1 });
+}
+
+async function createJob({ serverUrl, apiToken, pageUrl, sourceUrl, filename }) {
+  const response = await fetch(`${serverUrl}/api/jobs`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...authHeaders(apiToken) },
+    body: JSON.stringify({ pageUrl, sourceUrl, filename })
+  });
+  return parseResponse(response, "创建分析任务失败");
+}
+
+async function getJob(serverUrl, apiToken, jobId) {
+  const response = await fetch(`${String(serverUrl).replace(/\/+$/, "")}/api/jobs/${jobId}`, { headers: authHeaders(apiToken) });
+  return parseResponse(response, "读取分析任务失败");
+}
+
+async function failJob(tabId, error) {
+  const state = tabStates.get(tabId);
+  if (!state) return;
+  state.status = "error";
+  await forwardToTab(tabId, { type: "CAPTURE_ERROR", tabId, error: error instanceof Error ? error.message : String(error) });
+}
+
+async function stopAnalysis(tabId) {
+  stopPolling(tabId);
+  tabStates.delete(tabId);
+  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: "idle", progress: 0 });
+  return { ok: true, state: { status: "idle" } };
+}
+
+function stopPolling(tabId) {
+  const timer = pollers.get(tabId);
+  if (timer) clearInterval(timer);
+  pollers.delete(tabId);
 }
 
 async function ensureContentScript(tabId) {
@@ -116,17 +136,28 @@ async function ensureContentScript(tabId) {
 }
 
 async function forwardToTab(tabId, message) {
-  try {
-    return await chrome.tabs.sendMessage(tabId, message);
-  } catch {
-    return { ok: false, ignored: true };
-  }
+  try { return await chrome.tabs.sendMessage(tabId, message); } catch { return { ok: false, ignored: true }; }
 }
 
 function publicState(state) {
-  return {
-    running: state.running,
-    serverUrl: state.serverUrl,
-    startedAt: state.startedAt
-  };
+  return { status: state.status, jobId: state.jobId, startedAt: state.startedAt, progress: state.progress };
+}
+
+async function parseResponse(response, fallback) {
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || `${fallback}（${response.status}）`);
+  return body;
+}
+
+function authHeaders(apiToken) {
+  return apiToken ? { Authorization: `Bearer ${apiToken}` } : {};
+}
+
+function isExtractorPage(value) {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return hostname === "pornhub.com" || hostname.endsWith(".pornhub.com") || hostname === "xvideos.com" || hostname.endsWith(".xvideos.com");
+  } catch {
+    return false;
+  }
 }

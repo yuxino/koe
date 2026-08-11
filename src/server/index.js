@@ -1,16 +1,14 @@
 import { createServer as createHttpServer } from "node:http";
-import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve, join } from "node:path";
-import { transcribeWav } from "./asr.js";
+import { createJobManager } from "./jobs.js";
 
 loadDotEnv();
 
 const DEFAULT_PORT = 8_787;
-const DEFAULT_CHUNK_SECONDS = 15;
-const MAX_CHUNK_BYTES = 12 * 1024 * 1024;
-const sessions = new Map();
+const MAX_JSON_BYTES = 1 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 512 * 1024 * 1024;
 
 export function createServer(options = {}) {
   const apiKey = options.apiKey ?? process.env.DASHSCOPE_API_KEY ?? "";
@@ -20,10 +18,18 @@ export function createServer(options = {}) {
     provider: requestedProvider === "dashscope" && !apiKey ? "mock" : requestedProvider,
     apiKey,
     apiToken: options.apiToken ?? process.env.KOE_API_TOKEN ?? "",
-    baseUrl: options.baseUrl || process.env.DASHSCOPE_BASE_URL || "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    model: options.model || process.env.ASR_MODEL || "fun-asr-flash-2026-06-15",
-    chunkSeconds: Number(options.chunkSeconds || process.env.ASR_CHUNK_SECONDS || DEFAULT_CHUNK_SECONDS)
+    ffmpegBin: options.ffmpegBin || process.env.FFMPEG_BIN || "ffmpeg",
+    ytdlpBin: options.ytdlpBin || process.env.YTDLP_BIN || "yt-dlp",
+    mode: "batch"
   };
+  const jobs = createJobManager({
+    provider: config.provider,
+    apiKey: config.apiKey,
+    processJob: options.processJob,
+    tempRoot: options.tempRoot,
+    ffmpegBin: config.ffmpegBin,
+    ytdlpBin: config.ytdlpBin
+  });
 
   const server = createHttpServer(async (request, response) => {
     addCorsHeaders(response);
@@ -35,102 +41,79 @@ export function createServer(options = {}) {
 
     try {
       const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
-
       if (request.method === "GET" && url.pathname === "/health") {
         sendJson(response, 200, {
           ok: true,
           service: "koe",
           provider: config.provider,
+          mode: config.mode,
           authRequired: Boolean(config.apiToken),
-          chunkSeconds: config.chunkSeconds
+          tools: { ffmpeg: config.ffmpegBin, ytDlp: config.ytdlpBin }
         });
         return;
       }
 
-      if (request.method === "POST" && url.pathname === "/api/session/start") {
-        if (!isAuthorized(request, config.apiToken)) {
-          sendJson(response, 401, { error: "unauthorized" });
-          return;
-        }
-        const payload = await readJson(request);
-        const id = randomUUID();
-        sessions.set(id, {
-          id,
-          createdAt: Date.now(),
-          chunkCount: 0,
-          tabId: payload.tabId ?? null,
-          pageUrl: payload.pageUrl ?? ""
-        });
-        sendJson(response, 201, { id, provider: config.provider, chunkSeconds: config.chunkSeconds });
+      if (request.method === "POST" && url.pathname === "/api/jobs") {
+        if (!isAuthorized(request, config.apiToken)) return unauthorized(response);
+        const job = await jobs.createJob(await readJson(request));
+        sendJson(response, 202, job);
         return;
       }
 
-      const chunkMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/chunk$/);
-      if (request.method === "POST" && chunkMatch) {
-        if (!isAuthorized(request, config.apiToken)) {
-          sendJson(response, 401, { error: "unauthorized" });
-          return;
-        }
-        const session = sessions.get(chunkMatch[1]);
-        if (!session) {
-          sendJson(response, 404, { error: "session_not_found" });
-          return;
-        }
-
-        const audio = await readBody(request, MAX_CHUNK_BYTES);
-        const startMs = finiteNumber(request.headers["x-start-ms"], session.chunkCount * config.chunkSeconds * 1_000);
-        const endMs = Math.max(startMs, finiteNumber(request.headers["x-end-ms"], startMs + config.chunkSeconds * 1_000));
-        const lines = config.provider === "dashscope"
-          ? await transcribeWav({ audio, startMs, endMs, apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model })
-          : createMockSubtitle(session, startMs, endMs, audio.length);
-
-        session.chunkCount += 1;
-        session.lastChunkAt = Date.now();
-        sendJson(response, 200, { lines, chunkCount: session.chunkCount });
+      const sourceMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/source$/);
+      if (request.method === "POST" && sourceMatch) {
+        if (!isAuthorized(request, config.apiToken)) return unauthorized(response);
+        const job = await jobs.attachSourceStream(sourceMatch[1], request, request.headers["x-filename"] || "video", MAX_VIDEO_BYTES);
+        sendJson(response, 202, job);
         return;
       }
 
-      const stopMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/stop$/);
-      if (request.method === "POST" && stopMatch) {
-        if (!isAuthorized(request, config.apiToken)) {
-          sendJson(response, 401, { error: "unauthorized" });
-          return;
+      const statusMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)$/);
+      if (request.method === "GET" && statusMatch) {
+        if (!isAuthorized(request, config.apiToken)) return unauthorized(response);
+        const job = jobs.get(statusMatch[1]);
+        if (!job) return sendJson(response, 404, { error: "job_not_found" });
+        sendJson(response, 200, job);
+        return;
+      }
+
+      const vttMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/vtt$/);
+      if (request.method === "GET" && vttMatch) {
+        if (!isAuthorized(request, config.apiToken)) return unauthorized(response);
+        try {
+          const vtt = jobs.getVtt(vttMatch[1]);
+          response.writeHead(200, { "content-type": "text/vtt; charset=utf-8", "cache-control": "no-store" });
+          response.end(vtt);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          sendJson(response, message === "job_not_found" ? 404 : 409, { error: message });
         }
-        const existed = sessions.delete(stopMatch[1]);
-        sendJson(response, existed ? 200 : 404, { ok: existed });
         return;
       }
 
       if (request.method === "GET" && url.pathname === "/") {
-        sendJson(response, 200, { service: "koe", health: "/health" });
+        sendJson(response, 200, { service: "koe", mode: "batch", health: "/health", jobs: "/api/jobs" });
         return;
       }
 
       sendJson(response, 404, { error: "not_found" });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      sendJson(response, 500, { error: message });
+      sendJson(response, 400, { error: message });
     }
   });
 
-  return { server, config, sessions };
-}
-
-function createMockSubtitle(session, startMs, endMs, byteLength) {
-  const number = session.chunkCount + 1;
-  const duration = Math.max(1_000, endMs - startMs);
-  return [{
-    startMs,
-    endMs: Math.min(endMs, startMs + duration),
-    text: `演示字幕 ${number} · 已收到当前标签页音频（${Math.max(1, Math.round(byteLength / 1024))} KB）。配置 Fun-ASR 后会替换成真实听写。`,
-    provider: "mock"
-  }];
+  return { server, config, jobs };
 }
 
 function addCorsHeaders(response) {
   response.setHeader("access-control-allow-origin", "*");
   response.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
-  response.setHeader("access-control-allow-headers", "content-type,x-start-ms,x-end-ms");
+  response.setHeader("access-control-allow-headers", "authorization,content-type,x-filename");
+}
+
+function unauthorized(response) {
+  sendJson(response, 401, { error: "unauthorized" });
 }
 
 function sendJson(response, status, payload) {
@@ -139,7 +122,7 @@ function sendJson(response, status, payload) {
 }
 
 function readJson(request) {
-  return readBody(request, 1 * 1024 * 1024).then((body) => {
+  return readBody(request, MAX_JSON_BYTES).then((body) => {
     if (!body.length) return {};
     return JSON.parse(body.toString("utf8"));
   });
@@ -163,26 +146,15 @@ function readBody(request, limit) {
   });
 }
 
-function finiteNumber(value, fallback) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : fallback;
-}
-
 function isAuthorized(request, apiToken) {
   if (!apiToken) return true;
-  const authorization = String(request.headers.authorization || "");
-  return authorization === `Bearer ${apiToken}`;
+  return String(request.headers.authorization || "") === `Bearer ${apiToken}`;
 }
 
 function loadDotEnv() {
   const path = join(process.cwd(), ".env");
   let contents = "";
-  try {
-    contents = readFileSync(path, "utf8");
-  } catch {
-    return;
-  }
-
+  try { contents = readFileSync(path, "utf8"); } catch { return; }
   for (const rawLine of contents.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#")) continue;
@@ -197,6 +169,6 @@ function loadDotEnv() {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const { server, config } = createServer();
   server.listen(config.port, "127.0.0.1", () => {
-    console.log(`[koe] listening on http://127.0.0.1:${config.port} (${config.provider})`);
+    console.log(`[koe] listening on http://127.0.0.1:${config.port} (${config.provider}, ${config.mode})`);
   });
 }
