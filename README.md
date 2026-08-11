@@ -21,7 +21,7 @@ Koe 不做边播边听写；字幕按“已识别完成的段落”渐进显示�
 
 ```text
 浏览器真实媒体地址 → 本地 FFmpeg 提取音频 ─┐
-拿不到媒体地址时 → 本地 yt-dlp 兜底 ───────┤
+拿不到媒体地址时 → 明确提示无法分析 ───────┤
                                               ↓
                         首块 5 秒 + 30 秒切块 → Fun-ASR 完整识别
                         → 双语翻译 → 生成 WebVTT → 视频加载字幕
@@ -31,7 +31,7 @@ Koe 不做边播边听写；字幕按“已识别完成的段落”渐进显示�
 
 ### 1. 安装本地助手
 
-需要 Node.js 20+ 和 `ffmpeg`。`yt-dlp` 是可选的兜底：只在页面不暴露视频直链或直链失效时用来下载音轨；大多数页面用不到，不装也能正常用。
+需要 Node.js 20+ 和 `ffmpeg`。分析完全基于浏览器拿到的视频直链，不依赖 yt-dlp；拿不到直链的页面会明确提示无法分析。
 
 ```bash
 ./scripts/install-local-helper.sh
@@ -65,7 +65,7 @@ ASR_SEGMENT_SECONDS=60
 DASHSCOPE_API_KEY=...
 KOE_API_TOKEN=...
 FFMPEG_BIN=ffmpeg
-YTDLP_BIN=yt-dlp
+YTDLP_BIN=
 ```
 
 真实 ASR Key 只保留在线上服务端。本地助手从 macOS 钥匙串读取远端 Koe Token；扩展面板不再保存或显示任何 Token。

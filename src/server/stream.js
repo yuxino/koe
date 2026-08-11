@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { rm, writeFile } from "node:fs/promises";
 import { transcribeWav } from "./asr.js";
-import { detectSpeechRanges, MEDIA_USER_AGENT } from "./media.js";
+import { detectSpeechRanges } from "./media.js";
 
 const FIRST_CHUNK_MS = 5_000;
 const CHUNK_MS = Math.max(10_000, Number(process.env.KOE_STREAM_CHUNK_SECONDS || 30) * 1_000);
@@ -10,25 +10,18 @@ export async function streamExtractAndTranscribe({
   pageUrl,
   sourceUrl,
   ffmpegBin,
-  ytdlpBin,
   apiKey,
   asrAcquire,
   onLines,
   onProgress
 }) {
-  const attempts = [];
-  const direct = await makeDirectPipeline({ pageUrl, sourceUrl, ffmpegBin, ytdlpBin });
-  if (direct) attempts.push(direct);
-  attempts.push(() => makePipePipeline({ pageUrl, sourceUrl, ffmpegBin, ytdlpBin }));
-  let lastError = null;
-  for (const factory of attempts) {
-    try {
-      return await runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, onProgress });
-    } catch (error) {
-      lastError = error;
-    }
+  if (!/^https?:/i.test(sourceUrl || "")) {
+    throw new Error("页面没有可直接获取的视频地址，无法分析。");
   }
-  throw lastError || new Error("stream pipeline failed");
+  const headers = pageUrl
+    ? ["-headers", `Referer: ${pageUrl}\r\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/136 Safari/537.36\r\n`]
+    : [];
+  return runPipeline(() => spawnFfmpeg(ffmpegBin, [...headers, "-i", sourceUrl]), { ffmpegBin, apiKey, asrAcquire, onLines, onProgress });
 }
 
 async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, onProgress }) {
@@ -148,82 +141,6 @@ async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, on
   return { chunks: chunkCount };
 }
 
-async function makeDirectPipeline({ pageUrl, sourceUrl, ffmpegBin, ytdlpBin }) {
-  let url = sourceUrl;
-  if (pageUrl && pageUrl !== sourceUrl && ytdlpBin) {
-    try {
-      const { stdout } = await runCapture(ytdlpBin, [
-        "-g",
-        "--no-playlist",
-        "--no-warnings",
-        "-f",
-        "bestaudio/worst",
-        pageUrl
-      ], 30_000);
-      const candidate = String(stdout).trim().split(/\s+/)[0];
-      if (/^https?:/i.test(candidate)) url = candidate;
-    } catch {
-      return null;
-    }
-  }
-  if (!/^https?:/i.test(url)) return null;
-  const headers = pageUrl
-    ? ["-headers", `Referer: ${pageUrl}\r\nUser-Agent: ${MEDIA_USER_AGENT}\r\n`]
-    : [];
-  return () => spawnFfmpeg(ffmpegBin, [...headers, "-i", url]);
-}
-
-function makePipePipeline({ pageUrl, sourceUrl, ffmpegBin, ytdlpBin }) {
-  const children = [];
-  const diagnostics = [];
-  const useYtDlp = Boolean(pageUrl) && pageUrl !== sourceUrl && Boolean(ytdlpBin);
-  let ff;
-  if (useYtDlp) {
-    const yt = spawn(ytdlpBin, [
-      "--no-playlist",
-      "--no-warnings",
-      "--newline",
-      "--no-color",
-      "--no-part",
-      "-f",
-      "bestaudio/worst",
-      "--concurrent-fragments",
-      "8",
-      "-o",
-      "-",
-      pageUrl
-    ], { stdio: ["ignore", "pipe", "pipe"] });
-    ff = spawn(ffmpegBin, [
-      "-nostdin",
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-i",
-      "pipe:0",
-      "-ac",
-      "1",
-      "-ar",
-      "16000",
-      "-c:a",
-      "pcm_s16le",
-      "-f",
-      "wav",
-      "pipe:1"
-    ], { stdio: ["pipe", "pipe", "ignore"] });
-    yt.stdout.pipe(ff.stdin);
-    children.push(yt, ff);
-  } else {
-    return spawnFfmpeg(ffmpegBin, ["-i", sourceUrl]);
-  }
-  const closePromise = Promise.all(children.map((child) => new Promise((resolve) => {
-    child.on("close", (code) => {
-      diagnostics.push({ command: String(child.spawnargs?.[0] || "child").split("/").pop(), code });
-      resolve();
-    });
-  })));
-  return { stream: ff.stdout, closePromise, diagnostics };
-}
-
 function spawnFfmpeg(ffmpegBin, args) {
   const children = [];
   const diagnostics = [];
@@ -251,26 +168,6 @@ function spawnFfmpeg(ffmpegBin, args) {
     });
   })));
   return { stream: ff.stdout, closePromise, diagnostics };
-}
-
-function runCapture(command, args, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.on("error", reject);
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error("yt-dlp -g timed out"));
-    }, timeoutMs);
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(String(stderr || `exit ${code}`).trim().slice(-200)));
-    });
-  });
 }
 
 async function transcribeChunk(audio, chunkMs, apiKey, asrAcquire) {

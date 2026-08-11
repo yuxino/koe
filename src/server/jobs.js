@@ -199,7 +199,6 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
         sourceUrl: job.sourceUrl,
         outputDir: job.directory,
         ffmpegBin,
-        ytdlpBin,
         durationMs: job.durationMs,
         onProgress: (value) => updateProgress("downloading", 0.08 + Number(value || 0) * 0.22, "正在下载/提取声音")
       }));
@@ -222,9 +221,7 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
       await withSemaphore(extractAcquire, () => streamExtractAndTranscribe({
         pageUrl: job.pageUrl,
         sourceUrl: job.sourceUrl,
-        directory: job.directory,
         ffmpegBin,
-        ytdlpBin,
         apiKey,
         asrAcquire,
         onLines: (segmentLines) => {
@@ -258,7 +255,6 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
       sourceUrl: job.sourceUrl,
       outputDir: job.directory,
       ffmpegBin,
-      ytdlpBin,
       durationMs: job.durationMs,
       onProgress: (value) => updateProgress("downloading", 0.08 + Number(value || 0) * 0.22, "正在下载/提取声音")
     }));

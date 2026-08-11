@@ -92,7 +92,6 @@ export async function extractAudioLocally({
   sourceUrl,
   outputDir,
   ffmpegBin = "ffmpeg",
-  ytdlpBin = "yt-dlp",
   onProgress = () => undefined,
   run = runCommand,
   fetchImpl = fetch,
@@ -100,62 +99,19 @@ export async function extractAudioLocally({
 }) {
   await mkdir(outputDir, { recursive: true });
   const outputPath = join(outputDir, "audio.m4a");
-
-  // 页面存在时优先用 yt-dlp 只下载音轨（远小于整段视频）；失败再回退直链 ffmpeg
-  const preferPageAudio = Boolean(pageUrl) && pageUrl !== sourceUrl && Boolean(ytdlpBin);
-  if (preferPageAudio) {
-    try {
-      const sourcePath = await acquireSource({
-        pageUrl,
-        sourceUrl: "",
-        outputDir,
-        ytdlpBin,
-        audioOnly: true,
-        onProgress: (value) => onProgress(Number(value || 0) * 0.7),
-        run
-      });
-      await normalizeToAac({
-        input: sourcePath,
-        outputPath,
-        ffmpegBin,
-        run,
-        durationMs,
-        onProgress: (value) => onProgress(0.7 + Number(value || 0) * 0.3)
-      });
-      return outputPath;
-    } catch {
-      // 页面音轨不可用时继续走直链
-    }
+  if (!/^https?:/i.test(sourceUrl || "")) {
+    throw new Error("页面没有可直接获取的视频地址，无法提取声音。");
   }
-
-  if (sourceUrl) {
-    try {
-      const inputUrl = await resolveHlsAudioVariant(sourceUrl, { pageUrl, fetchImpl });
-      await normalizeToAac({
-        input: inputUrl,
-        outputPath,
-        pageUrl,
-        ffmpegBin,
-        run,
-        durationMs,
-        onProgress
-      });
-      return outputPath;
-    } catch (error) {
-      if (!pageUrl) throw error;
-    }
-  }
-
-  const sourcePath = await acquireSource({
+  const inputUrl = await resolveHlsAudioVariant(sourceUrl, { pageUrl, fetchImpl });
+  await normalizeToAac({
+    input: inputUrl,
+    outputPath,
     pageUrl,
-    sourceUrl: "",
-    outputDir,
-    ytdlpBin,
-    audioOnly: true,
-    onProgress: (value) => onProgress(Number(value || 0) * 0.8),
-    run
+    ffmpegBin,
+    run,
+    durationMs,
+    onProgress
   });
-  await normalizeToAac({ input: sourcePath, outputPath, ffmpegBin, run, durationMs, onProgress: (value) => onProgress(0.8 + Number(value || 0) * 0.2) });
   return outputPath;
 }
 
