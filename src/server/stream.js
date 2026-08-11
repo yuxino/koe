@@ -20,7 +20,7 @@ export async function streamExtractAndTranscribe({
   const segDir = join(directory, "segments");
   await mkdir(segDir, { recursive: true });
 
-  const { closePromise } = startPipeline({ pageUrl, sourceUrl, segDir, ffmpegBin, ytdlpBin });
+  const { closePromise, diagnostics } = startPipeline({ pageUrl, sourceUrl, segDir, ffmpegBin, ytdlpBin });
   const processed = new Set();
   let offsetMs = 0;
   let chunkCount = 0;
@@ -61,6 +61,11 @@ export async function streamExtractAndTranscribe({
     if (closed) break;
     await delay(400);
   }
+  const failed = diagnostics.filter((entry) => entry.code !== 0);
+  if (failed.length) {
+    throw new Error(`stream pipeline failed (${failed.map((entry) => `${entry.command} exit ${entry.code}`).join(", ")})`);
+  }
+  if (chunkCount === 0) throw new Error("stream pipeline produced no audio");
   for (const failure of failures) {
     try {
       const lines = await transcribeChunk(failure.audio, chunkMsOf(failure.audio), apiKey, asrAcquire);
@@ -139,7 +144,13 @@ function startPipeline({ pageUrl, sourceUrl, segDir, ffmpegBin, ytdlpBin }) {
     children.push(ff);
   }
   const closePromise = Promise.all(children.map((child) => new Promise((resolve) => child.on("close", resolve))));
-  return { closePromise };
+  const diagnostics = [];
+  for (const child of children) {
+    child.on("close", (code) => {
+      diagnostics.push({ command: String(child.spawnargs?.[0] || "child").split("/").pop(), code });
+    });
+  }
+  return { closePromise, diagnostics };
 }
 
 async function collectReadySegments(segDir, closed) {
