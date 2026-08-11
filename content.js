@@ -35,6 +35,7 @@
   let cues = [];
   let activeVideo;
   let subtitleTimer;
+  let subtitleReady = false;
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === "PING") {
@@ -47,15 +48,25 @@
     }
     if (message.type === "JOB_STATUS") {
       if (message.status === "analyzing") showStatus(`正在分析视频 ${Math.round(Number(message.progress || 0) * 100)}%`, "字幕将在整段分析完成后出现", "ANALYZING");
-      if (message.status === "idle") hide();
+      if (message.status === "ready") {
+        subtitleReady = true;
+        showStatus("字幕已就绪", "点击播放后自动显示字幕", "READY");
+      }
+      if (message.status === "idle") {
+        subtitleReady = false;
+        hide();
+      }
       return false;
     }
     if (message.type === "SUBTITLE_READY") {
       cues = parseVtt(message.vtt || "");
       activeVideo = findVideo();
+      subtitleReady = true;
       if (activeVideo) {
         activeVideo.currentTime = 0;
         activeVideo.play().catch(() => showStatus("字幕已就绪", "请点击视频播放", "READY"));
+      } else {
+        showStatus("字幕已就绪", "请回到视频页面", "READY");
       }
       startSubtitleClock();
       return false;
@@ -92,6 +103,7 @@
       const timeMs = activeVideo.currentTime * 1_000;
       const cue = cues.find((item) => timeMs >= item.startMs && timeMs < item.endMs);
       if (cue) show(cue.text, `KOE · ${formatTime(cue.startMs)}`, "READY");
+      else if (activeVideo.paused && subtitleReady) showStatus("字幕已就绪", "点击播放后自动显示字幕", "READY");
       else hide();
     }, 100);
   }

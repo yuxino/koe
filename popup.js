@@ -15,19 +15,34 @@ const elements = {
 
 document.addEventListener("DOMContentLoaded", init);
 elements.toggle.addEventListener("click", analyze);
+chrome.tabs.onActivated.addListener(refreshActiveTab);
 
 async function init() {
+  await refreshActiveTab();
+  await checkHealth();
+  await refreshState();
+}
+
+async function refreshActiveTab() {
   [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   elements.tabHost.textContent = hostName(activeTab?.url);
   elements.tabTitle.textContent = activeTab?.title || "当前标签页";
-  await checkHealth();
+  await refreshState();
+}
+
+async function refreshState() {
   const response = await chrome.runtime.sendMessage({ type: "GET_STATE", tabId: activeTab?.id });
   currentState = response?.state || { status: "idle" };
   renderState();
 }
 
 async function analyze() {
-  if (!activeTab?.id) return;
+  await refreshActiveTab();
+  if (!activeTab?.id) {
+    elements.engineStatus.textContent = "无法分析";
+    elements.engineDetail.textContent = "没有找到当前标签页。";
+    return;
+  }
   elements.toggle.disabled = true;
   elements.engineStatus.textContent = "正在创建任务…";
   try {
