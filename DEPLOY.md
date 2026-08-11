@@ -99,3 +99,31 @@ pm2 logs koe-api
 ```
 
 `/health` 公开；任务创建、视频上传、任务查询和 VTT 下载在设置 `KOE_API_TOKEN` 后都需要 `Authorization: Bearer <KOE_API_TOKEN>`。
+
+## GitHub Actions 自动部署
+
+仓库包含 `.github/workflows/deploy.yml`。向 `main` 推送代码，或在 GitHub Actions 页面手动运行 `Deploy Koe API`，会自动完成：
+
+1. 通过 SSH 将当前 commit 同步到 `/root/koe`
+2. 保留服务器上的 `/root/koe/.env`
+3. 执行 `npm ci --omit=dev`
+4. 重启或首次启动 PM2 进程 `koe-api`
+5. 请求本机 `/health` 做部署后检查
+
+首次使用前，在仓库的 `Settings → Secrets and variables → Actions` 添加以下 secrets：
+
+| Secret | 内容 |
+| --- | --- |
+| `DEPLOY_HOST` | 服务器域名或 IP |
+| `DEPLOY_PORT` | SSH 端口，可不填，默认 `22` |
+| `DEPLOY_USER` | SSH 登录用户；当前服务器部署可填 `root` |
+| `DEPLOY_SSH_KEY` | 对应登录用户的 SSH 私钥，完整多行内容 |
+| `DEPLOY_KNOWN_HOSTS` | 服务器 SSH host key，不能留空 |
+
+生成 `DEPLOY_KNOWN_HOSTS` 的示例：
+
+```bash
+ssh-keyscan -H -p 22 your-server.example.com
+```
+
+私钥只放在 GitHub Actions Secrets 中，不要提交到仓库。服务器上的 `.env` 仍然只保留在服务器，不通过 Actions 传输。

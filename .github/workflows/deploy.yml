@@ -1,0 +1,73 @@
+name: Deploy Koe API
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: koe-api-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_PATH: /root/koe
+      DEPLOY_APP_PORT: '3011'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate deployment secrets
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -eu
+          test -n "$DEPLOY_HOST" || { echo "::error::DEPLOY_HOST is not configured"; exit 1; }
+          test -n "$DEPLOY_USER" || { echo "::error::DEPLOY_USER is not configured"; exit 1; }
+          test -n "$DEPLOY_SSH_KEY" || { echo "::error::DEPLOY_SSH_KEY is not configured"; exit 1; }
+          test -n "$DEPLOY_KNOWN_HOSTS" || { echo "::error::DEPLOY_KNOWN_HOSTS is not configured"; exit 1; }
+
+      - name: Sync and restart API
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -eu
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/koe_deploy_key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/koe_deploy_key" "$HOME/.ssh/known_hosts"
+
+          eval "$(ssh-agent -s)"
+          ssh-add "$HOME/.ssh/koe_deploy_key"
+
+          ssh_args=(-p "$DEPLOY_PORT" -o BatchMode=yes)
+          ssh "${ssh_args[@]}" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "mkdir -p '$DEPLOY_PATH'"
+
+          git archive --format=tar HEAD \
+            | ssh "${ssh_args[@]}" "$DEPLOY_USER@$DEPLOY_HOST" \
+              "tar -xf - -C '$DEPLOY_PATH'"
+
+          ssh "${ssh_args[@]}" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd '$DEPLOY_PATH' \
+              && npm ci --omit=dev \
+              && if pm2 describe koe-api >/dev/null 2>&1; then \
+                   pm2 restart koe-api --update-env; \
+                 else \
+                   pm2 start src/server/start.js --name koe-api --cwd '$DEPLOY_PATH'; \
+                 fi \
+              && pm2 save \
+              && curl --fail --silent --show-error http://127.0.0.1:$DEPLOY_APP_PORT/health"
