@@ -27,6 +27,7 @@ test("mock server creates a complete batch caption job", async (t) => {
   const ready = await waitForJob(baseUrl, created.id);
   assert.equal(ready.status, "ready");
   assert.equal(ready.lineCount, 1);
+  assert.equal(ready.stageDetail, "模拟识别");
 
   const vtt = await fetch(`${baseUrl}/api/jobs/${created.id}/vtt`).then((response) => response.text());
   assert.match(vtt, /^WEBVTT/);

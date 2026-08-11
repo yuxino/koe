@@ -38,6 +38,7 @@ export function createJobManager(options = {}) {
       vtt: "",
       lines: [],
       progress: 0,
+      stageDetail: "",
       error: "",
       createdAt: Date.now(),
       startedAt: null,
@@ -111,13 +112,14 @@ export function createJobManager(options = {}) {
         remoteToken: options.remoteToken || process.env.KOE_REMOTE_TOKEN || "",
         asrAcquire: () => asrSemaphore.acquire(),
         extractAcquire: () => extractSemaphore.acquire(),
-        updateProgress: (status, progress) => {
+        updateProgress: (status, progress, detail = "") => {
           if (status !== lastStatus) {
             console.log(`[koe] job ${job.id.slice(0, 8)} -> ${status} at +${((Date.now() - job.startedAt) / 1_000).toFixed(1)}s`);
             lastStatus = status;
           }
           job.status = status;
           job.progress = Math.max(0, Math.min(1, progress));
+          job.stageDetail = String(detail || "");
         }
       });
       job.lines = result.lines || [];
@@ -149,18 +151,18 @@ export function createJobManager(options = {}) {
 
 async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, remoteUrl, remoteToken, asrAcquire, extractAcquire, updateProgress }) {
   if (provider === "mock") {
-    updateProgress("analyzing", 0.75);
+    updateProgress("analyzing", 0.75, "模拟识别");
     const lines = [{ startMs: 0, endMs: 3_000, text: `演示字幕 · ${job.filename}`, provider: "mock" }];
     return { lines, vtt: toWebVtt(lines) };
   }
 
   if (provider === "relay") {
-    updateProgress("downloading", 0.08);
+    updateProgress("downloading", 0.08, "准备下载/提取声音");
     let audioPath;
     if (job.sourcePath) {
       audioPath = join(job.directory, "audio.m4a");
       await normalizeToAac({ input: job.sourcePath, outputPath: audioPath, ffmpegBin });
-      updateProgress("downloading", 0.3);
+      updateProgress("downloading", 0.3, "处理上传的音频");
     } else {
       audioPath = await withSemaphore(extractAcquire, () => extractAudioLocally({
         pageUrl: job.pageUrl,
@@ -169,27 +171,27 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
         ffmpegBin,
         ytdlpBin,
         durationMs: job.durationMs,
-        onProgress: (value) => updateProgress("downloading", 0.08 + Number(value || 0) * 0.22)
+        onProgress: (value) => updateProgress("downloading", 0.08 + Number(value || 0) * 0.22, "正在下载/提取声音")
       }));
     }
-    updateProgress("uploading_audio", 0.32);
+    updateProgress("uploading_audio", 0.32, "正在上传音频到识别服务");
     const result = await relayAudioToKoe({
       audioPath,
       remoteUrl,
       remoteToken,
-      onProgress: (value) => updateProgress("analyzing", 0.32 + Number(value || 0) * 0.64)
+      onProgress: (value, detail) => updateProgress("analyzing", 0.32 + Number(value || 0) * 0.64, detail || "整段识别中")
     });
     return { lines: [], vtt: result.vtt };
   }
 
-  updateProgress("downloading", 0.1);
+  updateProgress("downloading", 0.1, "正在下载/提取声音");
   const sourcePath = job.sourcePath || await withSemaphore(extractAcquire, () => acquireSource({
     pageUrl: job.pageUrl,
     sourceUrl: job.sourceUrl,
     outputDir: job.directory,
     ytdlpBin
   }));
-  updateProgress("analyzing", 0.35);
+  updateProgress("analyzing", 0.35, "正在转换音频");
   const wavPath = join(job.directory, "audio.wav");
   await withSemaphore(extractAcquire, () => normalizeToWav({
     inputPath: sourcePath,
@@ -211,7 +213,7 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
     concurrency: Number(process.env.ASR_CONCURRENCY || 8),
     speechRangesMs,
     acquire: asrAcquire,
-    onProgress: (value) => updateProgress("analyzing", 0.35 + value * 0.6)
+    onProgress: (value, detail) => updateProgress("analyzing", 0.35 + value * 0.6, detail || "整段识别中")
   });
   return { lines, vtt: toWebVtt(lines) };
 }
@@ -235,6 +237,7 @@ function publicJob(job) {
     durationMs: job.durationMs,
     provider: job.provider,
     progress: job.progress,
+    stageDetail: job.stageDetail || "",
     error: job.error || undefined,
     lineCount: job.lines.length,
     createdAt: job.createdAt,

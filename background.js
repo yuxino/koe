@@ -61,10 +61,11 @@ async function beginWatching({ tabId, frameId = 0, serverUrl, apiToken, job }) {
     apiToken: String(apiToken || ""),
     startedAt: Date.now(),
     progress: Number(job.progress || 0),
-    jobStatus: job.status || "analyzing"
+    jobStatus: job.status || "analyzing",
+    stageDetail: job.stageDetail || ""
   };
   tabStates.set(tabId, state);
-  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: state.jobStatus }, frameId);
+  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: state.jobStatus, stageDetail: state.stageDetail }, frameId);
   if (job.status === "ready") await publishReady(state);
   else pollers.set(tabId, setInterval(() => pollJob(tabId).catch((error) => failJob(tabId, error)), 2_000));
   return { ok: true, state: publicState(state) };
@@ -76,6 +77,7 @@ async function pollJob(tabId) {
   const job = await getJob(state.serverUrl, state.apiToken, state.jobId);
   state.progress = Number(job.progress || 0);
   state.jobStatus = job.status || state.jobStatus;
+  state.stageDetail = job.stageDetail || "";
   if (job.status === "ready") {
     stopPolling(tabId);
     state.status = "ready";
@@ -87,7 +89,7 @@ async function pollJob(tabId) {
     return failJob(tabId, new Error(job.error || "视频分析失败。"));
   }
   state.status = "analyzing";
-  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: job.status }, state.frameId);
+  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: job.status, stageDetail: state.stageDetail }, state.frameId);
 }
 
 async function publishReady(state) {
@@ -251,7 +253,7 @@ async function forwardToTab(tabId, message, frameId = 0) {
 }
 
 function publicState(state) {
-  return { status: state.status, jobId: state.jobId, startedAt: state.startedAt, progress: state.progress, jobStatus: state.jobStatus };
+  return { status: state.status, jobId: state.jobId, startedAt: state.startedAt, progress: state.progress, jobStatus: state.jobStatus, stageDetail: state.stageDetail };
 }
 
 async function parseResponse(response, fallback) {

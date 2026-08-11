@@ -35,7 +35,7 @@ export async function relayAudioToKoe({
 
   for (let attempt = 0; attempt < maxPolls; attempt += 1) {
     const job = await requestJson(fetchImpl, `${baseUrl}/api/jobs/${created.id}`, { headers }, "remote_job_read_failed");
-    onProgress(Number(job.progress || 0));
+    onProgress(Number(job.progress || 0), job.stageDetail || "");
     if (job.status === "error") throw new Error(`remote_job_failed:${job.error || "unknown"}`);
     if (job.status === "ready") {
       const response = await fetchImpl(`${baseUrl}/api/jobs/${created.id}/vtt`, { headers });

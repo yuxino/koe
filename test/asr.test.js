@@ -131,6 +131,22 @@ test("transcribes only provided speech ranges with absolute offsets", async () =
   assert.deepEqual(lines.map((line) => line.startMs), [1_000, 7_000]);
 });
 
+test("reports segment progress detail", async () => {
+  const audio = createWav(16_000 * 3);
+  const details = [];
+  await transcribeCompleteWav({
+    audio,
+    apiKey: "test-key",
+    segmentMs: 1_000,
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({ output: { output: { sentence: { words: [{ begin_time: 0, end_time: 100, text: "字", punctuation: "" }] } } } })
+    }),
+    onProgress: (_value, detail) => details.push(detail)
+  });
+  assert.deepEqual(details, ["第 1/3 段", "第 2/3 段", "第 3/3 段"]);
+});
+
 test("splits long speech ranges into capped chunks", async () => {
   const audio = createWav(16_000 * 20);
   let calls = 0;

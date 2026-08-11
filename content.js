@@ -43,8 +43,8 @@
     analyzing: "正在识别"
   };
   const STAGE_HINT = {
-    downloading: "视频越大这一步越久",
-    uploading_audio: "只上传音频，视频留在本机",
+    downloading: "视频越大这一步越久；长时间不动通常是网站限速",
+    uploading_audio: "视频不出本机，只上传音频",
     analyzing: "整段识别中，完成后自动加载字幕"
   };
 
@@ -60,7 +60,7 @@
     if (message.type === "JOB_STATUS") {
       if (message.status === "analyzing") {
         const stage = STAGE_TEXT[message.jobStatus] || "正在分析视频";
-        const hint = STAGE_HINT[message.jobStatus] || "字幕将在整段分析完成后出现";
+        const hint = message.stageDetail || STAGE_HINT[message.jobStatus] || "字幕将在整段分析完成后出现";
         showStatus(`${stage} ${Math.round(Number(message.progress || 0) * 100)}%`, hint, "ANALYZING");
       }
       if (message.status === "ready") {

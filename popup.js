@@ -146,7 +146,7 @@ function renderState() {
   elements.batchMark.textContent = analyzing ? `${percent}%` : "BATCH";
   elements.engineStatus.textContent = analyzing ? stageLabel : status === "ready" ? "字幕已就绪" : "准备就绪";
   elements.engineDetail.textContent = analyzing
-    ? `${percent}% · 完成后自动加载字幕`
+    ? `${percent}% · ${currentState.stageDetail || "完成后自动加载字幕"}`
     : status === "ready"
       ? "完整 VTT 已加载到视频"
       : healthState.ok

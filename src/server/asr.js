@@ -120,7 +120,7 @@ export async function transcribeCompleteWav({
       const lines = await runCall();
       results[index] = lines;
       completed += 1;
-      onProgress(Math.min(1, completed / Math.max(1, segments.length)));
+      onProgress(Math.min(1, completed / Math.max(1, segments.length)), `第 ${completed}/${segments.length} 段`);
     }
   }
 
