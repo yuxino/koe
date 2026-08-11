@@ -130,6 +130,17 @@
     chrome.runtime.sendMessage({ type: "PAGE_READY" }).catch(() => undefined);
   }, 3_000);
 
+  // 视频切换：清掉旧字幕并通知后台
+  document.addEventListener("emptied", () => {
+    cues = [];
+    subtitleReady = false;
+    analysisDone = false;
+    autoPlayedPartial = false;
+    showingCue = false;
+    hide();
+    chrome.runtime.sendMessage({ type: "VIDEO_CHANGED" }).catch(() => undefined);
+  }, true);
+
   function tryAutoPlay() {
     const now = Date.now();
     if (now - lastAutoPlayAt < 5_000) return;

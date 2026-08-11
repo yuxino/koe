@@ -20,11 +20,32 @@ async function handleMessage(message) {
   if (message.type === "LIST_VIDEOS") return listVideos(Number(message.tabId));
   if (message.type === "SEEK_PRIORITIZE") return seekPrioritize(Number(message.tabId), Number(message.timeMs));
   if (message.type === "PAGE_READY") return handlePageReady(message, sender);
+  if (message.type === "VIDEO_CHANGED") return handleVideoChanged(sender);
   if (message.type === "GET_STATE") {
     const state = tabStates.get(Number(message.tabId));
     return { ok: true, state: state ? publicState(state) : { status: "idle" } };
   }
   return { ok: true };
+}
+
+async function handleVideoChanged(sender) {
+  const tabId = sender?.tab?.id;
+  if (!tabId) return { ok: true, skipped: true };
+  if (tabStates.has(tabId)) await stopAnalysis(tabId);
+  let auto = false;
+  try {
+    ({ koeAutoAnalyze: auto } = await chrome.storage.local.get("koeAutoAnalyze"));
+  } catch {
+    auto = false;
+  }
+  if (!auto) return { ok: true, skipped: true };
+  const pageUrl = String(sender.tab?.url || "");
+  if (!/^https?:/i.test(pageUrl)) return { ok: true, skipped: true };
+  try {
+    return await analyzeVideo({ tabId, serverUrl: LOCAL_SERVER_URL, apiToken: "", pageUrl });
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 async function handlePageReady(message, sender) {
