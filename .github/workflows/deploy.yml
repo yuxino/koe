@@ -70,4 +70,12 @@ jobs:
                    pm2 start src/server/start.js --name koe-api --cwd '$DEPLOY_PATH'; \
                  fi \
               && pm2 save \
-              && curl --fail --silent --show-error http://127.0.0.1:$DEPLOY_APP_PORT/health"
+              && (health_attempt=0; \
+                  until curl --fail --silent http://127.0.0.1:$DEPLOY_APP_PORT/health; do \
+                    health_attempt=\$((health_attempt + 1)); \
+                    if [ \"\$health_attempt\" -ge 15 ]; then \
+                      pm2 logs koe-api --nostream --lines 80 >&2; \
+                      exit 1; \
+                    fi; \
+                    sleep 1; \
+                  done)"
