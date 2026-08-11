@@ -70,22 +70,16 @@ export async function transcribeCompleteWav({
   baseUrl,
   model,
   segmentMs = 60_000,
-  concurrency = 3,
+  concurrency = 5,
+  speechRangesMs = null,
   fetchImpl = fetch,
   onProgress = () => undefined
 }) {
   const wav = parsePcmWav(audio);
   const bytesPerMs = wav.sampleRate * wav.channels * wav.bitsPerSample / 8 / 1_000;
-  const segmentBytes = Math.max(wav.channels, Math.floor(segmentMs * bytesPerMs / wav.blockAlign) * wav.blockAlign);
-  const segments = [];
-  for (let offset = 0; offset < wav.data.length; offset += segmentBytes) {
-    const data = wav.data.subarray(offset, Math.min(wav.data.length, offset + segmentBytes));
-    segments.push({
-      audio: encodePcmWav(data, wav),
-      startMs: Math.round(offset / bytesPerMs),
-      endMs: Math.round((offset + data.length) / bytesPerMs)
-    });
-  }
+  const segments = speechRangesMs
+    ? buildSpeechSegments(speechRangesMs, segmentMs, wav, bytesPerMs)
+    : buildFixedSegments(wav, segmentMs, bytesPerMs);
   const results = new Array(segments.length);
   let cursor = 0;
   let completed = 0;
@@ -112,6 +106,42 @@ export async function transcribeCompleteWav({
 
   await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), segments.length) }, () => worker()));
   return results.flat().sort((left, right) => left.startMs - right.startMs);
+}
+
+function buildFixedSegments(wav, segmentMs, bytesPerMs) {
+  const segmentBytes = Math.max(wav.channels, Math.floor(segmentMs * bytesPerMs / wav.blockAlign) * wav.blockAlign);
+  const segments = [];
+  for (let offset = 0; offset < wav.data.length; offset += segmentBytes) {
+    const data = wav.data.subarray(offset, Math.min(wav.data.length, offset + segmentBytes));
+    segments.push({
+      audio: encodePcmWav(data, wav),
+      startMs: Math.round(offset / bytesPerMs),
+      endMs: Math.round((offset + data.length) / bytesPerMs)
+    });
+  }
+  return segments;
+}
+
+function buildSpeechSegments(rangesMs, segmentMs, wav, bytesPerMs) {
+  const durationMs = wav.data.length / bytesPerMs;
+  const segments = [];
+  for (const [rangeStart, rangeEnd] of rangesMs) {
+    const start = Math.max(0, Math.min(rangeStart, rangeEnd));
+    const end = Math.min(Math.max(start, rangeEnd), durationMs);
+    for (let cursor = start; cursor < end; cursor += segmentMs) {
+      const pieceStart = cursor;
+      const pieceEnd = Math.min(end, cursor + segmentMs);
+      const offset = Math.max(0, Math.round(pieceStart * bytesPerMs / wav.blockAlign) * wav.blockAlign);
+      const length = Math.max(wav.blockAlign, Math.round((pieceEnd - pieceStart) * bytesPerMs / wav.blockAlign) * wav.blockAlign);
+      const data = wav.data.subarray(offset, Math.min(wav.data.length, offset + length));
+      segments.push({
+        audio: encodePcmWav(data, wav),
+        startMs: Math.round(offset / bytesPerMs),
+        endMs: Math.min(Math.round((offset + data.length) / bytesPerMs), Math.round(end))
+      });
+    }
+  }
+  return segments;
 }
 
 function parsePcmWav(audio) {

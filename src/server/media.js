@@ -144,6 +144,42 @@ export async function normalizeToWav({ inputPath, outputPath, ffmpegBin = "ffmpe
   return outputPath;
 }
 
+export async function detectSpeechRanges({
+  inputPath,
+  ffmpegBin = "ffmpeg",
+  run = runCommand,
+  noiseDb = -30,
+  minSilenceSec = 0.5,
+  minSpeechSec = 0.3,
+  gapSec = 0.5,
+  padSec = 0.2
+}) {
+  const { stdout, stderr } = await run(ffmpegBin, [
+    "-nostdin",
+    "-hide_banner",
+    "-loglevel",
+    "info",
+    "-i",
+    inputPath,
+    "-af",
+    `silencedetect=noise=${noiseDb}dB:d=${minSilenceSec}`,
+    "-f",
+    "null",
+    "-"
+  ]);
+  const text = `${stderr || ""}\n${stdout || ""}`;
+  const duration = parseMediaDuration(text);
+  if (duration <= 0) return [];
+  const ranges = [];
+  let cursor = 0;
+  for (const [start, end] of parseSilenceIntervals(text)) {
+    if (start > cursor) ranges.push([cursor, Math.min(start, duration)]);
+    cursor = Math.max(cursor, Math.min(Number.isFinite(end) ? end : duration, duration));
+  }
+  if (cursor < duration) ranges.push([cursor, duration]);
+  return mergeSpeechRanges(ranges, { duration, minSpeechSec, gapSec, padSec });
+}
+
 export async function normalizeToAac({ input, outputPath, pageUrl = "", ffmpegBin, run = runCommand }) {
   const inputOptions = pageUrl
     ? [
@@ -237,4 +273,43 @@ function mediaExtension(value) {
 
 function compactError(value) {
   return String(value || "unknown").trim().replace(/\s+/g, " ").slice(-500);
+}
+
+function parseSilenceIntervals(text) {
+  const intervals = [];
+  let open = null;
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const start = line.match(/silence_start:\s*([\d.]+)/);
+    const end = line.match(/silence_end:\s*([\d.]+)/);
+    if (start) open = Number(start[1]);
+    if (end) {
+      intervals.push([open ?? 0, Number(end[1])]);
+      open = null;
+    }
+  }
+  if (open !== null) intervals.push([open, Number.POSITIVE_INFINITY]);
+  return intervals;
+}
+
+function parseMediaDuration(text) {
+  const match = String(text || "").match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+  if (!match) return 0;
+  return Number(match[1]) * 3_600 + Number(match[2]) * 60 + Number(match[3]);
+}
+
+function mergeSpeechRanges(ranges, { duration, minSpeechSec, gapSec, padSec }) {
+  if (!ranges.length) return [];
+  const merged = [];
+  let [start, end] = ranges[0];
+  for (const [nextStart, nextEnd] of ranges.slice(1)) {
+    if (nextStart - end <= gapSec) end = Math.max(end, nextEnd);
+    else {
+      merged.push([start, end]);
+      [start, end] = [nextStart, nextEnd];
+    }
+  }
+  merged.push([start, end]);
+  return merged
+    .map(([itemStart, itemEnd]) => [Math.max(0, itemStart - padSec), Math.min(duration, itemEnd + padSec)])
+    .filter(([itemStart, itemEnd]) => itemEnd - itemStart >= minSpeechSec);
 }

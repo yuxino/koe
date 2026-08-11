@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { extractAudioLocally, isSupportedPageUrl, normalizeToWav, validateSourceRequest } from "../src/server/media.js";
+import { detectSpeechRanges, extractAudioLocally, isSupportedPageUrl, normalizeToWav, validateSourceRequest } from "../src/server/media.js";
 
 test("recognizes supported adult video page hosts", () => {
   assert.equal(isSupportedPageUrl("https://www.pornhub.com/view_video.php?viewkey=abc"), true);
@@ -25,6 +25,34 @@ test("validates public source URLs and blocks private hosts", () => {
     pageUrl: "http://video.example/watch",
     sourceUrl: "http://cdn.example/video.mp4"
   });
+});
+
+test("detects speech ranges from ffmpeg silence output", async () => {
+  const fakeRun = async () => ({
+    stdout: "",
+    stderr: [
+      "  Duration: 00:00:10.00, start: 0.000000, bitrate: 256 kb/s",
+      "[silencedetect @ 0x0] silence_start: 2.5",
+      "[silencedetect @ 0x0] silence_end: 4.5",
+      "[silencedetect @ 0x0] silence_start: 8",
+      "size=N/A time=00:00:10.00"
+    ].join("\n")
+  });
+  const ranges = await detectSpeechRanges({ inputPath: "sample.wav", run: fakeRun });
+  assert.deepEqual(ranges, [[0, 2.7], [4.3, 8.2]]);
+});
+
+test("returns no speech ranges for a fully silent file", async () => {
+  const fakeRun = async () => ({
+    stdout: "",
+    stderr: [
+      "  Duration: 00:00:05.00, start: 0.000000",
+      "[silencedetect @ 0x0] silence_start: 0",
+      "[silencedetect @ 0x0] silence_end: 5"
+    ].join("\n")
+  });
+  const ranges = await detectSpeechRanges({ inputPath: "silent.wav", run: fakeRun });
+  assert.deepEqual(ranges, []);
 });
 
 test("builds an ffmpeg normalization command without a shell", async () => {

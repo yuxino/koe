@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { acquireSource, extractAudioLocally, normalizeToAac, normalizeToWav, validateSourceRequest } from "./media.js";
+import { acquireSource, detectSpeechRanges, extractAudioLocally, normalizeToAac, normalizeToWav, validateSourceRequest } from "./media.js";
 import { transcribeCompleteWav } from "./asr.js";
 import { relayAudioToKoe } from "./relay.js";
 import { toWebVtt } from "./transcript.js";
@@ -187,13 +187,19 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
     ffmpegBin
   });
   const audio = await readFile(wavPath);
+  let speechRangesMs = null;
+  if (process.env.ASR_VAD !== "0") {
+    const rangesSec = await detectSpeechRanges({ inputPath: wavPath, ffmpegBin });
+    speechRangesMs = rangesSec.map(([startSec, endSec]) => [Math.round(startSec * 1_000), Math.round(endSec * 1_000)]);
+  }
   const lines = await transcribeCompleteWav({
     audio,
     apiKey,
     baseUrl: process.env.DASHSCOPE_BASE_URL,
     model: process.env.ASR_MODEL,
     segmentMs: Number(process.env.ASR_SEGMENT_SECONDS || 60) * 1_000,
-    concurrency: Number(process.env.ASR_CONCURRENCY || 3),
+    concurrency: Number(process.env.ASR_CONCURRENCY || 5),
+    speechRangesMs,
     onProgress: (value) => updateProgress("analyzing", 0.35 + value * 0.6)
   });
   return { lines, vtt: toWebVtt(lines) };

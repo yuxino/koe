@@ -80,6 +80,48 @@ test("transcribes segments concurrently while keeping timeline order", async () 
   assert.deepEqual(lines.map((line) => line.startMs), [0, 1_000, 2_000, 3_000]);
 });
 
+test("transcribes only provided speech ranges with absolute offsets", async () => {
+  const audio = createWav(16_000 * 10);
+  const calls = [];
+  const lines = await transcribeCompleteWav({
+    audio,
+    apiKey: "test-key",
+    segmentMs: 5_000,
+    speechRangesMs: [[1_000, 4_000], [7_000, 9_000]],
+    fetchImpl: async (_url, options) => {
+      const payload = JSON.parse(options.body);
+      const data = Buffer.from(payload.input.messages[0].content[0].input_audio.data.split(",")[1], "base64");
+      calls.push(data.length);
+      return {
+        ok: true,
+        json: async () => ({ output: { output: { sentence: { words: [{ begin_time: 0, end_time: 100, text: "字", punctuation: "" }] } } } })
+      };
+    }
+  });
+  assert.equal(calls.length, 2);
+  assert.deepEqual(lines.map((line) => line.startMs), [1_000, 7_000]);
+});
+
+test("splits long speech ranges into capped chunks", async () => {
+  const audio = createWav(16_000 * 20);
+  let calls = 0;
+  const lines = await transcribeCompleteWav({
+    audio,
+    apiKey: "test-key",
+    segmentMs: 5_000,
+    speechRangesMs: [[0, 12_000]],
+    fetchImpl: async () => {
+      calls += 1;
+      return {
+        ok: true,
+        json: async () => ({ output: { output: { sentence: { words: [{ begin_time: 0, end_time: 100, text: "字", punctuation: "" }] } } } })
+      };
+    }
+  });
+  assert.equal(calls, 3);
+  assert.deepEqual(lines.map((line) => line.startMs), [0, 5_000, 10_000]);
+});
+
 function createWav(sampleCount) {
   const data = Buffer.alloc(sampleCount * 2);
   const wav = Buffer.alloc(44 + data.length);
