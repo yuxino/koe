@@ -19,20 +19,22 @@
       .eyebrow { display: inline-flex; align-items: center; gap: 7px; margin-bottom: 9px; padding: 5px 10px; border: 1px solid rgba(242, 226, 181, .28); border-radius: 99px; background: rgba(25, 35, 30, .72); color: #d8e58c; font: 600 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .13em; text-transform: uppercase; backdrop-filter: blur(14px); }
       .dot { width: 6px; height: 6px; border-radius: 50%; background: #c5d865; box-shadow: 0 0 0 4px rgba(197, 216, 101, .14); }
       .card { padding: 15px 24px 17px; border: 1px solid rgba(255, 248, 224, .18); border-radius: 14px; background: linear-gradient(135deg, rgba(20, 29, 25, .94), rgba(43, 49, 37, .84)); box-shadow: 0 18px 60px rgba(0, 0, 0, .32); }
-      .text { margin: 0; font-size: clamp(19px, 2.2vw, 30px); line-height: 1.34; letter-spacing: .03em; text-shadow: 0 2px 16px rgba(0, 0, 0, .38); white-space: pre-line; }
+      .translated { margin: 0; font-size: clamp(14px, 1.6vw, 20px); line-height: 1.3; letter-spacing: .02em; text-shadow: 0 2px 14px rgba(0, 0, 0, .4); }
+      .original { margin: 5px 0 0; font-size: clamp(11px, 1.2vw, 15px); line-height: 1.25; color: rgba(251, 244, 223, .74); letter-spacing: .02em; text-shadow: 0 1px 10px rgba(0, 0, 0, .45); }
       .meta { margin-top: 9px; color: rgba(251, 244, 223, .56); font: 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em; }
       .stage.compact .card { padding: 8px 15px 9px; border-radius: 10px; box-shadow: 0 10px 32px rgba(0, 0, 0, .26); }
-      .stage.compact .text { font-size: 13px; }
+      .stage.compact .translated { font-size: 13px; }
       .stage.compact .meta { display: none; }
     </style>
     <div class="stage" aria-live="polite" aria-atomic="true">
       <div class="eyebrow"><span class="dot"></span><span class="label">KOE · READY</span></div>
-      <div class="card"><p class="text"></p><div class="meta"></div></div>
+      <div class="card"><p class="translated"></p><p class="original"></p><div class="meta"></div></div>
     </div>
   `;
 
   const stage = shadow.querySelector(".stage");
-  const text = shadow.querySelector(".text");
+  const translated = shadow.querySelector(".translated");
+  const original = shadow.querySelector(".original");
   const meta = shadow.querySelector(".meta");
   const label = shadow.querySelector(".label");
   let cues = [];
@@ -183,7 +185,8 @@
     while (track.cues && track.cues.length) track.removeCue(track.cues[0]);
     for (const cue of cues) {
       try {
-        track.addCue(new VTTCue(cue.startMs / 1_000, Math.max(cue.endMs / 1_000, cue.startMs / 1_000 + 0.2), cue.text));
+        const nativeText = [cue.translated, cue.original].filter(Boolean).join("\n");
+        track.addCue(new VTTCue(cue.startMs / 1_000, Math.max(cue.endMs / 1_000, cue.startMs / 1_000 + 0.2), nativeText));
       } catch {
         // 单条失效不影响其它
       }
@@ -228,7 +231,7 @@
       const cue = cues.find((item) => timeMs >= item.startMs && timeMs < item.endMs);
       if (cue) {
         showingCue = true;
-        show(cue.text, `KOE · ${formatTime(cue.startMs)}`, "READY");
+        show(cue, `KOE · ${formatTime(cue.startMs)}`, "READY");
         return;
       }
       showingCue = false;
@@ -238,15 +241,21 @@
   }
 
   function showStatus(value, detail, mode) {
-    text.textContent = value;
+    translated.textContent = value;
+    original.textContent = "";
     meta.textContent = detail;
     label.textContent = `KOE · ${mode}`;
     stage.classList.toggle("compact", mode === "ANALYZING");
     stage.classList.add("visible");
   }
 
-  function show(value, detail, mode) {
-    showStatus(value, detail, mode);
+  function show(cue, detail, mode) {
+    translated.textContent = cue.translated || cue.original || "";
+    original.textContent = cue.translated && cue.original ? cue.original : "";
+    meta.textContent = detail;
+    label.textContent = `KOE · ${mode}`;
+    stage.classList.remove("compact");
+    stage.classList.add("visible");
   }
 
   function hide() {
@@ -259,8 +268,14 @@
       const timingIndex = lines.findIndex((line) => line.includes("-->"));
       if (timingIndex < 0) return null;
       const [start, end] = lines[timingIndex].split("-->").map((item) => item.trim().split(" ")[0]);
-      return { startMs: parseVttTime(start), endMs: parseVttTime(end), text: lines.slice(timingIndex + 1).join("\n").trim() };
-    }).filter((cue) => cue && cue.text && cue.endMs > cue.startMs);
+      const bodyLines = lines.slice(timingIndex + 1).map((item) => item.trim()).filter(Boolean);
+      return {
+        startMs: parseVttTime(start),
+        endMs: parseVttTime(end),
+        original: bodyLines[0] || "",
+        translated: bodyLines[1] || ""
+      };
+    }).filter((cue) => cue && (cue.original || cue.translated) && cue.endMs > cue.startMs);
   }
 
   function parseVttTime(value) {
