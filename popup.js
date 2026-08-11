@@ -96,7 +96,7 @@ function renderVideos() {
   select.innerHTML = "";
   const auto = document.createElement("option");
   auto.value = "";
-  auto.textContent = videos.length ? "自动选择（默认最清晰）" : "未找到视频";
+  auto.textContent = videos.length ? "自动选择（避开广告）" : "未找到视频";
   select.appendChild(auto);
   videos.forEach((video, index) => {
     const option = document.createElement("option");

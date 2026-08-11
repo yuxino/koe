@@ -148,7 +148,10 @@ async function listVideos(tabId) {
         filename: document.title || "video",
         durationMs: Number.isFinite(video.duration) ? Math.round(video.duration * 1_000) : null,
         width: Number(video.videoWidth || 0),
-        height: Number(video.videoHeight || 0)
+        height: Number(video.videoHeight || 0),
+        playing: Boolean(!video.paused && video.readyState >= 2),
+        currentTimeMs: Number.isFinite(video.currentTime) ? Math.round(video.currentTime * 1_000) : 0,
+        muted: Boolean(video.muted)
       };
     })
   });
@@ -170,8 +173,68 @@ async function discoverVideoSource(tabId, pageUrl, selection) {
 }
 
 function videoScore(video) {
-  return (video.sourceUrl ? 1_000_000_000 : 0) + Number(video.width || 0) * Number(video.height || 0);
+  if (isAdSource(video.sourceUrl || "")) return -1_000_000_000_000;
+  let score = video.sourceUrl ? 1_000_000_000 : 0;
+  score += Number(video.width || 0) * Number(video.height || 0);
+  score += Math.min(Number(video.durationMs || 0) / 1_000, 600) * 100;
+  if (video.playing) score += 100_000;
+  if (Number(video.currentTimeMs || 0) > 0) score += 10_000;
+  if (video.muted) score -= 10_000;
+  return score;
 }
+
+function isAdSource(sourceUrl) {
+  try {
+    const hostname = new URL(sourceUrl).hostname.replace(/^www\./, "");
+    return AD_HOSTS.some((pattern) => hostname === pattern || hostname.endsWith(`.${pattern}`));
+  } catch {
+    return false;
+  }
+}
+
+const AD_HOSTS = [
+  "doubleclick.net",
+  "googlesyndication.com",
+  "googleadservices.com",
+  "google-analytics.com",
+  "outbrain.com",
+  "taboola.com",
+  "adnxs.com",
+  "adsrvr.org",
+  "criteo.com",
+  "amazon-adsystem.com",
+  "rubiconproject.com",
+  "appnexus.com",
+  "pubmatic.com",
+  "openx.net",
+  "casalemedia.com",
+  "smartadserver.com",
+  "mopub.com",
+  "adcolony.com",
+  "yieldmo.com",
+  "sharethrough.com",
+  "districtm.io",
+  "adform.net",
+  "indexww.com",
+  "sovrn.com",
+  "spotx.tv",
+  "instreamatic.com",
+  "adroll.com",
+  "quantserve.com",
+  "scorecardresearch.com",
+  "krxd.net",
+  "moatads.com",
+  "serving-sys.com",
+  "contextweb.com",
+  "lijit.com",
+  "tribalfusion.com",
+  "media.net",
+  "adtech.com",
+  "advertising.com",
+  "z5x.net",
+  "ad-srv.net",
+  "adserver.com"
+];
 
 async function ensureContentScript(tabId, frameId = 0) {
   try {
