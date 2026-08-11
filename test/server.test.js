@@ -67,6 +67,10 @@ test("reuses cached subtitles for the same source url", async (t) => {
   assert.equal(seek.status, "ready");
   assert.equal(seek.fromCache, true);
   assert.equal(runs, 1);
+  const seekVtt = await fetch(`${baseUrl}/api/jobs/${seek.id}/vtt`).then((response) => response.text());
+  const firstCue = seekVtt.split(/\n\s*\n/).find((cue) => cue.includes("-->")) || "";
+  assert.match(firstCue, /00:00:00\.000 -->/);
+  assert.match(firstCue, /缓存测试/);
 
   async function createJob(body) {
     return fetch(`${baseUrl}/api/jobs`, {

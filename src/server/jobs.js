@@ -72,15 +72,7 @@ export function createJobManager(options = {}) {
       if (cached && Array.isArray(cached.lines)) {
         if (cached.full && (job.translate ? cached.translated : true)) {
           const cachedLines = job.translate ? cached.lines : stripTranslated(cached.lines);
-          const lines = job.startMs > 0
-            ? cachedLines
-                .filter((line) => Number(line.endMs || 0) > job.startMs)
-                .map((line) => ({
-                  ...line,
-                  startMs: Math.max(0, Number(line.startMs || 0) - job.startMs),
-                  endMs: Math.max(0, Number(line.endMs || 0) - job.startMs)
-                }))
-            : cachedLines;
+          const lines = cachedLines;
           if (lines.length || cached.lines.length === 0) {
             job.lines = lines;
             job.vtt = toWebVtt(lines);
