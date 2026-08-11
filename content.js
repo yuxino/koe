@@ -241,7 +241,7 @@
       const timingIndex = lines.findIndex((line) => line.includes("-->"));
       if (timingIndex < 0) return null;
       const [start, end] = lines[timingIndex].split("-->").map((item) => item.trim().split(" ")[0]);
-      return { startMs: parseVttTime(start), endMs: parseVttTime(end), text: lines.slice(timingIndex + 1).join(" ").trim() };
+      return { startMs: parseVttTime(start), endMs: parseVttTime(end), text: lines.slice(timingIndex + 1).join("\n").trim() };
     }).filter((cue) => cue && cue.text && cue.endMs > cue.startMs);
   }
 
