@@ -103,7 +103,10 @@ function renderVideos() {
     option.value = `${video.frameId}:${video.index}`;
     const parts = [`视频 ${index + 1}`];
     if (video.width && video.height) parts.push(`${video.width}×${video.height}`);
-    if (video.durationMs) parts.push(`${Math.round(video.durationMs / 1000)}s`);
+    if (video.durationMs) {
+      const totalSeconds = Math.round(video.durationMs / 1000);
+      parts.push(`${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, "0")}`);
+    }
     parts.push(video.sourceUrl ? hostName(video.sourceUrl) : "无直链");
     option.textContent = parts.join(" · ");
     select.appendChild(option);
