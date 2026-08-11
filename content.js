@@ -221,21 +221,10 @@
         show(cue.text, `KOE · ${formatTime(cue.startMs)}`, "READY");
         return;
       }
-      if (!activeVideo.paused) {
-        if (analysisDone) clearCue();
-        return;
-      }
       showingCue = false;
-      if (analysisDone) clearCue();
+      if (!analysisDone) return;
+      hide();
     }, 100);
-  }
-
-  function clearCue() {
-    text.textContent = "";
-    meta.textContent = "";
-    label.textContent = "KOE · READY";
-    stage.classList.remove("compact");
-    stage.classList.add("visible");
   }
 
   function showStatus(value, detail, mode) {
