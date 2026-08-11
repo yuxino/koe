@@ -63,10 +63,11 @@ async function beginWatching({ tabId, frameId = 0, serverUrl, apiToken, job }) {
     startedAt: Date.now(),
     progress: Number(job.progress || 0),
     jobStatus: job.status || "analyzing",
-    stageDetail: job.stageDetail || ""
+    stageDetail: job.stageDetail || "",
+    hasDuration: Boolean(job.hasDuration)
   };
   tabStates.set(tabId, state);
-  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: state.jobStatus, stageDetail: state.stageDetail }, frameId);
+  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: state.jobStatus, stageDetail: state.stageDetail, hasDuration: state.hasDuration }, frameId);
   if (job.status === "ready") await publishReady(state);
   else pollers.set(tabId, setInterval(() => pollJob(tabId).catch((error) => failJob(tabId, error)), 2_000));
   return { ok: true, state: publicState(state) };
@@ -79,6 +80,7 @@ async function pollJob(tabId) {
   state.progress = Number(job.progress || 0);
   state.jobStatus = job.status || state.jobStatus;
   state.stageDetail = job.stageDetail || "";
+  state.hasDuration = Boolean(job.hasDuration);
   if (job.status === "ready") {
     stopPolling(tabId);
     state.status = "ready";
@@ -90,7 +92,7 @@ async function pollJob(tabId) {
     return failJob(tabId, new Error(job.error || "视频分析失败。"));
   }
   state.status = "analyzing";
-  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: job.status, stageDetail: state.stageDetail }, state.frameId);
+  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: job.status, stageDetail: state.stageDetail, hasDuration: state.hasDuration }, state.frameId);
 }
 
 async function publishReady(state) {
@@ -254,7 +256,7 @@ async function forwardToTab(tabId, message, frameId = 0) {
 }
 
 function publicState(state) {
-  return { status: state.status, jobId: state.jobId, startedAt: state.startedAt, progress: state.progress, jobStatus: state.jobStatus, stageDetail: state.stageDetail };
+  return { status: state.status, jobId: state.jobId, startedAt: state.startedAt, progress: state.progress, jobStatus: state.jobStatus, stageDetail: state.stageDetail, hasDuration: Boolean(state.hasDuration) };
 }
 
 async function parseResponse(response, fallback) {

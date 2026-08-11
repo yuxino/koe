@@ -59,9 +59,13 @@
     }
     if (message.type === "JOB_STATUS") {
       if (message.status === "analyzing") {
-        const stage = STAGE_TEXT[message.jobStatus] || "正在分析视频";
-        const hint = message.stageDetail || STAGE_HINT[message.jobStatus] || "字幕将在整段分析完成后出现";
-        showStatus(`${stage} ${Math.round(Number(message.progress || 0) * 100)}%`, hint, "ANALYZING");
+        if (message.jobStatus === "downloading" && !message.hasDuration) {
+          showStatus("正在下载 / 提取声音…", message.stageDetail || STAGE_HINT.downloading, "ANALYZING");
+        } else {
+          const stage = STAGE_TEXT[message.jobStatus] || "正在分析视频";
+          const hint = message.stageDetail || STAGE_HINT[message.jobStatus] || "字幕将在整段分析完成后出现";
+          showStatus(`${stage} ${Math.round(Number(message.progress || 0) * 100)}%`, hint, "ANALYZING");
+        }
       }
       if (message.status === "ready") {
         subtitleReady = true;

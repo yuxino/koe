@@ -148,6 +148,7 @@ function renderState() {
   const status = currentState.status || "idle";
   const analyzing = status === "analyzing";
   const percent = Math.round(Number(currentState.progress || 0) * 100);
+  const unknownDownload = analyzing && currentState.jobStatus === "downloading" && !currentState.hasDuration;
   const stageLabel = {
     downloading: "下载 / 提取声音中",
     uploading_audio: "上传音频中",
@@ -155,9 +156,11 @@ function renderState() {
   }[currentState.jobStatus] || "整段分析中";
   elements.toggle.textContent = analyzing ? "Analyzing…" : "Analyze video";
   elements.toggle.classList.toggle("running", analyzing);
-  elements.batchMark.textContent = analyzing ? `${percent}%` : "BATCH";
-  elements.engineStatus.textContent = analyzing ? stageLabel : status === "ready" ? "字幕已就绪" : "准备就绪";
-  elements.engineDetail.textContent = analyzing
+  elements.batchMark.textContent = unknownDownload ? "提取中" : analyzing ? `${percent}%` : "BATCH";
+  elements.engineStatus.textContent = unknownDownload ? "下载 / 提取声音中" : analyzing ? stageLabel : status === "ready" ? "字幕已就绪" : "准备就绪";
+  elements.engineDetail.textContent = unknownDownload
+    ? "时长未知，暂时无法显示百分比"
+    : analyzing
     ? `${percent}% · ${currentState.stageDetail || "完成后自动加载字幕"}`
     : status === "ready"
       ? "完整 VTT 已加载到视频"
