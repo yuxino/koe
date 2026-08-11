@@ -21,10 +21,9 @@
       .card { padding: 15px 24px 17px; border: 1px solid rgba(255, 248, 224, .18); border-radius: 14px; background: linear-gradient(135deg, rgba(20, 29, 25, .94), rgba(43, 49, 37, .84)); box-shadow: 0 18px 60px rgba(0, 0, 0, .32); }
       .translated { margin: 0; font-size: 20px; line-height: 1.3; letter-spacing: .02em; text-shadow: 0 2px 14px rgba(0, 0, 0, .5); }
       .original { margin: 5px 0 0; font-size: 14px; line-height: 1.25; color: rgba(251, 244, 223, .92); letter-spacing: .02em; text-shadow: 0 1px 10px rgba(0, 0, 0, .5); }
-      .meta { margin-top: 9px; color: rgba(251, 244, 223, .56); font: 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em; }
+      .meta { display: none; }
       .stage.compact .card { padding: 8px 15px 9px; border-radius: 10px; box-shadow: 0 10px 32px rgba(0, 0, 0, .26); }
       .stage.compact .translated { font-size: 13px; }
-      .stage.compact .meta { display: none; }
     </style>
     <div class="stage" aria-live="polite" aria-atomic="true">
       <div class="eyebrow"><span class="dot"></span><span class="label">KOE · READY</span></div>
