@@ -217,7 +217,8 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
   const translationTasks = [];
   if (!job.sourcePath && process.env.KOE_STREAM_EXTRACT !== "0") {
     try {
-      updateProgress("downloading", 0.08, "正在分段下载/提取声音");
+      let streamChunks = 0;
+      updateProgress("downloading", 0.08, "正在下载 / 提取声音");
       await withSemaphore(extractAcquire, () => streamExtractAndTranscribe({
         pageUrl: job.pageUrl,
         sourceUrl: job.sourceUrl,
@@ -232,7 +233,10 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
             translationTasks.push(task);
           }
         },
-        onProgress: (value) => updateProgress("downloading", 0.08 + Number(value || 0) * 0.22, "正在分段下载/提取声音")
+        onProgress: (value) => {
+          streamChunks += 1;
+          updateProgress("analyzing", 0.1 + Number(value || 0) * 0.8, `边下载边识别 · 已处理 ${streamChunks} 段`);
+        }
       }));
       updateProgress("analyzing", 0.95, "收尾中");
       await Promise.allSettled(translationTasks);

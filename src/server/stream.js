@@ -99,7 +99,7 @@ async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, on
         const silent = await isSilentWav(audio, ffmpegBin);
         if (silent === true) {
           log(`chunk ${index} silent, skipped`);
-          onProgress(Math.min(1, chunkCount * 0.02));
+          onProgress(Math.min(1, chunkCount * 0.05));
           continue;
         }
       }
@@ -110,7 +110,7 @@ async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, on
           startMs: line.startMs + chunkStartMs,
           endMs: line.endMs + chunkStartMs
         })));
-        onProgress(Math.min(1, chunkCount * 0.02));
+        onProgress(Math.min(1, chunkCount * 0.05));
         log(`chunk ${index} done (${lines.length} lines)`);
       } catch (error) {
         log(`chunk ${index} failed, will retry: ${error instanceof Error ? error.message : String(error)}`);
