@@ -1,7 +1,10 @@
 let recorder = null;
 let stream = null;
-let chunks = [];
+let monitorAudio = null;
 let captureServerUrl = "";
+let captureOffsetMs = 0;
+let chunkIndex = 0;
+let chain = Promise.resolve();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "CAPTURE_START") {
@@ -15,21 +18,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-async function startCapture({ streamId, serverUrl }) {
+async function startCapture({ streamId, serverUrl, offsetMs }) {
   await stopCapture();
   stream = await navigator.mediaDevices.getUserMedia({
     audio: {
       mandatory: { chromeMediaSource: "tab", chromeMediaSourceId: streamId }
     }
   });
-  chunks = [];
+  // tabCapture 会静音标签页，把采集到的声音在后台播回去
+  monitorAudio = new Audio();
+  monitorAudio.srcObject = stream;
+  monitorAudio.play().catch(() => undefined);
   captureServerUrl = String(serverUrl || "").replace(/\/+$/, "");
+  captureOffsetMs = Number(offsetMs) || 0;
+  chunkIndex = 0;
   const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find((type) => MediaRecorder.isTypeSupported(type)) || "";
   recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
   recorder.ondataavailable = (event) => {
-    if (event.data && event.data.size) chunks.push(event.data);
+    if (event.data && event.data.size) sendChunk(event.data);
   };
-  recorder.start(1_000);
+  recorder.start(5_000);
   return { ok: true };
 }
 
@@ -43,34 +51,38 @@ async function stopCapture() {
     stream.getTracks().forEach((track) => track.stop());
     stream = null;
   }
-  if (!chunks.length) {
-    chunks = [];
-    return { ok: false, error: "没有采集到声音，请确认视频已经播放。" };
+  if (monitorAudio) {
+    monitorAudio.srcObject = null;
+    monitorAudio = null;
   }
-  const blob = new Blob(chunks, { type: "audio/webm" });
-  chunks = [];
-  const jobId = await uploadBlob(blob);
-  return { ok: true, stopped: true, jobId };
+  await chain.catch(() => undefined);
+  return { ok: true, stopped: true };
 }
 
-async function uploadBlob(blob) {
-  const created = await fetch(`${captureServerUrl}/api/jobs`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ upload: true, filename: "capture.webm" })
+function sendChunk(blob) {
+  const index = chunkIndex;
+  chunkIndex += 1;
+  const startMs = captureOffsetMs + index * 5_000;
+  chain = chain.then(async () => {
+    try {
+      const response = await fetch(`${captureServerUrl}/api/capture/analyze`, {
+        method: "POST",
+        headers: {
+          "content-type": blob.type || "audio/webm",
+          "x-start-ms": String(startMs)
+        },
+        body: blob
+      });
+      if (response.ok) {
+        const body = await response.json();
+        if (body.lines?.length) {
+          chrome.runtime.sendMessage({ type: "CAPTURE_LINES", lines: body.lines }).catch(() => undefined);
+        }
+      }
+    } catch {
+      // 单个块失败不影响后续
+    }
   });
-  const body = await created.json().catch(() => ({}));
-  if (!created.ok) throw new Error(body.error || `创建任务失败（${created.status}）`);
-  const upload = await fetch(`${captureServerUrl}/api/jobs/${body.id}/source`, {
-    method: "POST",
-    headers: { "content-type": blob.type || "audio/webm", "x-filename": "capture.webm" },
-    body: blob
-  });
-  if (!upload.ok) {
-    const err = await upload.json().catch(() => ({}));
-    throw new Error(err.error || `上传声音失败（${upload.status}）`);
-  }
-  return body.id;
 }
 
 function errorMessage(error) {

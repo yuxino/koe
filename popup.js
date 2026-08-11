@@ -95,17 +95,14 @@ async function analyze() {
 async function toggleCapture() {
   if (captureState?.tabId) {
     elements.captureToggle.disabled = true;
-    elements.captureStatus.textContent = "上传并分析中…";
+    elements.captureStatus.textContent = "正在停止…";
     try {
-      const response = await chrome.runtime.sendMessage({ type: "CAPTURE_STOP" });
-      if (response?.state) {
-        currentState = response.state;
-        renderState();
-      }
+      await chrome.runtime.sendMessage({ type: "CAPTURE_STOP" });
     } catch (error) {
       elements.captureStatus.textContent = error instanceof Error ? error.message : String(error);
     }
     captureState = null;
+    elements.captureStatus.textContent = "已停止采集";
     renderCapture();
     elements.captureToggle.disabled = false;
     return;
@@ -128,7 +125,7 @@ async function toggleCapture() {
     });
     if (!response?.ok) throw new Error(response?.error || "无法开始采集。");
     captureState = { tabId: activeTab.id, startedAt: response.capture?.startedAt || Date.now() };
-    elements.captureStatus.textContent = "采集中：现在播放视频，录完点“停止并分析”";
+    elements.captureStatus.textContent = "采集中：播放视频，字幕实时显示";
   } catch (error) {
     elements.captureStatus.textContent = error instanceof Error ? error.message : String(error);
   }
@@ -145,7 +142,7 @@ async function refreshCapture() {
 function updateCaptureClock() {
   if (!captureState?.tabId) return;
   const seconds = Math.max(0, Math.round((Date.now() - Number(captureState.startedAt || Date.now())) / 1_000));
-  elements.captureStatus.textContent = `采集中 ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")} · 播放视频中`;
+  elements.captureStatus.textContent = `采集中 ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")} · 字幕实时显示`;
   elements.captureToggle.textContent = "停止并分析";
   elements.captureToggle.classList.add("running");
 }

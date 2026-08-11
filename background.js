@@ -24,6 +24,7 @@ async function handleMessage(message) {
   if (message.type === "CAPTURE_START") return startCapture(message);
   if (message.type === "CAPTURE_STOP") return stopCapture(Number(message.tabId) || captureState?.tabId);
   if (message.type === "GET_CAPTURE_STATE") return { ok: true, capture: captureState ? { tabId: captureState.tabId, startedAt: captureState.startedAt } : null };
+  if (message.type === "CAPTURE_LINES") return handleCaptureLines(message);
   if (message.type === "GET_STATE") {
     const state = tabStates.get(Number(message.tabId));
     return { ok: true, state: state ? publicState(state) : { status: "idle" } };
@@ -36,20 +37,23 @@ async function startCapture({ tabId, streamId, serverUrl, pageUrl }) {
   if (!Number.isInteger(tabId) || !streamId) throw new Error("无法开始采集：缺少标签页或音频流。");
   await stopCapture(tabId);
   await ensureOffscreen();
-  const response = await chrome.runtime.sendMessage({
-    type: "CAPTURE_START",
-    streamId,
-    serverUrl: String(serverUrl || "").replace(/\/+$/, "")
-  });
-  if (!response?.ok) throw new Error(response?.error || "无法开始采集声音。");
   let frameId = 0;
+  let offsetMs = 0;
   try {
     const source = await discoverVideoSource(tabId, pageUrl);
     frameId = Number(source?.frameId || 0);
+    offsetMs = Number(source?.currentTimeMs || 0);
   } catch {
     frameId = 0;
   }
-  captureState = { tabId, frameId, pageUrl: String(pageUrl || ""), startedAt: Date.now() };
+  const started = await chrome.runtime.sendMessage({
+    type: "CAPTURE_START",
+    streamId,
+    serverUrl: String(serverUrl || "").replace(/\/+$/, ""),
+    offsetMs
+  });
+  if (!started?.ok) throw new Error(started?.error || "无法开始采集声音。");
+  captureState = { tabId, frameId, pageUrl: String(pageUrl || ""), startedAt: Date.now(), lines: [], offsetMs };
   return { ok: true, capture: { tabId, startedAt: captureState.startedAt } };
 }
 
@@ -57,19 +61,37 @@ async function stopCapture(tabId) {
   if (!captureState || captureState.tabId !== tabId) return { ok: true, capture: null };
   const capture = captureState;
   captureState = null;
-  const response = await chrome.runtime.sendMessage({ type: "CAPTURE_STOP" }).catch((error) => ({ ok: false, error: String(error) }));
-  if (!response?.ok) throw new Error(response?.error || "停止采集失败。");
-  if (!response.jobId) return { ok: true, capture: null };
-  const job = await getJob(LOCAL_SERVER_URL, "", response.jobId);
-  const watching = await beginWatching({
-    tabId,
-    frameId: capture.frameId,
-    serverUrl: LOCAL_SERVER_URL,
-    apiToken: "",
-    job,
-    pageUrl: capture.pageUrl
-  });
-  return { ok: true, state: watching.state, capture: null };
+  await chrome.runtime.sendMessage({ type: "CAPTURE_STOP" }).catch(() => undefined);
+  return { ok: true, capture: null };
+}
+
+async function handleCaptureLines({ lines }) {
+  if (!captureState?.tabId) return { ok: true, ignored: true };
+  captureState.lines.push(...(Array.isArray(lines) ? lines : []));
+  const vtt = linesToVtt(captureState.lines);
+  await forwardToTab(captureState.tabId, { type: "PARTIAL_SUBTITLES", vtt, lineCount: captureState.lines.length }, captureState.frameId);
+  return { ok: true };
+}
+
+function linesToVtt(lines) {
+  const sorted = [...lines].sort((left, right) => left.startMs - right.startMs);
+  const cues = sorted
+    .filter((line) => String(line.text || "").trim())
+    .map((line, index) => [
+      String(index + 1),
+      `${formatVttTime(line.startMs)} --> ${formatVttTime(Math.max(Number(line.startMs || 0) + 200, Number(line.endMs || 0)))}`,
+      [String(line.text || "").trim(), String(line.translated || "").trim()].filter(Boolean).join("\n")
+    ].join("\n"));
+  return `WEBVTT\n\n${cues.join("\n\n")}\n`;
+}
+
+function formatVttTime(value) {
+  const ms = Math.max(0, Math.round(Number(value || 0)));
+  const hours = Math.floor(ms / 3_600_000);
+  const minutes = Math.floor((ms % 3_600_000) / 60_000);
+  const seconds = Math.floor((ms % 60_000) / 1_000);
+  const rest = ms % 1_000;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(rest).padStart(3, "0")}`;
 }
 
 async function ensureOffscreen() {
