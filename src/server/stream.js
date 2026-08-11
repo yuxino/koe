@@ -44,11 +44,7 @@ export async function streamExtractAndTranscribe({
       });
     } catch (error) {
       if (error?.name === "AbortError") throw error;
-      if (emittedLines > 0) {
-        console.log(`[koe] realtime partial success with ${emittedLines} lines, keeping them`);
-        return { chunks: emittedLines, realtime: true, partial: true };
-      }
-      console.log(`[koe] realtime failed, falling back to chunked: ${error instanceof Error ? error.message : String(error)}`);
+      console.log(`[koe] realtime failed${emittedLines ? ` after ${emittedLines} lines` : ""}, falling back to chunked: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   return streamChunkedTranscribe({
