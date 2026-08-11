@@ -93,7 +93,7 @@ export function createJobManager(options = {}) {
           }
         } else if (cached.lines.length) {
           const sorted = [...cached.lines].sort((left, right) => Number(left.startMs || 0) - Number(right.startMs || 0));
-          const gapMs = Number(process.env.KOE_CACHE_GAP_MS || 30_000);
+          const gapMs = Number(process.env.KOE_CACHE_GAP_MS || 90_000);
           let cursor = job.startMs;
           for (const line of sorted) {
             const start = Number(line.startMs || 0);
@@ -262,7 +262,9 @@ export function createJobManager(options = {}) {
             lines: job.lines,
             durationMs: job.durationMs,
             translated: Boolean(job.translate),
-            full: coversWholeVideo(job.lines, job.durationMs) || (!job.seededFromCache && job.streamStartMs === 0)
+            full: coversWholeVideo(job.lines, job.durationMs)
+              || (!job.seededFromCache && job.streamStartMs === 0)
+              || (job.seededFromCache && job.streamStartMs > 0 && maxLineEnd(job.lines) <= job.streamStartMs + 2_000)
           });
         } catch {
           // 缓存失败不影响任务结果
@@ -563,11 +565,11 @@ function mergeJobLines(existing, incoming) {
   return result;
 }
 
-function coversWholeVideo(lines, durationMs) {
+export function coversWholeVideo(lines, durationMs) {
   const duration = Number(durationMs);
   if (!(duration > 0) || !Array.isArray(lines) || !lines.length) return false;
   const sorted = [...lines].sort((left, right) => Number(left.startMs || 0) - Number(right.startMs || 0));
-  const gapMs = Number(process.env.KOE_CACHE_GAP_MS || 30_000);
+  const gapMs = Number(process.env.KOE_CACHE_GAP_MS || 90_000);
   let cursor = 0;
   for (const line of sorted) {
     const start = Number(line.startMs || 0);
@@ -579,5 +581,9 @@ function coversWholeVideo(lines, durationMs) {
     if (start - cursor > gapMs) return false;
     cursor = Math.max(cursor, end);
   }
-  return cursor >= duration - 2_000;
+  return cursor >= duration - 15_000;
+}
+
+function maxLineEnd(lines) {
+  return Math.max(0, ...(lines || []).map((line) => Number(line.endMs || 0)));
 }
