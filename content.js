@@ -44,6 +44,7 @@
   let analysisDone = false;
   let showingCue = false;
   let autoPlayedPartial = false;
+  let lastAutoPlayAt = 0;
 
   const STAGE_TEXT = {
     downloading: "正在下载 / 提取声音",
@@ -69,6 +70,7 @@
       if (message.status === "analyzing") {
         analysisDone = false;
         autoPlayedPartial = false;
+        tryAutoPlay();
         if (!showingCue) {
           const percent = Math.round(Number(message.progress || 0) * 100);
           const elapsed = message.startedAt
@@ -120,13 +122,7 @@
     if (message.type === "PARTIAL_SUBTITLES") {
       cues = parseVtt(message.vtt || "");
       subtitleReady = true;
-      if (cues.length && !autoPlayedPartial) {
-        autoPlayedPartial = true;
-        activeVideo ||= findVideo();
-        if (activeVideo && activeVideo.paused && activeVideo.currentTime < 1) {
-          activeVideo.play().catch(() => undefined);
-        }
-      }
+      if (cues.length) tryAutoPlay();
       startSubtitleClock();
       refreshNativeTrack();
       return false;
@@ -147,6 +143,15 @@
     lastSeekAt = now;
     chrome.runtime.sendMessage({ type: "SEEK_PRIORITIZE", timeMs: Math.round(video.currentTime * 1_000) }).catch(() => undefined);
   }, true);
+
+  function tryAutoPlay() {
+    const now = Date.now();
+    if (now - lastAutoPlayAt < 5_000) return;
+    activeVideo ||= findVideo();
+    if (!activeVideo || !activeVideo.paused || activeVideo.currentTime >= 1) return;
+    lastAutoPlayAt = now;
+    activeVideo.play().catch(() => undefined);
+  }
 
   let nativeTrack = null;
   let nativeTrackVideo = null;
