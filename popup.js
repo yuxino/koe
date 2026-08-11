@@ -12,6 +12,7 @@ const elements = {
   toggle: document.querySelector("#toggle"),
   videoSelect: document.querySelector("#video-select"),
   translateToggle: document.querySelector("#translate-toggle"),
+  autoToggle: document.querySelector("#auto-toggle"),
   batchMark: document.querySelector("#batch-mark"),
   hint: document.querySelector("#hint")
 };
@@ -20,6 +21,9 @@ document.addEventListener("DOMContentLoaded", init);
 elements.toggle.addEventListener("click", analyze);
 elements.translateToggle.addEventListener("change", async () => {
   await chrome.storage.local.set({ koeTranslate: elements.translateToggle.checked });
+});
+elements.autoToggle.addEventListener("change", async () => {
+  await chrome.storage.local.set({ koeAutoAnalyze: elements.autoToggle.checked });
 });
 chrome.tabs.onActivated.addListener(refreshActiveTab);
 
@@ -34,8 +38,9 @@ async function init() {
 }
 
 async function initPrefs() {
-  const { koeTranslate } = await chrome.storage.local.get("koeTranslate");
+  const { koeTranslate, koeAutoAnalyze } = await chrome.storage.local.get(["koeTranslate", "koeAutoAnalyze"]);
   elements.translateToggle.checked = koeTranslate !== undefined ? Boolean(koeTranslate) : true;
+  elements.autoToggle.checked = Boolean(koeAutoAnalyze);
 }
 
 async function refreshActiveTab() {

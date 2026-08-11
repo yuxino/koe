@@ -19,11 +19,32 @@ async function handleMessage(message) {
   if (message.type === "STOP_ANALYSIS") return stopAnalysis(Number(message.tabId));
   if (message.type === "LIST_VIDEOS") return listVideos(Number(message.tabId));
   if (message.type === "SEEK_PRIORITIZE") return seekPrioritize(Number(message.tabId), Number(message.timeMs));
+  if (message.type === "PAGE_READY") return handlePageReady(message, sender);
   if (message.type === "GET_STATE") {
     const state = tabStates.get(Number(message.tabId));
     return { ok: true, state: state ? publicState(state) : { status: "idle" } };
   }
   return { ok: true };
+}
+
+async function handlePageReady(message, sender) {
+  const tabId = sender?.tab?.id;
+  if (!tabId) return { ok: true, skipped: true };
+  let auto = false;
+  try {
+    ({ koeAutoAnalyze: auto } = await chrome.storage.local.get("koeAutoAnalyze"));
+  } catch {
+    auto = false;
+  }
+  if (!auto) return { ok: true, skipped: true };
+  if (tabStates.has(tabId)) return { ok: true, skipped: true };
+  const pageUrl = String(sender.tab?.url || "");
+  if (!/^https?:/i.test(pageUrl)) return { ok: true, skipped: true };
+  try {
+    return await analyzeVideo({ tabId, serverUrl: LOCAL_SERVER_URL, apiToken: "", pageUrl });
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl, selection, translate }) {
@@ -265,10 +286,25 @@ async function listVideos(tabId) {
 
 async function discoverVideoSource(tabId, pageUrl, selection) {
   const { videos } = await listVideos(tabId);
-  const source = selection
-    ? videos.find((video) => `${video.frameId}:${video.index}` === selection)
-    : [...videos].sort((left, right) => videoScore(right) - videoScore(left))[0];
+  let source = null;
+  if (selection) {
+    source = videos.find((video) => `${video.frameId}:${video.index}` === selection);
+  } else {
+    const scored = [...videos].sort((left, right) => videoScore(right) - videoScore(left));
+    source = scored.find((video) => isUsableMediaSource(video)) || scored[0];
+  }
   return source ? { ...source, pageUrl: pageUrl || source.pageUrl } : { hasVideo: false };
+}
+
+function isUsableMediaSource(video) {
+  if (!video.sourceUrl) return false;
+  try {
+    const source = new URL(video.sourceUrl);
+    const page = new URL(video.pageUrl || "");
+    return !(source.hostname === page.hostname && source.pathname === page.pathname);
+  } catch {
+    return true;
+  }
 }
 
 function videoScore(video) {

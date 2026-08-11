@@ -142,6 +142,12 @@
     chrome.runtime.sendMessage({ type: "SEEK_PRIORITIZE", timeMs: Math.round(video.currentTime * 1_000) }).catch(() => undefined);
   }, true);
 
+  // 自动分析：打开/刷新页面时通知后台
+  chrome.runtime.sendMessage({ type: "PAGE_READY" }).catch(() => undefined);
+  window.setTimeout(() => {
+    chrome.runtime.sendMessage({ type: "PAGE_READY" }).catch(() => undefined);
+  }, 3_000);
+
   function tryAutoPlay() {
     const now = Date.now();
     if (now - lastAutoPlayAt < 5_000) return;
