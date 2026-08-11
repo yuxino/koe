@@ -3,7 +3,6 @@ let activeTab;
 let currentState = { status: "idle" };
 let healthState = { ok: false, provider: "" };
 let videos = [];
-let captureState = null;
 
 const elements = {
   tabHost: document.querySelector("#tab-host"),
@@ -13,15 +12,12 @@ const elements = {
   toggle: document.querySelector("#toggle"),
   videoSelect: document.querySelector("#video-select"),
   translateToggle: document.querySelector("#translate-toggle"),
-  captureToggle: document.querySelector("#capture-toggle"),
-  captureStatus: document.querySelector("#capture-status"),
   batchMark: document.querySelector("#batch-mark"),
   hint: document.querySelector("#hint")
 };
 
 document.addEventListener("DOMContentLoaded", init);
 elements.toggle.addEventListener("click", analyze);
-elements.captureToggle.addEventListener("click", toggleCapture);
 elements.translateToggle.addEventListener("change", async () => {
   await chrome.storage.local.set({ koeTranslate: elements.translateToggle.checked });
 });
@@ -35,8 +31,6 @@ async function init() {
   await refreshState();
   await refreshVideos();
   await initPrefs();
-  await refreshCapture();
-  setInterval(updateCaptureClock, 1_000);
 }
 
 async function initPrefs() {
@@ -73,9 +67,8 @@ async function analyze() {
     : videos;
   const usable = candidates.find((video) => video.sourceUrl && isUsableSource(video.sourceUrl, activeTab.url));
   if (!usable) {
-    elements.captureStatus.textContent = "这个网站拿不到视频直链，已自动切换为采集模式";
-    elements.hint.textContent = "自动切换为采集：播放视频即可实时出字幕";
-    await toggleCapture();
+    elements.engineStatus.textContent = "无法分析";
+    elements.engineDetail.textContent = "这个页面拿不到视频直链，无法分析。";
     return;
   }
   elements.toggle.disabled = true;
@@ -114,75 +107,6 @@ function isUsableSource(sourceUrl, tabUrl) {
     return !(source.hostname === page.hostname && source.pathname === page.pathname);
   } catch {
     return sourceUrl !== tabUrl;
-  }
-}
-
-async function toggleCapture() {
-  if (captureState?.tabId) {
-    elements.captureToggle.disabled = true;
-    elements.captureStatus.textContent = "正在停止…";
-    try {
-      await chrome.runtime.sendMessage({ type: "CAPTURE_STOP" });
-    } catch (error) {
-      elements.captureStatus.textContent = error instanceof Error ? error.message : String(error);
-    }
-    captureState = null;
-    elements.captureStatus.textContent = "已停止采集";
-    renderCapture();
-    elements.captureToggle.disabled = false;
-    return;
-  }
-  await refreshActiveTab();
-  if (!activeTab?.id) {
-    elements.captureStatus.textContent = "没有找到当前标签页。";
-    return;
-  }
-  elements.captureToggle.disabled = true;
-  elements.captureStatus.textContent = "正在启动采集…";
-  try {
-    const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: activeTab.id });
-    const response = await chrome.runtime.sendMessage({
-      type: "CAPTURE_START",
-      tabId: activeTab.id,
-      streamId,
-      serverUrl: LOCAL_SERVER_URL,
-      pageUrl: activeTab.url
-    });
-    if (!response?.ok) throw new Error(response?.error || "无法开始采集。");
-    captureState = { tabId: activeTab.id, startedAt: response.capture?.startedAt || Date.now() };
-    elements.captureStatus.textContent = "采集中：播放视频，字幕实时显示";
-  } catch (error) {
-    elements.captureStatus.textContent = error instanceof Error ? error.message : String(error);
-  }
-  renderCapture();
-  elements.captureToggle.disabled = false;
-}
-
-async function refreshCapture() {
-  const response = await chrome.runtime.sendMessage({ type: "GET_CAPTURE_STATE" });
-  captureState = response?.capture || null;
-  renderCapture();
-}
-
-function updateCaptureClock() {
-  if (!captureState?.tabId) return;
-  const seconds = Math.max(0, Math.round((Date.now() - Number(captureState.startedAt || Date.now())) / 1_000));
-  elements.captureStatus.textContent = `采集中 ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")} · 字幕实时显示`;
-  elements.captureToggle.textContent = "停止采集";
-  elements.captureToggle.classList.add("running");
-}
-
-function renderCapture() {
-  if (captureState?.tabId) {
-    elements.captureToggle.textContent = "停止采集";
-    elements.captureToggle.classList.add("running");
-    updateCaptureClock();
-  } else {
-    elements.captureToggle.textContent = "开始采集";
-    elements.captureToggle.classList.remove("running");
-    if (elements.captureStatus.textContent.startsWith("采集中")) {
-      elements.captureStatus.textContent = "播放视频，字幕实时显示";
-    }
   }
 }
 
