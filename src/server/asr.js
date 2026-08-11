@@ -11,7 +11,7 @@ export async function transcribeWav({
   model = DEFAULT_MODEL,
   timeoutMs = 120_000,
   fetchImpl = fetch,
-  retries = 2
+  retries = 5
 }) {
   if (!apiKey) throw new Error("DASHSCOPE_API_KEY is not configured.");
 
@@ -34,7 +34,7 @@ export async function transcribeWav({
 
   let lastError = null;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
-    if (attempt > 0) await delay(500 * 2 ** (attempt - 1));
+    if (attempt > 0) await delay(1_000 * 2 ** (attempt - 1) + Math.floor(Math.random() * 500));
     let response;
     try {
       response = await fetchImpl(url, {

@@ -101,6 +101,33 @@ export async function extractAudioLocally({
   await mkdir(outputDir, { recursive: true });
   const outputPath = join(outputDir, "audio.m4a");
 
+  // 页面存在时优先用 yt-dlp 只下载音轨（远小于整段视频）；失败再回退直链 ffmpeg
+  const preferPageAudio = Boolean(pageUrl) && pageUrl !== sourceUrl && Boolean(ytdlpBin);
+  if (preferPageAudio) {
+    try {
+      const sourcePath = await acquireSource({
+        pageUrl,
+        sourceUrl: "",
+        outputDir,
+        ytdlpBin,
+        audioOnly: true,
+        onProgress: (value) => onProgress(Number(value || 0) * 0.7),
+        run
+      });
+      await normalizeToAac({
+        input: sourcePath,
+        outputPath,
+        ffmpegBin,
+        run,
+        durationMs,
+        onProgress: (value) => onProgress(0.7 + Number(value || 0) * 0.3)
+      });
+      return outputPath;
+    } catch {
+      // 页面音轨不可用时继续走直链
+    }
+  }
+
   if (sourceUrl) {
     try {
       const inputUrl = await resolveHlsAudioVariant(sourceUrl, { pageUrl, fetchImpl });

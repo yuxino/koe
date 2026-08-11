@@ -86,29 +86,52 @@ test("reports ffmpeg extraction progress from out_time", async () => {
   assert.ok(progress.includes(0.5), `expected 0.5 in ${JSON.stringify(progress)}`);
 });
 
-test("extracts browser-discovered media directly with ffmpeg and referer", async (t) => {
+test("prefers page audio-only extraction with yt-dlp before direct ffmpeg", async (t) => {
   const outputDir = await mkdtemp(join(tmpdir(), "koe-media-test-"));
   t.after(() => rm(outputDir, { recursive: true, force: true }));
   const calls = [];
 
   const outputPath = await extractAudioLocally({
     pageUrl: "https://video.example/watch/1",
-    sourceUrl: "https://cdn.example/master.m3u8?signature=ok",
+    sourceUrl: "https://cdn.example/video.mp4",
     outputDir,
     ffmpegBin: "ffmpeg-test",
     ytdlpBin: "yt-dlp-test",
-    fetchImpl: async () => ({
-      ok: true,
-      text: async () => "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=500000\nvideo.m3u8"
-    }),
-    run: async (command, args) => { calls.push({ command, args }); }
+    run: async (command, args, options = {}) => {
+      calls.push({ command, args });
+      if (command === "yt-dlp-test") {
+        options.onStdout?.("download: 100.0%\n");
+        await writeFile(join(outputDir, "source.m4a"), "audio");
+      }
+    }
   });
 
   assert.equal(outputPath, join(outputDir, "audio.m4a"));
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].command, "ffmpeg-test");
-  assert.ok(calls[0].args.includes("https://cdn.example/master.m3u8?signature=ok"));
-  assert.match(calls[0].args[calls[0].args.indexOf("-headers") + 1], /Referer: https:\/\/video\.example\/watch\/1/);
+  assert.deepEqual(calls.map((call) => call.command), ["yt-dlp-test", "ffmpeg-test"]);
+  assert.ok(calls[0].args.includes("https://video.example/watch/1"));
+});
+
+test("falls back to direct ffmpeg when page audio extraction fails", async (t) => {
+  const outputDir = await mkdtemp(join(tmpdir(), "koe-media-test-"));
+  t.after(() => rm(outputDir, { recursive: true, force: true }));
+  const calls = [];
+
+  const outputPath = await extractAudioLocally({
+    pageUrl: "https://video.example/watch/1",
+    sourceUrl: "https://cdn.example/video.mp4",
+    outputDir,
+    ffmpegBin: "ffmpeg-test",
+    ytdlpBin: "yt-dlp-test",
+    run: async (command, args) => {
+      calls.push({ command, args });
+      if (command === "yt-dlp-test") throw new Error("page extraction failed");
+    }
+  });
+
+  assert.equal(outputPath, join(outputDir, "audio.m4a"));
+  assert.deepEqual(calls.map((call) => call.command), ["yt-dlp-test", "ffmpeg-test"]);
+  assert.ok(calls[1].args.includes("https://cdn.example/video.mp4"));
+  assert.match(calls[1].args[calls[1].args.indexOf("-headers") + 1], /Referer: https:\/\/video\.example\/watch\/1/);
 });
 
 test("prefers the audio-only HLS variant when available", async (t) => {
@@ -133,7 +156,7 @@ test("prefers the audio-only HLS variant when available", async (t) => {
     }),
     run: async (command, args) => {
       const index = args.indexOf("-i");
-      inputs.push(args[index + 1]);
+      if (index >= 0) inputs.push(args[index + 1]);
     }
   });
 
@@ -155,7 +178,7 @@ test("passes non-HLS media URLs straight to ffmpeg", async (t) => {
     fetchImpl: async () => { throw new Error("should not fetch"); },
     run: async (command, args) => {
       const index = args.indexOf("-i");
-      inputs.push(args[index + 1]);
+      if (index >= 0) inputs.push(args[index + 1]);
     }
   });
 
@@ -176,7 +199,7 @@ test("fails clearly when the yt-dlp fallback is unavailable", async (t) => {
   }), /yt_dlp_missing|yt-dlp/);
 });
 
-test("falls back to local yt-dlp when direct media extraction fails", async (t) => {
+test("extracts page audio-only with yt-dlp and reports progress", async (t) => {
   const outputDir = await mkdtemp(join(tmpdir(), "koe-media-test-"));
   t.after(() => rm(outputDir, { recursive: true, force: true }));
   const calls = [];
@@ -191,18 +214,17 @@ test("falls back to local yt-dlp when direct media extraction fails", async (t) 
     onProgress: (value) => progress.push(value),
     run: async (command, args, options = {}) => {
       calls.push({ command, args });
-      if (calls.length === 1) throw new Error("signed URL expired");
       if (command === "yt-dlp-test") {
         options.onStdout?.("download: 42.5%\n");
-        await writeFile(join(outputDir, "source.mp4"), "media");
+        await writeFile(join(outputDir, "source.m4a"), "media");
       }
     }
   });
 
-  assert.deepEqual(calls.map((call) => call.command), ["ffmpeg-test", "yt-dlp-test", "ffmpeg-test"]);
-  assert.ok(calls[1].args.includes("https://unknown.example/watch/1"));
-  assert.deepEqual(calls[1].args.slice(calls[1].args.indexOf("-f"), calls[1].args.indexOf("-f") + 2), ["-f", "bestaudio/worst"]);
-  assert.deepEqual(calls[1].args.slice(calls[1].args.indexOf("--concurrent-fragments"), calls[1].args.indexOf("--concurrent-fragments") + 2), ["--concurrent-fragments", "8"]);
-  assert.deepEqual(progress, [0.34]);
-  assert.ok(calls[2].args.includes(join(outputDir, "source.mp4")));
+  assert.deepEqual(calls.map((call) => call.command), ["yt-dlp-test", "ffmpeg-test"]);
+  assert.ok(calls[0].args.includes("https://unknown.example/watch/1"));
+  assert.deepEqual(calls[0].args.slice(calls[0].args.indexOf("-f"), calls[0].args.indexOf("-f") + 2), ["-f", "bestaudio/worst"]);
+  assert.deepEqual(calls[0].args.slice(calls[0].args.indexOf("--concurrent-fragments"), calls[0].args.indexOf("--concurrent-fragments") + 2), ["--concurrent-fragments", "8"]);
+  assert.deepEqual(progress, [0.2975]);
+  assert.ok(calls[1].args.includes(join(outputDir, "source.m4a")));
 });
