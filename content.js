@@ -116,7 +116,7 @@
 
   let lastSeekAt = 0;
   document.addEventListener("seeked", () => {
-    const video = activeVideo || findVideo();
+    const video = (activeVideo?.isConnected ? activeVideo : null) || findVideo();
     if (!video) return;
     const now = Date.now();
     if (now - lastSeekAt < 1_500) return;
@@ -154,6 +154,7 @@
   function tryAutoPlay() {
     const now = Date.now();
     if (now - lastAutoPlayAt < 5_000) return;
+    if (activeVideo && !activeVideo.isConnected) activeVideo = null;
     activeVideo ||= findVideo();
     if (!activeVideo || !activeVideo.paused || activeVideo.currentTime >= 1) return;
     lastAutoPlayAt = now;
@@ -241,6 +242,7 @@
   function startSubtitleClock() {
     clearInterval(subtitleTimer);
     subtitleTimer = window.setInterval(() => {
+      if (activeVideo && !activeVideo.isConnected) activeVideo = null;
       activeVideo ||= findVideo();
       if (!activeVideo) return;
       const timeMs = activeVideo.currentTime * 1_000;
