@@ -262,10 +262,6 @@ export function createJobManager(options = {}) {
       console.log(`[koe] job ${job.id.slice(0, 8)} ready in ${((job.completedAt - job.startedAt) / 1_000).toFixed(1)}s (${job.lines.length} lines)`);
     } catch (error) {
       const aborted = error?.name === "AbortError" || signal.aborted;
-      job.status = aborted ? "cancelled" : "error";
-      job.error = aborted ? "" : error instanceof Error ? error.message : String(error);
-      job.completedAt = Date.now();
-      console.log(`[koe] job ${job.id.slice(0, 8)} ${aborted ? "cancelled" : "error"} in ${((job.completedAt - job.startedAt) / 1_000).toFixed(1)}s: ${job.error}`);
       if (aborted && job.sourceUrl && job.lines.length) {
         try {
           await cache.save(job.sourceUrl, {
@@ -278,6 +274,10 @@ export function createJobManager(options = {}) {
           // 缓存失败不影响任务结果
         }
       }
+      job.status = aborted ? "cancelled" : "error";
+      job.error = aborted ? "" : error instanceof Error ? error.message : String(error);
+      job.completedAt = Date.now();
+      console.log(`[koe] job ${job.id.slice(0, 8)} ${aborted ? "cancelled" : "error"} in ${((job.completedAt - job.startedAt) / 1_000).toFixed(1)}s: ${job.error}`);
     } finally {
       job.running = false;
       activeCount = Math.max(0, activeCount - 1);
@@ -303,6 +303,24 @@ export function createJobManager(options = {}) {
       if (!job) return false;
       job.controller?.abort();
       return true;
+    },
+    abortAll: () => {
+      for (const job of jobs.values()) job.controller?.abort();
+      return activeCount;
+    },
+    savePartialCaches: async () => {
+      const pending = [];
+      for (const job of jobs.values()) {
+        if (job.sourceUrl && job.lines.length && job.status !== "ready") {
+          pending.push(cache.save(job.sourceUrl, {
+            lines: job.lines,
+            durationMs: job.durationMs,
+            translated: Boolean(job.translate),
+            full: false
+          }));
+        }
+      }
+      await Promise.allSettled(pending);
     },
     prioritize: (id, timeMs) => {
       const job = jobs.get(String(id));

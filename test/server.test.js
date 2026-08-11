@@ -291,6 +291,56 @@ test("cancels a running job and marks it cancelled", async (t) => {
   assert.equal(job.status, "cancelled");
 });
 
+test("saves recognized lines into the cache when a job is cancelled", async (t) => {
+  const cacheDir = await mkdtemp(join(tmpdir(), "koe-cache-cancel-"));
+  t.after(() => rm(cacheDir, { recursive: true, force: true }));
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let runs = 0;
+  const app = createServer({
+    port: 0,
+    provider: "mock",
+    cacheRoot: cacheDir,
+    processJob: async (job) => {
+      runs += 1;
+      if (runs === 1) {
+        job.lines.push({ startMs: 5_000, endMs: 7_000, text: "被取消前的字幕" });
+        await gate;
+        throw new Error("cancelled-by-test");
+      }
+      const startMs = Number(job.streamStartMs) || 0;
+      return {
+        lines: [{ startMs, endMs: startMs + 1_000, text: `新字幕@${startMs}` }],
+        vtt: `WEBVTT\n\n1\n00:00:00.000 --> 00:00:01.000\n新字幕\n`
+      };
+    }
+  });
+  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
+  t.after(() => app.server.close());
+  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
+  const sourceUrl = "https://cdn.example.com/cancelled.mp4";
+
+  const first = await createJob({ sourceUrl, startMs: 0 });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  await fetch(`${baseUrl}/api/jobs/${first.id}/cancel`, { method: "POST" });
+  release();
+  assert.equal((await waitForJob(baseUrl, first.id)).status, "cancelled");
+
+  const second = await createJob({ sourceUrl, startMs: 0 });
+  assert.notEqual(second.status, "ready");
+  assert.equal((await waitForJob(baseUrl, second.id)).status, "ready");
+  const vtt = await fetch(`${baseUrl}/api/jobs/${second.id}/vtt`).then((response) => response.text());
+  assert.match(vtt, /被取消前的字幕/);
+
+  async function createJob(body) {
+    return fetch(`${baseUrl}/api/jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pageUrl: "https://www.pornhub.com/view_video.php?viewkey=test", filename: "cancelled.mp4", ...body })
+    }).then((response) => response.json());
+  }
+});
+
 test("streams partial subtitles and accepts seek prioritization", async (t) => {
   const app = createServer({
     port: 0,
