@@ -173,7 +173,7 @@ async function checkHealth() {
     elements.hint.textContent = body.provider === "mock"
       ? "当前是 mock 模式；真实字幕需要 Fun-ASR。"
       : body.mode === "local"
-        ? "全部在本机处理，识别/翻译直接调用云端模型"
+        ? "打开视频后点击页面右下角「分析字幕」按钮开始"
         : "选好视频后点击 Analyze video，整段分析完再加载字幕。";
   } catch {
     healthState = { ok: false, provider: "" };
