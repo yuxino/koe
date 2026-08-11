@@ -45,3 +45,18 @@ test("falls back to ordered parsing when numbering is missing", async () => {
   });
   assert.deepEqual(lines.map((line) => line.translated), ["甲", "乙"]);
 });
+
+test("retries translation on transient failures", async () => {
+  let calls = 0;
+  const lines = await translateLines({
+    lines: [{ startMs: 0, endMs: 1_000, text: "Hello" }],
+    apiKey: "test-key",
+    fetchImpl: async () => {
+      calls += 1;
+      if (calls === 1) return { ok: false, status: 429, json: async () => ({ message: "throttled" }) };
+      return { ok: true, json: async () => ({ output: { choices: [{ message: { content: "1. 你好" } }] } }) };
+    }
+  });
+  assert.equal(calls, 2);
+  assert.equal(lines[0].translated, "你好");
+});
