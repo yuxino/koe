@@ -22,11 +22,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return undefined;
 });
 
-async function startCapture({ tabId, streamId, serverUrl, pageUrl }) {
+async function startCapture({ tabId, streamId, serverUrl, apiToken, pageUrl }) {
   await stopCapture(tabId);
   const sessionResponse = await fetch(`${serverUrl}/api/session/start`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...authHeaders(apiToken) },
     body: JSON.stringify({ tabId, pageUrl })
   });
   const session = await sessionResponse.json().catch(() => ({}));
@@ -54,6 +54,7 @@ async function startCapture({ tabId, streamId, serverUrl, pageUrl }) {
   capture = {
     tabId,
     serverUrl,
+    apiToken: String(apiToken || ""),
     sessionId: session.id,
     stream,
     audioContext,
@@ -88,7 +89,7 @@ async function stopCapture(tabId) {
   active.source.disconnect();
   active.stream.getTracks().forEach((track) => track.stop());
   await active.audioContext.close().catch(() => undefined);
-  await fetch(`${active.serverUrl}/api/session/${active.sessionId}/stop`, { method: "POST" }).catch(() => undefined);
+  await fetch(`${active.serverUrl}/api/session/${active.sessionId}/stop`, { headers: authHeaders(active.apiToken), method: "POST" }).catch(() => undefined);
 }
 
 async function flushChunk(force) {
@@ -123,7 +124,8 @@ async function flushChunkFor(active, force) {
     headers: {
       "content-type": "audio/wav",
       "x-start-ms": String(Math.round(startMs)),
-      "x-end-ms": String(Math.round(endMs))
+      "x-end-ms": String(Math.round(endMs)),
+      ...authHeaders(active.apiToken)
     },
     body: wav
   });
@@ -180,4 +182,8 @@ async function notify(message) {
 
 async function reportError(tabId, error) {
   await notify({ type: "CAPTURE_ERROR", tabId, error: error instanceof Error ? error.message : String(error) });
+}
+
+function authHeaders(apiToken) {
+  return apiToken ? { Authorization: `Bearer ${apiToken}` } : {};
 }

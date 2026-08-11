@@ -19,6 +19,7 @@ export function createServer(options = {}) {
     port: Number(options.port ?? process.env.PORT ?? DEFAULT_PORT),
     provider: requestedProvider === "dashscope" && !apiKey ? "mock" : requestedProvider,
     apiKey,
+    apiToken: options.apiToken ?? process.env.KOE_API_TOKEN ?? "",
     baseUrl: options.baseUrl || process.env.DASHSCOPE_BASE_URL || "https://dashscope.aliyuncs.com/compatible-mode/v1",
     model: options.model || process.env.ASR_MODEL || "fun-asr-flash-2026-06-15",
     chunkSeconds: Number(options.chunkSeconds || process.env.ASR_CHUNK_SECONDS || DEFAULT_CHUNK_SECONDS)
@@ -40,12 +41,17 @@ export function createServer(options = {}) {
           ok: true,
           service: "koe",
           provider: config.provider,
+          authRequired: Boolean(config.apiToken),
           chunkSeconds: config.chunkSeconds
         });
         return;
       }
 
       if (request.method === "POST" && url.pathname === "/api/session/start") {
+        if (!isAuthorized(request, config.apiToken)) {
+          sendJson(response, 401, { error: "unauthorized" });
+          return;
+        }
         const payload = await readJson(request);
         const id = randomUUID();
         sessions.set(id, {
@@ -61,6 +67,10 @@ export function createServer(options = {}) {
 
       const chunkMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/chunk$/);
       if (request.method === "POST" && chunkMatch) {
+        if (!isAuthorized(request, config.apiToken)) {
+          sendJson(response, 401, { error: "unauthorized" });
+          return;
+        }
         const session = sessions.get(chunkMatch[1]);
         if (!session) {
           sendJson(response, 404, { error: "session_not_found" });
@@ -82,6 +92,10 @@ export function createServer(options = {}) {
 
       const stopMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/stop$/);
       if (request.method === "POST" && stopMatch) {
+        if (!isAuthorized(request, config.apiToken)) {
+          sendJson(response, 401, { error: "unauthorized" });
+          return;
+        }
         const existed = sessions.delete(stopMatch[1]);
         sendJson(response, existed ? 200 : 404, { ok: existed });
         return;
@@ -152,6 +166,12 @@ function readBody(request, limit) {
 function finiteNumber(value, fallback) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function isAuthorized(request, apiToken) {
+  if (!apiToken) return true;
+  const authorization = String(request.headers.authorization || "");
+  return authorization === `Bearer ${apiToken}`;
 }
 
 function loadDotEnv() {

@@ -33,6 +33,24 @@ npm start
 
 真实模式会把插件生成的 16 kHz 单声道 WAV 片段交给 Fun-ASR，并使用词级时间戳按标点、停顿和最长句长聚合字幕。Key 只留在本地 Node 服务，不会放进插件；没有 Key 时服务会自动回到 `mock`。
 
+如果服务部署到公网，建议同时设置 `KOE_API_TOKEN`。插件面板的 `API TOKEN` 字段只保存在 Chrome 本地存储，请求字幕会话时通过 Bearer Token 发送。
+
+当前部署地址：`https://koe-api.yuxino.cn`
+
+## 服务器部署
+
+服务器沿用 ding-frame 的 pm2 + nginx 方式：Koe 在 `127.0.0.1:3011` 运行，nginx 将 `koe-api.yuxino.cn` 的 HTTPS 请求转发过去。一次性部署需要在服务器上准备 `.env`：
+
+```env
+PORT=3011
+ASR_PROVIDER=dashscope
+ASR_MODEL=fun-asr-flash-2026-06-15
+DASHSCOPE_API_KEY=...
+KOE_API_TOKEN=...
+```
+
+详见 [DEPLOY.md](DEPLOY.md)。
+
 ## 当前 MVP 的边界
 
 - 插件通过用户主动点击开始，只处理当前标签页。

@@ -10,7 +10,7 @@ test("mock server runs a full caption session", async (t) => {
   const baseUrl = `http://127.0.0.1:${address.port}`;
 
   const health = await fetch(`${baseUrl}/health`).then((response) => response.json());
-  assert.deepEqual(health, { ok: true, service: "koe", provider: "mock", chunkSeconds: 15 });
+  assert.deepEqual(health, { ok: true, service: "koe", provider: "mock", authRequired: false, chunkSeconds: 15 });
 
   const session = await fetch(`${baseUrl}/api/session/start`, {
     method: "POST",
@@ -27,4 +27,21 @@ test("mock server runs a full caption session", async (t) => {
   assert.equal(result.chunkCount, 1);
   assert.equal(result.lines[0].startMs, 300);
   assert.equal(result.lines[0].provider, "mock");
+});
+
+test("protects caption sessions when an API token is configured", async (t) => {
+  const app = createServer({ port: 0, provider: "mock", apiToken: "secret-token" });
+  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
+  t.after(() => app.server.close());
+  const address = app.server.address();
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  const unauthorized = await fetch(`${baseUrl}/api/session/start`, { method: "POST" });
+  assert.equal(unauthorized.status, 401);
+
+  const authorized = await fetch(`${baseUrl}/api/session/start`, {
+    method: "POST",
+    headers: { Authorization: "Bearer secret-token" }
+  });
+  assert.equal(authorized.status, 201);
 });

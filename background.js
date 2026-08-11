@@ -36,7 +36,7 @@ async function handleMessage(message, sender) {
   return { ok: true };
 }
 
-async function startCapture({ tabId, serverUrl, pageUrl }) {
+async function startCapture({ tabId, serverUrl, apiToken, pageUrl }) {
   tabId = Number(tabId);
   if (!Number.isInteger(tabId)) throw new Error("No active tab found.");
   const current = tabStates.get(tabId);
@@ -56,14 +56,16 @@ async function startCapture({ tabId, serverUrl, pageUrl }) {
   tabStates.set(tabId, state);
 
   try {
-    await sendToOffscreen({
+    const offscreenResponse = await sendToOffscreen({
       target: "offscreen",
       type: "START_CAPTURE",
       tabId,
       streamId,
       serverUrl: state.serverUrl,
+      apiToken: String(apiToken || ""),
       pageUrl: state.pageUrl
     });
+    if (!offscreenResponse?.ok) throw new Error(offscreenResponse?.error || "音频采集页启动失败。");
     await forwardToTab(tabId, { type: "CAPTURE_STATUS", tabId, status: "running" });
     return { ok: true, state: publicState(state) };
   } catch (error) {
