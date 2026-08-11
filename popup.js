@@ -18,6 +18,7 @@ const elements = {
 document.addEventListener("DOMContentLoaded", init);
 elements.toggle.addEventListener("click", analyze);
 elements.serverUrl.addEventListener("change", saveServerUrl);
+elements.apiToken.addEventListener("change", saveApiToken);
 
 async function init() {
   [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -37,7 +38,7 @@ async function analyze() {
   const serverUrl = elements.serverUrl.value.trim().replace(/\/+$/, "");
   const apiToken = elements.apiToken.value.trim();
   await saveServerUrl();
-  await chrome.storage.local.set({ apiToken });
+  await saveApiToken();
   elements.toggle.disabled = true;
   elements.engineStatus.textContent = "正在创建任务…";
   try {
@@ -52,9 +53,12 @@ async function analyze() {
     currentState = response.state;
     renderState();
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     elements.engineStatus.textContent = "创建失败";
-    elements.engineDetail.textContent = error instanceof Error ? error.message : String(error);
-    elements.hint.textContent = "请检查视频来源、服务地址和 API token。";
+    elements.engineDetail.textContent = message;
+    elements.hint.textContent = message.includes("KOE_API_TOKEN")
+      ? "这里需要 Koe 服务访问 Token，不是语音识别服务的 Key。"
+      : "请检查视频来源、服务地址和 API token。";
   } finally {
     elements.toggle.disabled = false;
   }
@@ -83,6 +87,12 @@ async function saveServerUrl() {
   const serverUrl = elements.serverUrl.value.trim().replace(/\/+$/, "") || DEFAULT_SERVER_URL;
   elements.serverUrl.value = serverUrl;
   await chrome.storage.local.set({ serverUrl });
+}
+
+async function saveApiToken() {
+  const apiToken = elements.apiToken.value.trim();
+  elements.apiToken.value = apiToken;
+  await chrome.storage.local.set({ apiToken });
 }
 
 function renderState() {

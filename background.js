@@ -145,6 +145,9 @@ function publicState(state) {
 
 async function parseResponse(response, fallback) {
   const body = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    throw new Error("Koe API Token 不正确。请填写服务器的 KOE_API_TOKEN，不要填写 DashScope API Key。");
+  }
   if (!response.ok) throw new Error(body.error || `${fallback}（${response.status}）`);
   return body;
 }
