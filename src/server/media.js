@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
+const MEDIA_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/136 Safari/537.36";
 const SUPPORTED_PAGE_HOSTS = ["pornhub.com", "xvideos.com"];
 
 export function isSupportedPageUrl(value) {
@@ -90,15 +91,17 @@ export async function extractAudioLocally({
   ffmpegBin = "ffmpeg",
   ytdlpBin = "yt-dlp",
   onProgress = () => undefined,
-  run = runCommand
+  run = runCommand,
+  fetchImpl = fetch
 }) {
   await mkdir(outputDir, { recursive: true });
   const outputPath = join(outputDir, "audio.m4a");
 
   if (sourceUrl) {
     try {
+      const inputUrl = await resolveHlsAudioVariant(sourceUrl, { pageUrl, fetchImpl });
       await normalizeToAac({
-        input: sourceUrl,
+        input: inputUrl,
         outputPath,
         pageUrl,
         ffmpegBin,
@@ -121,6 +124,42 @@ export async function extractAudioLocally({
   });
   await normalizeToAac({ input: sourcePath, outputPath, ffmpegBin, run });
   return outputPath;
+}
+
+export async function resolveHlsAudioVariant(sourceUrl, { pageUrl = "", fetchImpl = fetch } = {}) {
+  let url;
+  try {
+    url = new URL(sourceUrl);
+  } catch {
+    return sourceUrl;
+  }
+  if (!/\.m3u8(\?|$)/i.test(url.pathname)) return sourceUrl;
+
+  let text = "";
+  try {
+    const response = await fetchImpl(url.toString(), {
+      redirect: "follow",
+      headers: {
+        ...(pageUrl ? { referer: pageUrl } : {}),
+        "user-agent": MEDIA_USER_AGENT
+      }
+    });
+    if (response.ok) text = await response.text();
+  } catch {
+    return sourceUrl;
+  }
+  const variant = pickAudioVariantUri(text);
+  if (!variant) return sourceUrl;
+  return new URL(variant, url).toString();
+}
+
+function pickAudioVariantUri(playlist) {
+  const mediaLines = String(playlist || "").match(/#EXT-X-MEDIA:[^\r\n]+/g) || [];
+  const audio = mediaLines.filter((line) => /TYPE\s*=\s*"?AUDIO"?/i.test(line));
+  if (!audio.length) return null;
+  const chosen = audio.find((line) => /\bDEFAULT\s*=\s*YES/i.test(line)) || audio[0];
+  const match = chosen.match(/URI\s*=\s*"([^"]+)"/) || chosen.match(/URI\s*=\s*([^,\s]+)/);
+  return match ? match[1] : null;
 }
 
 export async function normalizeToWav({ inputPath, outputPath, ffmpegBin = "ffmpeg", run = runCommand }) {
@@ -184,7 +223,7 @@ export async function normalizeToAac({ input, outputPath, pageUrl = "", ffmpegBi
   const inputOptions = pageUrl
     ? [
         "-headers",
-        `Referer: ${pageUrl}\r\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/136 Safari/537.36\r\n`
+        `Referer: ${pageUrl}\r\nUser-Agent: ${MEDIA_USER_AGENT}\r\n`
       ]
     : [];
   await run(ffmpegBin, [

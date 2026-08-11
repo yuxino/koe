@@ -79,6 +79,10 @@ test("extracts browser-discovered media directly with ffmpeg and referer", async
     outputDir,
     ffmpegBin: "ffmpeg-test",
     ytdlpBin: "yt-dlp-test",
+    fetchImpl: async () => ({
+      ok: true,
+      text: async () => "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=500000\nvideo.m3u8"
+    }),
     run: async (command, args) => { calls.push({ command, args }); }
   });
 
@@ -87,6 +91,57 @@ test("extracts browser-discovered media directly with ffmpeg and referer", async
   assert.equal(calls[0].command, "ffmpeg-test");
   assert.ok(calls[0].args.includes("https://cdn.example/master.m3u8?signature=ok"));
   assert.match(calls[0].args[calls[0].args.indexOf("-headers") + 1], /Referer: https:\/\/video\.example\/watch\/1/);
+});
+
+test("prefers the audio-only HLS variant when available", async (t) => {
+  const outputDir = await mkdtemp(join(tmpdir(), "koe-media-test-"));
+  t.after(() => rm(outputDir, { recursive: true, force: true }));
+  const inputs = [];
+
+  const outputPath = await extractAudioLocally({
+    pageUrl: "https://video.example/watch/1",
+    sourceUrl: "https://cdn.example/hls/master.m3u8",
+    outputDir,
+    ffmpegBin: "ffmpeg-test",
+    ytdlpBin: "yt-dlp-test",
+    fetchImpl: async () => ({
+      ok: true,
+      text: async () => [
+        "#EXTM3U",
+        '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",DEFAULT=YES,URI="audio/eng.m3u8"',
+        "#EXT-X-STREAM-INF:BANDWIDTH=800000,CODECS=\"avc1\"",
+        "video-800k.m3u8"
+      ].join("\n")
+    }),
+    run: async (command, args) => {
+      const index = args.indexOf("-i");
+      inputs.push(args[index + 1]);
+    }
+  });
+
+  assert.equal(outputPath, join(outputDir, "audio.m4a"));
+  assert.deepEqual(inputs, ["https://cdn.example/hls/audio/eng.m3u8"]);
+});
+
+test("passes non-HLS media URLs straight to ffmpeg", async (t) => {
+  const outputDir = await mkdtemp(join(tmpdir(), "koe-media-test-"));
+  t.after(() => rm(outputDir, { recursive: true, force: true }));
+  const inputs = [];
+
+  await extractAudioLocally({
+    pageUrl: "https://video.example/watch/1",
+    sourceUrl: "https://cdn.example/media.mp4?token=1",
+    outputDir,
+    ffmpegBin: "ffmpeg-test",
+    ytdlpBin: "yt-dlp-test",
+    fetchImpl: async () => { throw new Error("should not fetch"); },
+    run: async (command, args) => {
+      const index = args.indexOf("-i");
+      inputs.push(args[index + 1]);
+    }
+  });
+
+  assert.deepEqual(inputs, ["https://cdn.example/media.mp4?token=1"]);
 });
 
 test("falls back to local yt-dlp when direct media extraction fails", async (t) => {
