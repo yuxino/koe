@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Koe",
-  "version": "0.3.74",
+  "version": "0.3.75",
   "description": "Batch-analyze videos first, then load accurate timestamped captions.",
   "icons": {
     "16": "assets/koe-avatar-16.png",
