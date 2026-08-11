@@ -16,7 +16,7 @@
       :host { all: initial; }
       .stage { position: fixed; left: 50%; bottom: 5vh; transform: translate(-50%, 12px); opacity: 0; transition: opacity .28s ease, transform .28s ease; max-width: min(820px, 78vw); text-align: center; color: #fbf4df; font-family: Georgia, 'Songti SC', serif; }
       .stage.visible { opacity: 1; transform: translate(-50%, 0); }
-      .eyebrow { display: inline-flex; align-items: center; gap: 7px; margin-bottom: 9px; padding: 5px 10px; border: 1px solid rgba(242, 226, 181, .28); border-radius: 99px; background: rgba(25, 35, 30, .72); color: #d8e58c; font: 600 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .13em; text-transform: uppercase; backdrop-filter: blur(14px); }
+      .eyebrow { display: none; }
       .dot { width: 6px; height: 6px; border-radius: 50%; background: #c5d865; box-shadow: 0 0 0 4px rgba(197, 216, 101, .14); }
       .card { padding: 15px 24px 17px; border: 1px solid rgba(255, 248, 224, .18); border-radius: 14px; background: linear-gradient(135deg, rgba(20, 29, 25, .94), rgba(43, 49, 37, .84)); box-shadow: 0 18px 60px rgba(0, 0, 0, .32); }
       .translated { margin: 0; font-size: 20px; line-height: 1.3; letter-spacing: .02em; text-shadow: 0 2px 14px rgba(0, 0, 0, .5); }

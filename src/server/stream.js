@@ -93,7 +93,7 @@ async function streamRealtimeTranscribe({
               startMs: line.startMs + offsetMs,
               endMs: line.endMs + offsetMs
             })));
-            onProgress(Math.min(0.95, 0.06 + sentenceCount * 0.012));
+            onProgress(Math.min(0.95, 0.06 + sentenceCount * 0.012), `实时识别中 · 已出 ${sentenceCount} 句`);
           }
           return;
         }
@@ -283,6 +283,7 @@ function spawnFfmpeg(ffmpegBin, args) {
     "-loglevel",
     "error",
     ...args,
+    "-vn",
     "-ac",
     "1",
     "-ar",

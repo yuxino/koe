@@ -23,7 +23,7 @@ export function createJobManager(options = {}) {
   });
   const asrSemaphore = createSemaphore(options.asrMaxConcurrent ?? process.env.ASR_MAX_CONCURRENT ?? 8);
   const extractSemaphore = createSemaphore(options.localExtractConcurrency ?? process.env.LOCAL_EXTRACT_CONCURRENCY ?? 4);
-  const translateSemaphore = createSemaphore(Number(options.translateConcurrency ?? (process.env.KOE_TRANSLATE_CONCURRENCY || 2)));
+  const translateSemaphore = createSemaphore(Number(options.translateConcurrency ?? (process.env.KOE_TRANSLATE_CONCURRENCY || 4)));
   let activeCount = 0;
 
   async function createJob(input = {}) {
@@ -285,9 +285,9 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
         onPartial: (partialLines) => {
           job.partialSentences = partialLines || [];
         },
-        onProgress: (value) => {
+        onProgress: (value, detail) => {
           streamChunks += 1;
-          updateProgress("analyzing", 0.1 + Number(value || 0) * 0.8, `边下载边识别 · 已处理 ${streamChunks} 段`);
+          updateProgress("analyzing", 0.1 + Number(value || 0) * 0.8, detail || `边下载边识别 · 已处理 ${streamChunks} 段`);
         }
       }));
       updateProgress("analyzing", 0.95, "收尾中");
