@@ -262,7 +262,7 @@ export function createJobManager(options = {}) {
             lines: job.lines,
             durationMs: job.durationMs,
             translated: Boolean(job.translate),
-            full: !job.seededFromCache && job.streamStartMs === 0
+            full: coversWholeVideo(job.lines, job.durationMs) || (!job.seededFromCache && job.streamStartMs === 0)
           });
         } catch {
           // 缓存失败不影响任务结果
@@ -561,4 +561,23 @@ function mergeJobLines(existing, incoming) {
     result.push({ ...line });
   }
   return result;
+}
+
+function coversWholeVideo(lines, durationMs) {
+  const duration = Number(durationMs);
+  if (!(duration > 0) || !Array.isArray(lines) || !lines.length) return false;
+  const sorted = [...lines].sort((left, right) => Number(left.startMs || 0) - Number(right.startMs || 0));
+  const gapMs = Number(process.env.KOE_CACHE_GAP_MS || 30_000);
+  let cursor = 0;
+  for (const line of sorted) {
+    const start = Number(line.startMs || 0);
+    const end = Number(line.endMs || 0);
+    if (start < cursor - gapMs) {
+      cursor = Math.max(cursor, end);
+      continue;
+    }
+    if (start - cursor > gapMs) return false;
+    cursor = Math.max(cursor, end);
+  }
+  return cursor >= duration - 2_000;
 }
