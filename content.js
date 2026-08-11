@@ -41,6 +41,7 @@
   let subtitleReady = false;
   let analysisDone = false;
   let showingCue = false;
+  let autoPlayedPartial = false;
 
   const STAGE_TEXT = {
     downloading: "正在下载 / 提取声音",
@@ -65,6 +66,7 @@
     if (message.type === "JOB_STATUS") {
       if (message.status === "analyzing") {
         analysisDone = false;
+        autoPlayedPartial = false;
         if (!showingCue) {
           const percent = Math.round(Number(message.progress || 0) * 100);
           const elapsed = message.startedAt
@@ -91,6 +93,7 @@
       if (message.status === "idle") {
         subtitleReady = false;
         analysisDone = false;
+        autoPlayedPartial = false;
         showingCue = false;
         hide();
       }
@@ -115,6 +118,13 @@
     if (message.type === "PARTIAL_SUBTITLES") {
       cues = parseVtt(message.vtt || "");
       subtitleReady = true;
+      if (cues.length && !autoPlayedPartial) {
+        autoPlayedPartial = true;
+        activeVideo ||= findVideo();
+        if (activeVideo && activeVideo.paused && activeVideo.currentTime < 1) {
+          activeVideo.play().catch(() => undefined);
+        }
+      }
       startSubtitleClock();
       refreshNativeTrack();
       return false;
