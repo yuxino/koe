@@ -113,6 +113,7 @@ async function beginWatching({ tabId, frameId = 0, serverUrl, apiToken, job, pag
     jobStatus: job.status || "analyzing",
     stageDetail: job.stageDetail || "",
     hasDuration: Boolean(job.hasDuration),
+    fromCache: Boolean(job.fromCache),
     lastPartialVtt: "",
     pageUrl,
     selection,
@@ -462,7 +463,7 @@ async function forwardToTab(tabId, message, frameId = 0) {
 }
 
 function publicState(state) {
-  return { status: state.status, jobId: state.jobId, startedAt: state.startedAt, progress: state.progress, jobStatus: state.jobStatus, stageDetail: state.stageDetail, hasDuration: Boolean(state.hasDuration) };
+  return { status: state.status, jobId: state.jobId, startedAt: state.startedAt, progress: state.progress, jobStatus: state.jobStatus, stageDetail: state.stageDetail, hasDuration: Boolean(state.hasDuration), fromCache: Boolean(state.fromCache) };
 }
 
 async function parseResponse(response, fallback) {
