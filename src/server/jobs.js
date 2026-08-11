@@ -31,6 +31,7 @@ export function createJobManager(options = {}) {
       pageUrl: source.pageUrl,
       sourceUrl: source.sourceUrl,
       filename: String(input.filename || "video"),
+      durationMs: Number(input.durationMs) || null,
       provider,
       directory,
       sourcePath: null,
@@ -167,6 +168,7 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
         outputDir: job.directory,
         ffmpegBin,
         ytdlpBin,
+        durationMs: job.durationMs,
         onProgress: (value) => updateProgress("downloading", 0.08 + Number(value || 0) * 0.22)
       }));
     }
@@ -230,6 +232,7 @@ function publicJob(job) {
     status: job.status,
     pageUrl: job.pageUrl,
     filename: job.filename,
+    durationMs: job.durationMs,
     provider: job.provider,
     progress: job.progress,
     error: job.error || undefined,

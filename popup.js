@@ -135,12 +135,18 @@ async function checkHealth() {
 function renderState() {
   const status = currentState.status || "idle";
   const analyzing = status === "analyzing";
+  const percent = Math.round(Number(currentState.progress || 0) * 100);
+  const stageLabel = {
+    downloading: "下载 / 提取声音中",
+    uploading_audio: "上传音频中",
+    analyzing: "整段识别中"
+  }[currentState.jobStatus] || "整段分析中";
   elements.toggle.textContent = analyzing ? "Analyzing…" : "Analyze video";
   elements.toggle.classList.toggle("running", analyzing);
-  elements.batchMark.textContent = analyzing ? `${Math.round(Number(currentState.progress || 0) * 100)}%` : "BATCH";
-  elements.engineStatus.textContent = analyzing ? "整段分析中" : status === "ready" ? "字幕已就绪" : "准备就绪";
+  elements.batchMark.textContent = analyzing ? `${percent}%` : "BATCH";
+  elements.engineStatus.textContent = analyzing ? stageLabel : status === "ready" ? "字幕已就绪" : "准备就绪";
   elements.engineDetail.textContent = analyzing
-    ? "不会显示中间字幕 · 等待完整结果"
+    ? `${percent}% · 完成后自动加载字幕`
     : status === "ready"
       ? "完整 VTT 已加载到视频"
       : healthState.ok

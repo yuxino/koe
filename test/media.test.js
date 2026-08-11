@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { detectSpeechRanges, extractAudioLocally, isSupportedPageUrl, normalizeToWav, validateSourceRequest } from "../src/server/media.js";
+import { detectSpeechRanges, extractAudioLocally, isSupportedPageUrl, normalizeToAac, normalizeToWav, validateSourceRequest } from "../src/server/media.js";
 
 test("recognizes supported adult video page hosts", () => {
   assert.equal(isSupportedPageUrl("https://www.pornhub.com/view_video.php?viewkey=abc"), true);
@@ -66,6 +66,24 @@ test("builds an ffmpeg normalization command without a shell", async () => {
   assert.equal(captured.command, "ffmpeg-test");
   assert.deepEqual(captured.args.slice(-7, -1), ["-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"]);
   assert.equal(captured.args.at(-1), "/tmp/output.wav");
+});
+
+test("reports ffmpeg extraction progress from out_time", async () => {
+  const progress = [];
+  await normalizeToAac({
+    input: "https://cdn.example/video.mp4",
+    outputPath: "/tmp/audio.m4a",
+    pageUrl: "https://video.example/watch/1",
+    ffmpegBin: "ffmpeg-test",
+    durationMs: 10_000,
+    onProgress: (value) => progress.push(value),
+    run: async (command, args, options = {}) => {
+      options.onStdout?.("out_time_ms=1000\nprogress=continue\n");
+      options.onStdout?.("out_time_ms=5000\nprogress=continue\n");
+    }
+  });
+  assert.ok(progress.includes(0.1), `expected 0.1 in ${JSON.stringify(progress)}`);
+  assert.ok(progress.includes(0.5), `expected 0.5 in ${JSON.stringify(progress)}`);
 });
 
 test("extracts browser-discovered media directly with ffmpeg and referer", async (t) => {
@@ -171,6 +189,6 @@ test("falls back to local yt-dlp when direct media extraction fails", async (t) 
   assert.ok(calls[1].args.includes("https://unknown.example/watch/1"));
   assert.deepEqual(calls[1].args.slice(calls[1].args.indexOf("-f"), calls[1].args.indexOf("-f") + 2), ["-f", "bestaudio/worst"]);
   assert.deepEqual(calls[1].args.slice(calls[1].args.indexOf("--concurrent-fragments"), calls[1].args.indexOf("--concurrent-fragments") + 2), ["--concurrent-fragments", "8"]);
-  assert.deepEqual(progress, [0.425]);
+  assert.deepEqual(progress, [0.34]);
   assert.ok(calls[2].args.includes(join(outputDir, "source.mp4")));
 });

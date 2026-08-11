@@ -92,7 +92,8 @@ export async function extractAudioLocally({
   ytdlpBin = "yt-dlp",
   onProgress = () => undefined,
   run = runCommand,
-  fetchImpl = fetch
+  fetchImpl = fetch,
+  durationMs = null
 }) {
   await mkdir(outputDir, { recursive: true });
   const outputPath = join(outputDir, "audio.m4a");
@@ -105,7 +106,9 @@ export async function extractAudioLocally({
         outputPath,
         pageUrl,
         ffmpegBin,
-        run
+        run,
+        durationMs,
+        onProgress
       });
       return outputPath;
     } catch (error) {
@@ -119,10 +122,10 @@ export async function extractAudioLocally({
     outputDir,
     ytdlpBin,
     audioOnly: true,
-    onProgress,
+    onProgress: (value) => onProgress(Number(value || 0) * 0.8),
     run
   });
-  await normalizeToAac({ input: sourcePath, outputPath, ffmpegBin, run });
+  await normalizeToAac({ input: sourcePath, outputPath, ffmpegBin, run, durationMs, onProgress: (value) => onProgress(0.8 + Number(value || 0) * 0.2) });
   return outputPath;
 }
 
@@ -219,7 +222,7 @@ export async function detectSpeechRanges({
   return mergeSpeechRanges(ranges, { duration, minSpeechSec, gapSec, padSec });
 }
 
-export async function normalizeToAac({ input, outputPath, pageUrl = "", ffmpegBin, run = runCommand }) {
+export async function normalizeToAac({ input, outputPath, pageUrl = "", ffmpegBin, run = runCommand, onProgress = () => undefined, durationMs = null }) {
   const inputOptions = pageUrl
     ? [
         "-headers",
@@ -244,8 +247,30 @@ export async function normalizeToAac({ input, outputPath, pageUrl = "", ffmpegBi
     "aac",
     "-b:a",
     "48k",
+    ...(durationMs ? ["-progress", "pipe:1", "-nostats"] : []),
     outputPath
-  ]);
+  ], {
+    onStdout: durationMs ? createProgressParser(onProgress, Number(durationMs)) : undefined
+  });
+}
+
+function createProgressParser(onProgress, durationMs) {
+  let buffer = "";
+  let lastPercent = -1;
+  return (chunk) => {
+    buffer += String(chunk || "");
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      const match = line.match(/^out_time_ms=(\d+)/);
+      if (!match || !durationMs) continue;
+      const percent = Math.round((Number(match[1]) / durationMs) * 100);
+      if (percent !== lastPercent) {
+        lastPercent = percent;
+        onProgress(Math.max(0, Math.min(1, Number(match[1]) / durationMs)));
+      }
+    }
+  };
 }
 
 export function runCommand(command, args, { cwd, onStdout = () => undefined, onStderr = () => undefined } = {}) {

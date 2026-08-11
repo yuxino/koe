@@ -37,6 +37,17 @@
   let subtitleTimer;
   let subtitleReady = false;
 
+  const STAGE_TEXT = {
+    downloading: "正在下载 / 提取声音",
+    uploading_audio: "正在上传声音",
+    analyzing: "正在识别"
+  };
+  const STAGE_HINT = {
+    downloading: "视频越大这一步越久",
+    uploading_audio: "只上传音频，视频留在本机",
+    analyzing: "整段识别中，完成后自动加载字幕"
+  };
+
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === "PING") {
       sendResponse({ ok: true });
@@ -47,7 +58,11 @@
       return false;
     }
     if (message.type === "JOB_STATUS") {
-      if (message.status === "analyzing") showStatus(`正在分析视频 ${Math.round(Number(message.progress || 0) * 100)}%`, "字幕将在整段分析完成后出现", "ANALYZING");
+      if (message.status === "analyzing") {
+        const stage = STAGE_TEXT[message.jobStatus] || "正在分析视频";
+        const hint = STAGE_HINT[message.jobStatus] || "字幕将在整段分析完成后出现";
+        showStatus(`${stage} ${Math.round(Number(message.progress || 0) * 100)}%`, hint, "ANALYZING");
+      }
       if (message.status === "ready") {
         subtitleReady = true;
         showStatus("字幕已就绪", "点击播放后自动显示字幕", "READY");
