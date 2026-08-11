@@ -4,7 +4,7 @@ import { transcribeWav } from "./asr.js";
 import { detectSpeechRanges, MEDIA_USER_AGENT } from "./media.js";
 
 const FIRST_CHUNK_MS = 5_000;
-const CHUNK_MS = Math.max(10_000, Number(process.env.KOE_STREAM_CHUNK_SECONDS || 10) * 1_000);
+const CHUNK_MS = Math.max(10_000, Number(process.env.KOE_STREAM_CHUNK_SECONDS || 30) * 1_000);
 
 export async function streamExtractAndTranscribe({
   pageUrl,
@@ -22,7 +22,7 @@ export async function streamExtractAndTranscribe({
   const queue = [];
   const failures = [];
   const processed = new Set();
-  const workerCount = Math.max(1, Number(process.env.KOE_STREAM_WORKERS || 4));
+  const workerCount = Math.max(1, Number(process.env.KOE_STREAM_WORKERS || 8));
   let offsetMs = 0;
   let chunkCount = 0;
   let collectorDone = false;
@@ -146,6 +146,8 @@ function startPipeline({ pageUrl, sourceUrl, ffmpegBin, ytdlpBin }) {
       "--no-part",
       "-f",
       "bestaudio/worst",
+      "--concurrent-fragments",
+      "8",
       "-o",
       "-",
       pageUrl
