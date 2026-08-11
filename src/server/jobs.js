@@ -50,6 +50,7 @@ export function createJobManager(options = {}) {
       durationMs: Number(input.durationMs) || null,
       startMs: Number(input.startMs) || 0,
       streamStartMs: Number(input.startMs) || 0,
+      positionMs: Number(input.startMs) || 0,
       hasDuration: Boolean(Number(input.durationMs)),
       translate: input.translate !== undefined ? Boolean(input.translate) : process.env.KOE_TRANSLATE !== "0",
       provider,
@@ -57,6 +58,7 @@ export function createJobManager(options = {}) {
       sourcePath: null,
       vtt: "",
       lines: [],
+      pendingTranslation: [],
       progress: 0,
       stageDetail: "",
       error: "",
@@ -119,12 +121,6 @@ export function createJobManager(options = {}) {
               job.progress = Math.min(0.85, job.streamStartMs / Number(job.durationMs));
             }
             console.log(`[koe] job ${id.slice(0, 8)} seeded ${seeded.length} cached lines, continuing from ${job.streamStartMs}ms`);
-            if (job.translate && seeded.some((line) => !line.translated)) {
-              void translateSegment(seeded.filter((line) => !line.translated), {
-                apiKey: options.apiKey || process.env.DASHSCOPE_API_KEY || "",
-                translateAcquire: () => translateSemaphore.acquire()
-              }).catch(() => undefined);
-            }
           }
         }
       }
@@ -199,11 +195,20 @@ export function createJobManager(options = {}) {
     const timeoutMs = Number(process.env.KOE_JOB_TIMEOUT_MS || 30 * 60_000);
     const timeoutTimer = setTimeout(() => job.controller.abort(), timeoutMs);
     timeoutTimer.unref?.();
+    const translateFlusher = setInterval(() => {
+      void flushPendingTranslations(job, {
+        apiKey: options.apiKey || process.env.DASHSCOPE_API_KEY || "",
+        translateAcquire: () => translateSemaphore.acquire(),
+        horizonMs: Number(process.env.KOE_TRANSLATE_HORIZON_MS || 90_000)
+      });
+    }, Math.max(500, Number(process.env.KOE_TRANSLATE_FLUSH_MS || 2_000)));
+    translateFlusher.unref?.();
     if (signal.aborted) {
       job.status = "cancelled";
       job.completedAt = Date.now();
       job.running = false;
       activeCount = Math.max(0, activeCount - 1);
+      clearInterval(translateFlusher);
       await rm(job.directory, { recursive: true, force: true }).catch(() => undefined);
       return;
     }
@@ -237,23 +242,13 @@ export function createJobManager(options = {}) {
         return;
       }
       job.lines = mergeJobLines(job.lines, result.lines || []);
-      job.vtt = result.vtt || toWebVtt(job.lines);
-      if (job.translate) {
-        const missing = job.lines.filter((line) => !line.translated);
-        if (missing.length) {
-          await translateSegment(missing, {
-            apiKey: options.apiKey || process.env.DASHSCOPE_API_KEY || "",
-            translateAcquire: () => translateSemaphore.acquire()
-          }).catch(() => undefined);
-        }
-        job.vtt = toWebVtt(job.lines);
-      }
+      job.vtt = toWebVtt(job.lines);
       if (job.sourceUrl) {
         try {
           await cache.save(job.sourceUrl, {
             lines: job.lines,
             durationMs: job.durationMs,
-            translated: Boolean(job.translate),
+            translated: linesFullyTranslated(job.lines),
             full: coversWholeVideo(job.lines, job.durationMs)
               || (!job.seededFromCache && job.streamStartMs === 0)
               || (job.seededFromCache && job.streamStartMs > 0 && maxLineEnd(job.lines) <= job.streamStartMs + 2_000)
@@ -273,7 +268,7 @@ export function createJobManager(options = {}) {
           await cache.save(job.sourceUrl, {
             lines: job.lines,
             durationMs: job.durationMs,
-            translated: Boolean(job.translate),
+            translated: linesFullyTranslated(job.lines),
             full: false
           });
         } catch {
@@ -286,6 +281,7 @@ export function createJobManager(options = {}) {
       console.log(`[koe] job ${job.id.slice(0, 8)} ${aborted ? "cancelled" : "error"} in ${((job.completedAt - job.startedAt) / 1_000).toFixed(1)}s: ${job.error}`);
     } finally {
       clearTimeout(timeoutTimer);
+      clearInterval(translateFlusher);
       job.running = false;
       activeCount = Math.max(0, activeCount - 1);
       if (job.directory) await rm(job.directory, { recursive: true, force: true }).catch(() => undefined);
@@ -322,7 +318,7 @@ export function createJobManager(options = {}) {
           pending.push(cache.save(job.sourceUrl, {
             lines: job.lines,
             durationMs: job.durationMs,
-            translated: Boolean(job.translate),
+            translated: linesFullyTranslated(job.lines),
             full: false
           }));
         }
@@ -333,6 +329,12 @@ export function createJobManager(options = {}) {
       const job = jobs.get(String(id));
       if (job?.prioritize) job.prioritize(Number(timeMs));
       return Boolean(job);
+    },
+    setPosition: (id, timeMs) => {
+      const job = jobs.get(String(id));
+      if (!job) return false;
+      job.positionMs = Math.max(0, Number(timeMs) || 0);
+      return true;
     },
     jobs,
     get activeCount() { return activeCount; }
@@ -374,7 +376,6 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
     return { lines: [], vtt: result.vtt };
   }
 
-  const translationTasks = [];
   const lineFilter = createLineFilter();
   if (!job.sourcePath && process.env.KOE_STREAM_EXTRACT !== "0") {
     try {
@@ -392,10 +393,7 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
         onLines: (segmentLines) => {
           job.lines.push(...lineFilter(segmentLines));
           job.lines.sort((left, right) => left.startMs - right.startMs);
-          if (job.translate && segmentLines.length) {
-            const task = translateSegment(segmentLines, { apiKey, translateAcquire }).catch(() => undefined);
-            translationTasks.push(task);
-          }
+          if (job.translate) job.pendingTranslation.push(...segmentLines);
         },
         onPartial: (partialLines) => {
           job.partialSentences = partialLines || [];
@@ -406,7 +404,6 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
         }
       }));
       updateProgress("analyzing", 0.95, "收尾中");
-      await Promise.allSettled(translationTasks);
       return { lines: job.lines, vtt: toWebVtt(job.lines) };
     } catch (error) {
       if (error?.name === "AbortError") throw error;
@@ -455,13 +452,9 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
     onLines: (segmentLines, segment) => {
       job.lines.push(...lineFilter(segmentLines));
       job.lines.sort((left, right) => left.startMs - right.startMs);
-      if (job.translate && segmentLines.length) {
-        const task = translateSegment(segmentLines, { apiKey, translateAcquire }).catch(() => undefined);
-        translationTasks.push(task);
-      }
+      if (job.translate) job.pendingTranslation.push(...segmentLines);
     }
   });
-  await Promise.allSettled(translationTasks);
   return { lines: job.lines, vtt: toWebVtt(job.lines) };
 }
 
@@ -578,4 +571,37 @@ export function coversWholeVideo(lines, durationMs) {
 
 function maxLineEnd(lines) {
   return Math.max(0, ...(lines || []).map((line) => Number(line.endMs || 0)));
+}
+
+export async function flushPendingTranslations(job, { apiKey, translateAcquire, horizonMs = 90_000, translate = translateSegment } = {}) {
+  if (!job?.translate) return;
+  const horizon = Math.max(Number(job.positionMs || 0), Number(job.streamStartMs || 0)) + Number(horizonMs);
+  const seen = new Set();
+  const ready = [];
+  const queue = Array.isArray(job.pendingTranslation) ? job.pendingTranslation : [];
+  const remaining = [];
+  for (const line of queue) {
+    if (Number(line.startMs || 0) <= horizon) {
+      if (!line.translated && !seen.has(line)) {
+        seen.add(line);
+        ready.push(line);
+      }
+    } else {
+      remaining.push(line);
+    }
+  }
+  job.pendingTranslation = remaining;
+  for (const line of job.lines || []) {
+    if (!line.translated && Number(line.startMs || 0) <= horizon && !seen.has(line)) {
+      seen.add(line);
+      ready.push(line);
+    }
+  }
+  if (ready.length) {
+    await translate(ready, { apiKey, translateAcquire }).catch(() => undefined);
+  }
+}
+
+function linesFullyTranslated(lines) {
+  return Array.isArray(lines) && lines.length > 0 && lines.every((line) => Boolean(line.translated));
 }

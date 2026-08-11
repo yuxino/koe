@@ -25,6 +25,7 @@ async function handleMessage(message) {
   if (message.type === "SEEK_PRIORITIZE") return seekPrioritize(Number(message.tabId), Number(message.timeMs));
   if (message.type === "PAGE_READY") return handlePageReady(message, sender);
   if (message.type === "VIDEO_CHANGED") return handleVideoChanged(sender);
+  if (message.type === "POSITION_UPDATE") return handlePositionUpdate(message, sender);
   if (message.type === "GET_STATE") {
     const state = tabStates.get(Number(message.tabId));
     return { ok: true, state: state ? publicState(state) : { status: "idle" } };
@@ -51,6 +52,26 @@ async function handleVideoChanged(sender) {
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+async function handlePositionUpdate(message, sender) {
+  const tabId = sender?.tab?.id;
+  if (!tabId) return { ok: true, ignored: true };
+  const state = tabStates.get(tabId);
+  if (!state?.jobId || !Number.isFinite(Number(message.timeMs))) return { ok: true, ignored: true };
+  const timeMs = Math.max(0, Number(message.timeMs));
+  if (Math.abs(timeMs - (state.lastPositionMs || 0)) < 1_000) return { ok: true, ignored: true };
+  state.lastPositionMs = timeMs;
+  try {
+    await fetch(`${state.serverUrl}/api/jobs/${state.jobId}/position`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...authHeaders(state.apiToken) },
+      body: JSON.stringify({ timeMs })
+    });
+  } catch {
+    // 本地助手旧版本没有 position 接口时静默跳过
+  }
+  return { ok: true };
 }
 
 async function handlePageReady(message, sender) {

@@ -166,6 +166,21 @@
     chrome.runtime.sendMessage({ type: "PAGE_READY" }).catch(() => undefined);
   }, true);
 
+  // 周期性上报播放位置，服务端据此只翻译当前位置附近的字幕
+  let lastPositionSentAt = 0;
+  let lastPositionSentMs = 0;
+  window.setInterval(() => {
+    const video = (activeVideo?.isConnected ? activeVideo : null) || findVideo();
+    if (!video || video.paused) return;
+    const now = Date.now();
+    const timeMs = Math.round(video.currentTime * 1_000);
+    if (now - lastPositionSentAt < 5_000) return;
+    if (Math.abs(timeMs - lastPositionSentMs) < 1_000) return;
+    lastPositionSentAt = now;
+    lastPositionSentMs = timeMs;
+    chrome.runtime.sendMessage({ type: "POSITION_UPDATE", timeMs }).catch(() => undefined);
+  }, 5_000);
+
   // 视频切换：清掉旧字幕并通知后台
   document.addEventListener("emptied", () => {
     cues = [];

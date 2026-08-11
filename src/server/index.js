@@ -119,6 +119,15 @@ export function createServer(options = {}) {
         return;
       }
 
+      const positionMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/position$/);
+      if (request.method === "POST" && positionMatch) {
+        if (!isAuthorized(request, config.apiToken)) return unauthorized(response);
+        const body = await readJson(request);
+        if (!jobs.setPosition(positionMatch[1], Number(body.timeMs || 0))) return sendJson(response, 404, { error: "job_not_found" });
+        sendJson(response, 202, { ok: true });
+        return;
+      }
+
       const vttMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/vtt$/);
       if (request.method === "GET" && vttMatch) {
         if (!isAuthorized(request, config.apiToken)) return unauthorized(response);
