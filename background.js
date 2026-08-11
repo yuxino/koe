@@ -17,6 +17,7 @@ async function handleMessage(message) {
   if (message.type === "ANALYZE_VIDEO") return analyzeVideo(message);
   if (message.type === "WATCH_JOB") return watchJob(message);
   if (message.type === "STOP_ANALYSIS") return stopAnalysis(Number(message.tabId));
+  if (message.type === "LIST_VIDEOS") return listVideos(Number(message.tabId));
   if (message.type === "GET_STATE") {
     const state = tabStates.get(Number(message.tabId));
     return { ok: true, state: state ? publicState(state) : { status: "idle" } };
@@ -24,10 +25,10 @@ async function handleMessage(message) {
   return { ok: true };
 }
 
-async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl }) {
+async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl, selection }) {
   tabId = Number(tabId);
   if (!Number.isInteger(tabId)) throw new Error("没有找到当前标签页。");
-  const source = await discoverVideoSource(tabId, pageUrl);
+  const source = await discoverVideoSource(tabId, pageUrl, selection);
   if (!source?.hasVideo) throw new Error("当前页面没有找到视频，请先打开包含视频的页面。");
   await ensureContentScript(tabId, source.frameId);
 
@@ -134,37 +135,42 @@ function stopPolling(tabId) {
   pollers.delete(tabId);
 }
 
-async function discoverVideoSource(tabId, pageUrl) {
+async function listVideos(tabId) {
   const frames = await chrome.scripting.executeScript({
     target: { tabId, allFrames: true },
-    func: () => {
-      const videos = [...document.querySelectorAll("video")];
-      const video = videos.sort((left, right) => {
-        const leftScore = (left.currentSrc || left.src ? 1_000_000_000 : 0) + left.videoWidth * left.videoHeight;
-        const rightScore = (right.currentSrc || right.src ? 1_000_000_000 : 0) + right.videoWidth * right.videoHeight;
-        return rightScore - leftScore;
-      })[0];
-      const current = video?.currentSrc || video?.src || video?.querySelector("source")?.src || "";
+    func: () => [...document.querySelectorAll("video")].map((video, index) => {
+      const current = video.currentSrc || video.src || video.querySelector("source")?.src || "";
       return {
+        index,
         pageUrl: location.href,
-        hasVideo: Boolean(video),
+        hasVideo: true,
         sourceUrl: /^https?:/i.test(current) ? current : "",
         filename: document.title || "video",
-        durationMs: Number.isFinite(video?.duration) ? Math.round(video.duration * 1_000) : null,
-        area: Number(video?.videoWidth || 0) * Number(video?.videoHeight || 0)
+        durationMs: Number.isFinite(video.duration) ? Math.round(video.duration * 1_000) : null,
+        width: Number(video.videoWidth || 0),
+        height: Number(video.videoHeight || 0)
       };
-    }
+    })
   });
-  const candidates = frames
-    .filter((frame) => frame.result?.hasVideo)
-    .map((frame) => ({ ...frame.result, frameId: frame.frameId }))
-    .sort((left, right) => {
-      const leftScore = (left.sourceUrl ? 1_000_000_000 : 0) + Number(left.area || 0);
-      const rightScore = (right.sourceUrl ? 1_000_000_000 : 0) + Number(right.area || 0);
-      return rightScore - leftScore;
-    });
-  const source = candidates[0];
+  const videos = [];
+  for (const frame of frames) {
+    for (const video of frame.result || []) {
+      videos.push({ ...video, frameId: frame.frameId });
+    }
+  }
+  return { ok: true, videos };
+}
+
+async function discoverVideoSource(tabId, pageUrl, selection) {
+  const { videos } = await listVideos(tabId);
+  const source = selection
+    ? videos.find((video) => `${video.frameId}:${video.index}` === selection)
+    : [...videos].sort((left, right) => videoScore(right) - videoScore(left))[0];
   return source ? { ...source, pageUrl: pageUrl || source.pageUrl } : { hasVideo: false };
+}
+
+function videoScore(video) {
+  return (video.sourceUrl ? 1_000_000_000 : 0) + Number(video.width || 0) * Number(video.height || 0);
 }
 
 async function ensureContentScript(tabId, frameId = 0) {

@@ -2,6 +2,7 @@ const LOCAL_SERVER_URL = "http://127.0.0.1:8787";
 let activeTab;
 let currentState = { status: "idle" };
 let healthState = { ok: false, provider: "" };
+let videos = [];
 
 const elements = {
   tabHost: document.querySelector("#tab-host"),
@@ -9,6 +10,7 @@ const elements = {
   engineStatus: document.querySelector("#engine-status"),
   engineDetail: document.querySelector("#engine-detail"),
   toggle: document.querySelector("#toggle"),
+  videoSelect: document.querySelector("#video-select"),
   batchMark: document.querySelector("#batch-mark"),
   hint: document.querySelector("#hint")
 };
@@ -21,6 +23,7 @@ async function init() {
   await refreshActiveTab();
   await checkHealth();
   await refreshState();
+  await refreshVideos();
 }
 
 async function refreshActiveTab() {
@@ -28,6 +31,7 @@ async function refreshActiveTab() {
   elements.tabHost.textContent = hostName(activeTab?.url);
   elements.tabTitle.textContent = activeTab?.title || "当前标签页";
   await refreshState();
+  await refreshVideos();
 }
 
 async function refreshState() {
@@ -43,6 +47,7 @@ async function analyze() {
     elements.engineDetail.textContent = "没有找到当前标签页。";
     return;
   }
+  const selection = elements.videoSelect?.value || undefined;
   elements.toggle.disabled = true;
   elements.engineStatus.textContent = "正在创建任务…";
   try {
@@ -51,7 +56,8 @@ async function analyze() {
       tabId: activeTab.id,
       pageUrl: activeTab.url,
       serverUrl: LOCAL_SERVER_URL,
-      apiToken: ""
+      apiToken: "",
+      selection
     });
     if (!response?.ok) throw new Error(response?.error || "无法创建分析任务。");
     currentState = response.state;
@@ -68,6 +74,44 @@ async function analyze() {
   }
 }
 
+async function refreshVideos() {
+  if (!activeTab?.id) {
+    videos = [];
+    renderVideos();
+    return;
+  }
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "LIST_VIDEOS", tabId: activeTab.id });
+    videos = response?.ok ? response.videos || [] : [];
+  } catch {
+    videos = [];
+  }
+  renderVideos();
+}
+
+function renderVideos() {
+  const select = elements.videoSelect;
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML = "";
+  const auto = document.createElement("option");
+  auto.value = "";
+  auto.textContent = videos.length ? "自动选择（默认最清晰）" : "未找到视频";
+  select.appendChild(auto);
+  videos.forEach((video, index) => {
+    const option = document.createElement("option");
+    option.value = `${video.frameId}:${video.index}`;
+    const parts = [`视频 ${index + 1}`];
+    if (video.width && video.height) parts.push(`${video.width}×${video.height}`);
+    if (video.durationMs) parts.push(`${Math.round(video.durationMs / 1000)}s`);
+    parts.push(video.sourceUrl ? hostName(video.sourceUrl) : "无直链");
+    option.textContent = parts.join(" · ");
+    select.appendChild(option);
+  });
+  select.disabled = !videos.length;
+  select.value = videos.some((video) => `${video.frameId}:${video.index}` === previous) ? previous : "";
+}
+
 async function checkHealth() {
   try {
     const response = await fetch(`${LOCAL_SERVER_URL}/health`);
@@ -77,7 +121,7 @@ async function checkHealth() {
     elements.engineDetail.textContent = body.localProcessing ? "本地提取 · 整段识别" : `本地服务 · ${healthState.provider}`;
     elements.hint.textContent = body.provider === "mock"
       ? "当前是 mock 模式；真实字幕需要 Fun-ASR。"
-      : "视频留在本机，仅发送提取后的音频。";
+      : "选好视频后点击 Analyze video，整段分析完再加载字幕。";
   } catch {
     healthState = { ok: false, provider: "" };
     elements.engineDetail.textContent = "本地助手 · 未连接";
