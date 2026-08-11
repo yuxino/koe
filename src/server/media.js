@@ -30,7 +30,16 @@ export function validateSourceRequest({ pageUrl = "", sourceUrl = "" } = {}, { a
   return { pageUrl: String(pageUrl || ""), sourceUrl: String(sourceUrl || "") };
 }
 
-export async function acquireSource({ pageUrl, sourceUrl, outputDir, ytdlpBin = "yt-dlp", fetchImpl = fetch, run = runCommand }) {
+export async function acquireSource({
+  pageUrl,
+  sourceUrl,
+  outputDir,
+  ytdlpBin = "yt-dlp",
+  audioOnly = false,
+  onProgress = () => undefined,
+  fetchImpl = fetch,
+  run = runCommand
+}) {
   await mkdir(outputDir, { recursive: true });
   if (sourceUrl) {
     const extension = mediaExtension(sourceUrl);
@@ -48,14 +57,27 @@ export async function acquireSource({ pageUrl, sourceUrl, outputDir, ytdlpBin = 
   await run(ytdlpBin, [
     "--no-playlist",
     "--no-warnings",
-    "--no-progress",
+    "--newline",
+    "--no-color",
+    "--progress-template",
+    "download:%(progress._percent_str)s",
     "--restrict-filenames",
-    "--merge-output-format",
-    "mp4",
+    "--concurrent-fragments",
+    "8",
+    ...(audioOnly ? ["-f", "bestaudio/worst"] : ["--merge-output-format", "mp4"]),
     "-o",
     template,
     pageUrl
-  ]);
+  ], {
+    onStdout: reportProgress,
+    onStderr: reportProgress
+  });
+
+  function reportProgress(chunk) {
+      for (const match of String(chunk).matchAll(/download:\s*([\d.]+)%/g)) {
+        onProgress(Math.max(0, Math.min(1, Number(match[1]) / 100)));
+      }
+  }
   const files = (await readdir(outputDir)).filter((file) => file.startsWith("source."));
   if (!files.length) throw new Error("source_extraction_empty");
   return join(outputDir, files[0]);
@@ -67,6 +89,7 @@ export async function extractAudioLocally({
   outputDir,
   ffmpegBin = "ffmpeg",
   ytdlpBin = "yt-dlp",
+  onProgress = () => undefined,
   run = runCommand
 }) {
   await mkdir(outputDir, { recursive: true });
@@ -92,6 +115,8 @@ export async function extractAudioLocally({
     sourceUrl: "",
     outputDir,
     ytdlpBin,
+    audioOnly: true,
+    onProgress,
     run
   });
   await normalizeToAac({ input: sourcePath, outputPath, ffmpegBin, run });
@@ -148,13 +173,19 @@ async function normalizeToAac({ input, outputPath, pageUrl = "", ffmpegBin, run 
   ]);
 }
 
-export function runCommand(command, args, { cwd } = {}) {
+export function runCommand(command, args, { cwd, onStdout = () => undefined, onStderr = () => undefined } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      onStdout(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+      onStderr(chunk);
+    });
     child.on("error", (error) => reject(new Error(`${command}_unavailable:${error.message}`)));
     child.on("close", (code) => {
       if (code === 0) {

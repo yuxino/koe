@@ -65,6 +65,7 @@ test("falls back to local yt-dlp when direct media extraction fails", async (t) 
   const outputDir = await mkdtemp(join(tmpdir(), "koe-media-test-"));
   t.after(() => rm(outputDir, { recursive: true, force: true }));
   const calls = [];
+  const progress = [];
 
   await extractAudioLocally({
     pageUrl: "https://unknown.example/watch/1",
@@ -72,14 +73,21 @@ test("falls back to local yt-dlp when direct media extraction fails", async (t) 
     outputDir,
     ffmpegBin: "ffmpeg-test",
     ytdlpBin: "yt-dlp-test",
-    run: async (command, args) => {
+    onProgress: (value) => progress.push(value),
+    run: async (command, args, options = {}) => {
       calls.push({ command, args });
       if (calls.length === 1) throw new Error("signed URL expired");
-      if (command === "yt-dlp-test") await writeFile(join(outputDir, "source.mp4"), "media");
+      if (command === "yt-dlp-test") {
+        options.onStdout?.("download: 42.5%\n");
+        await writeFile(join(outputDir, "source.mp4"), "media");
+      }
     }
   });
 
   assert.deepEqual(calls.map((call) => call.command), ["ffmpeg-test", "yt-dlp-test", "ffmpeg-test"]);
   assert.ok(calls[1].args.includes("https://unknown.example/watch/1"));
+  assert.deepEqual(calls[1].args.slice(calls[1].args.indexOf("-f"), calls[1].args.indexOf("-f") + 2), ["-f", "bestaudio/worst"]);
+  assert.deepEqual(calls[1].args.slice(calls[1].args.indexOf("--concurrent-fragments"), calls[1].args.indexOf("--concurrent-fragments") + 2), ["--concurrent-fragments", "8"]);
+  assert.deepEqual(progress, [0.425]);
   assert.ok(calls[2].args.includes(join(outputDir, "source.mp4")));
 });

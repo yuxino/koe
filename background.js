@@ -27,11 +27,11 @@ async function handleMessage(message) {
 async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl }) {
   tabId = Number(tabId);
   if (!Number.isInteger(tabId)) throw new Error("没有找到当前标签页。");
-  await ensureContentScript(tabId);
-  const source = await chrome.tabs.sendMessage(tabId, { type: "GET_VIDEO_SOURCE" });
+  const source = await discoverVideoSource(tabId, pageUrl);
   if (!source?.hasVideo) throw new Error("当前页面没有找到视频，请先打开包含视频的页面。");
+  await ensureContentScript(tabId, source.frameId);
 
-  const jobPageUrl = source.pageUrl || pageUrl;
+  const jobPageUrl = pageUrl || source.pageUrl;
   const sourceUrl = source.sourceUrl || "";
   const job = await createJob({
     serverUrl,
@@ -40,18 +40,19 @@ async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl }) {
     sourceUrl,
     filename: source.filename || "video"
   });
-  return beginWatching({ tabId, serverUrl, apiToken, job });
+  return beginWatching({ tabId, frameId: source.frameId, serverUrl, apiToken, job });
 }
 
-async function watchJob({ tabId, serverUrl, apiToken, jobId }) {
+async function watchJob({ tabId, frameId, serverUrl, apiToken, jobId }) {
   const job = await getJob(serverUrl, apiToken, jobId);
-  return beginWatching({ tabId: Number(tabId), serverUrl, apiToken, job });
+  return beginWatching({ tabId: Number(tabId), frameId: Number(frameId) || 0, serverUrl, apiToken, job });
 }
 
-async function beginWatching({ tabId, serverUrl, apiToken, job }) {
+async function beginWatching({ tabId, frameId = 0, serverUrl, apiToken, job }) {
   stopPolling(tabId);
   const state = {
     tabId,
+    frameId,
     status: job.status === "ready" ? "ready" : "analyzing",
     jobId: job.id,
     serverUrl: String(serverUrl || "").replace(/\/+$/, ""),
@@ -60,7 +61,7 @@ async function beginWatching({ tabId, serverUrl, apiToken, job }) {
     progress: Number(job.progress || 0)
   };
   tabStates.set(tabId, state);
-  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress });
+  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress }, frameId);
   if (job.status === "ready") await publishReady(state);
   else pollers.set(tabId, setInterval(() => pollJob(tabId).catch((error) => failJob(tabId, error)), 2_000));
   return { ok: true, state: publicState(state) };
@@ -82,15 +83,15 @@ async function pollJob(tabId) {
     return failJob(tabId, new Error(job.error || "视频分析失败。"));
   }
   state.status = "analyzing";
-  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: job.status });
+  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: job.status }, state.frameId);
 }
 
 async function publishReady(state) {
   const response = await fetch(`${state.serverUrl}/api/jobs/${state.jobId}/vtt`, { headers: authHeaders(state.apiToken) });
   const vtt = await response.text();
   if (!response.ok) throw new Error(vtt || `字幕下载失败（${response.status}）`);
-  await forwardToTab(state.tabId, { type: "SUBTITLE_READY", tabId: state.tabId, vtt });
-  await forwardToTab(state.tabId, { type: "JOB_STATUS", tabId: state.tabId, status: "ready", progress: 1 });
+  await forwardToTab(state.tabId, { type: "SUBTITLE_READY", tabId: state.tabId, vtt }, state.frameId);
+  await forwardToTab(state.tabId, { type: "JOB_STATUS", tabId: state.tabId, status: "ready", progress: 1 }, state.frameId);
 }
 
 async function createJob({ serverUrl, apiToken, pageUrl, sourceUrl, filename }) {
@@ -116,13 +117,14 @@ async function failJob(tabId, error) {
   const state = tabStates.get(tabId);
   if (!state) return;
   state.status = "error";
-  await forwardToTab(tabId, { type: "CAPTURE_ERROR", tabId, error: error instanceof Error ? error.message : String(error) });
+  await forwardToTab(tabId, { type: "CAPTURE_ERROR", tabId, error: error instanceof Error ? error.message : String(error) }, state.frameId);
 }
 
 async function stopAnalysis(tabId) {
+  const state = tabStates.get(tabId);
   stopPolling(tabId);
   tabStates.delete(tabId);
-  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: "idle", progress: 0 });
+  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: "idle", progress: 0 }, state?.frameId);
   return { ok: true, state: { status: "idle" } };
 }
 
@@ -132,16 +134,49 @@ function stopPolling(tabId) {
   pollers.delete(tabId);
 }
 
-async function ensureContentScript(tabId) {
+async function discoverVideoSource(tabId, pageUrl) {
+  const frames = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    func: () => {
+      const videos = [...document.querySelectorAll("video")];
+      const video = videos.sort((left, right) => {
+        const leftScore = (left.currentSrc || left.src ? 1_000_000_000 : 0) + left.videoWidth * left.videoHeight;
+        const rightScore = (right.currentSrc || right.src ? 1_000_000_000 : 0) + right.videoWidth * right.videoHeight;
+        return rightScore - leftScore;
+      })[0];
+      const current = video?.currentSrc || video?.src || video?.querySelector("source")?.src || "";
+      return {
+        pageUrl: location.href,
+        hasVideo: Boolean(video),
+        sourceUrl: /^https?:/i.test(current) ? current : "",
+        filename: document.title || "video",
+        durationMs: Number.isFinite(video?.duration) ? Math.round(video.duration * 1_000) : null,
+        area: Number(video?.videoWidth || 0) * Number(video?.videoHeight || 0)
+      };
+    }
+  });
+  const candidates = frames
+    .filter((frame) => frame.result?.hasVideo)
+    .map((frame) => ({ ...frame.result, frameId: frame.frameId }))
+    .sort((left, right) => {
+      const leftScore = (left.sourceUrl ? 1_000_000_000 : 0) + Number(left.area || 0);
+      const rightScore = (right.sourceUrl ? 1_000_000_000 : 0) + Number(right.area || 0);
+      return rightScore - leftScore;
+    });
+  const source = candidates[0];
+  return source ? { ...source, pageUrl: pageUrl || source.pageUrl } : { hasVideo: false };
+}
+
+async function ensureContentScript(tabId, frameId = 0) {
   try {
-    await chrome.tabs.sendMessage(tabId, { type: "PING" });
+    await chrome.tabs.sendMessage(tabId, { type: "PING" }, { frameId });
   } catch {
-    await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+    await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, files: ["content.js"] });
   }
 }
 
-async function forwardToTab(tabId, message) {
-  try { return await chrome.tabs.sendMessage(tabId, message); } catch { return { ok: false, ignored: true }; }
+async function forwardToTab(tabId, message, frameId = 0) {
+  try { return await chrome.tabs.sendMessage(tabId, message, { frameId: Number(frameId) || 0 }); } catch { return { ok: false, ignored: true }; }
 }
 
 function publicState(state) {

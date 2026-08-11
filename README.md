@@ -35,7 +35,7 @@ Koe 不做边播边听写，也不会在分析过程中显示不完整的中间�
 ./scripts/install-local-helper.sh
 ```
 
-安装程序会把远端 Koe Token 保存到 macOS 钥匙串，创建用户级 LaunchAgent，并启动 `http://127.0.0.1:8787`。完整视频不会上传到 Koe API。
+安装程序会把远端 Koe Token 保存到 macOS 钥匙串，继承当前 macOS 系统代理，创建用户级 LaunchAgent，并启动 `http://127.0.0.1:8787`。完整视频不会上传到 Koe API。
 
 ### 2. 加载 Chrome 插件
 

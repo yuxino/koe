@@ -9,6 +9,15 @@ agent_path="${HOME}/Library/LaunchAgents/cn.yuxino.koe-helper.plist"
 agent_label="cn.yuxino.koe-helper"
 keychain_service="cn.yuxino.koe.remote-token"
 remote_url="${KOE_REMOTE_URL:-https://koe-api.yuxino.cn}"
+proxy_url=""
+
+proxy_settings="$(/usr/sbin/scutil --proxy)"
+proxy_enabled="$(print -r -- "${proxy_settings}" | awk '/HTTPEnable/{print $3; exit}')"
+proxy_host="$(print -r -- "${proxy_settings}" | awk '/HTTPProxy/{print $3; exit}')"
+proxy_port="$(print -r -- "${proxy_settings}" | awk '/HTTPPort/{print $3; exit}')"
+if [[ "${proxy_enabled}" == "1" && -n "${proxy_host}" && -n "${proxy_port}" ]]; then
+  proxy_url="http://${proxy_host}:${proxy_port}"
+fi
 
 node_bin="$(command -v node || true)"
 ffmpeg_bin="$(command -v ffmpeg || true)"
@@ -49,6 +58,14 @@ export KOE_REMOTE_URL="${remote_url}"
 export KOE_REMOTE_TOKEN="\${remote_token}"
 export FFMPEG_BIN="${ffmpeg_bin}"
 export YTDLP_BIN="${ytdlp_bin}"
+export HTTP_PROXY="${proxy_url}"
+export HTTPS_PROXY="${proxy_url}"
+export ALL_PROXY="${proxy_url}"
+export http_proxy="${proxy_url}"
+export https_proxy="${proxy_url}"
+export all_proxy="${proxy_url}"
+export NO_PROXY="localhost,127.0.0.1,::1"
+export no_proxy="localhost,127.0.0.1,::1"
 exec "${node_bin}" "${repo_root}/src/server/start.js"
 EOF
 chmod 700 "${wrapper_path}"
@@ -78,7 +95,16 @@ EOF
 
 /usr/bin/plutil -lint "${agent_path}" >/dev/null
 /bin/launchctl bootout "gui/${UID}/${agent_label}" >/dev/null 2>&1 || true
-/bin/launchctl bootstrap "gui/${UID}" "${agent_path}"
+for _ in {1..20}; do
+  if ! /bin/launchctl print "gui/${UID}/${agent_label}" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.1
+done
+if ! /bin/launchctl bootstrap "gui/${UID}" "${agent_path}"; then
+  sleep 0.5
+  /bin/launchctl bootstrap "gui/${UID}" "${agent_path}"
+fi
 /bin/launchctl kickstart -k "gui/${UID}/${agent_label}"
 
 for _ in {1..20}; do

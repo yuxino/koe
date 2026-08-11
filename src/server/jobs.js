@@ -144,7 +144,8 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
       sourceUrl: job.sourceUrl,
       outputDir: job.directory,
       ffmpegBin,
-      ytdlpBin
+      ytdlpBin,
+      onProgress: (value) => updateProgress("downloading", 0.08 + Number(value || 0) * 0.22)
     });
     updateProgress("uploading_audio", 0.32);
     const result = await relayAudioToKoe({
