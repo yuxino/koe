@@ -133,10 +133,16 @@ async function checkHealth() {
     const body = await response.json();
     if (!response.ok || !body.ok) throw new Error("unhealthy");
     healthState = { ok: true, provider: body.provider || "relay" };
-    elements.engineDetail.textContent = body.localProcessing ? "本地提取 · 整段识别" : `本地服务 · ${healthState.provider}`;
+    elements.engineDetail.textContent = body.mode === "local"
+      ? "本地提取 · 本地识别"
+      : body.localProcessing
+        ? "本地提取 · 整段识别"
+        : `本地服务 · ${healthState.provider}`;
     elements.hint.textContent = body.provider === "mock"
       ? "当前是 mock 模式；真实字幕需要 Fun-ASR。"
-      : "选好视频后点击 Analyze video，整段分析完再加载字幕。";
+      : body.mode === "local"
+        ? "全部在本机处理，识别/翻译直接调用云端模型"
+        : "选好视频后点击 Analyze video，整段分析完再加载字幕。";
   } catch {
     healthState = { ok: false, provider: "" };
     elements.engineDetail.textContent = "本地助手 · 未连接";

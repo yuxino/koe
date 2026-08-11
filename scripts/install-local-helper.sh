@@ -8,6 +8,7 @@ wrapper_path="${runtime_root}/run-helper.sh"
 agent_path="${HOME}/Library/LaunchAgents/cn.yuxino.koe-helper.plist"
 agent_label="cn.yuxino.koe-helper"
 keychain_service="cn.yuxino.koe.remote-token"
+keychain_service_dashscope="cn.yuxino.koe.dashscope-key"
 remote_url="${KOE_REMOTE_URL:-https://koe-api.yuxino.cn}"
 proxy_url=""
 
@@ -50,15 +51,28 @@ elif ! /usr/bin/security find-generic-password -a "${USER}" -s "${keychain_servi
   unset remote_token
 fi
 
+if [[ -n "${KOE_DASHSCOPE_API_KEY:-}" ]]; then
+  /usr/bin/security add-generic-password -U -a "${USER}" -s "${keychain_service_dashscope}" -w "${KOE_DASHSCOPE_API_KEY}" >/dev/null
+elif ! /usr/bin/security find-generic-password -a "${USER}" -s "${keychain_service_dashscope}" -w >/dev/null 2>&1; then
+  read -r -s "dashscope_key?请输入 DashScope API Key（本地识别 + 翻译用）："
+  print
+  [[ -n "${dashscope_key}" ]] || { print -u2 "DashScope API Key 不能为空。"; exit 1; }
+  /usr/bin/security add-generic-password -U -a "${USER}" -s "${keychain_service_dashscope}" -w "${dashscope_key}" >/dev/null
+  unset dashscope_key
+fi
+
 mkdir -p "${runtime_root}" "${log_root}" "${HOME}/Library/LaunchAgents"
 
 cat > "${wrapper_path}" <<EOF
 #!/bin/zsh
 set -euo pipefail
 remote_token=\$(/usr/bin/security find-generic-password -a "${USER}" -s "${keychain_service}" -w)
+dashscope_key=\$(/usr/bin/security find-generic-password -a "${USER}" -s "${keychain_service_dashscope}" -w)
 export PORT=8787
 export KOE_REMOTE_URL="${remote_url}"
 export KOE_REMOTE_TOKEN="\${remote_token}"
+export DASHSCOPE_API_KEY="\${dashscope_key}"
+export KOE_LOCAL_ASR=1
 export FFMPEG_BIN="${ffmpeg_bin}"
 export YTDLP_BIN="${ytdlp_bin}"
 export HTTP_PROXY="${proxy_url}"

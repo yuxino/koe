@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { acquireSource, detectSpeechRanges, extractAudioLocally, normalizeToAac, normalizeToWav, validateSourceRequest } from "./media.js";
+import { detectSpeechRanges, extractAudioLocally, normalizeToAac, normalizeToWav, validateSourceRequest } from "./media.js";
 import { transcribeCompleteWav } from "./asr.js";
 import { relayAudioToKoe } from "./relay.js";
 import { toWebVtt } from "./transcript.js";
@@ -188,17 +188,27 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
     return { lines: [], vtt: result.vtt };
   }
 
-  updateProgress("downloading", 0.1, "正在下载/提取声音");
-  const sourcePath = job.sourcePath || await withSemaphore(extractAcquire, () => acquireSource({
-    pageUrl: job.pageUrl,
-    sourceUrl: job.sourceUrl,
-    outputDir: job.directory,
-    ytdlpBin
-  }));
+  updateProgress("downloading", 0.08, "正在下载/提取声音");
+  let audioPath;
+  if (job.sourcePath) {
+    audioPath = join(job.directory, "audio.m4a");
+    await normalizeToAac({ input: job.sourcePath, outputPath: audioPath, ffmpegBin });
+    updateProgress("downloading", 0.3, "处理上传的音频");
+  } else {
+    audioPath = await withSemaphore(extractAcquire, () => extractAudioLocally({
+      pageUrl: job.pageUrl,
+      sourceUrl: job.sourceUrl,
+      outputDir: job.directory,
+      ffmpegBin,
+      ytdlpBin,
+      durationMs: job.durationMs,
+      onProgress: (value) => updateProgress("downloading", 0.08 + Number(value || 0) * 0.22, "正在下载/提取声音")
+    }));
+  }
   updateProgress("analyzing", 0.35, "正在转换音频");
   const wavPath = join(job.directory, "audio.wav");
   await withSemaphore(extractAcquire, () => normalizeToWav({
-    inputPath: sourcePath,
+    inputPath: audioPath,
     outputPath: wavPath,
     ffmpegBin
   }));

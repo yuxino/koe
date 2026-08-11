@@ -153,6 +153,18 @@ test("local relay mode accepts a generic public video page", async (t) => {
 
 const ffmpegBin = resolveFfmpeg();
 
+test("local dashscope mode reports fully local processing", async (t) => {
+  const app = createServer({ port: 0, provider: "dashscope", apiKey: "test-key", localAsr: true });
+  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
+  t.after(() => app.server.close());
+  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
+
+  const health = await fetch(`${baseUrl}/health`).then((response) => response.json());
+  assert.equal(health.provider, "dashscope");
+  assert.equal(health.mode, "local");
+  assert.equal(health.localProcessing, true);
+});
+
 test("local relay mode relays an uploaded audio file", { skip: !ffmpegBin && "ffmpeg not available" }, async (t) => {
   const remote = createServer({ port: 0, provider: "mock" });
   await new Promise((resolve) => remote.server.listen(0, "127.0.0.1", resolve));

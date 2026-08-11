@@ -14,18 +14,19 @@ export function createServer(options = {}) {
   const apiKey = options.apiKey ?? process.env.DASHSCOPE_API_KEY ?? "";
   const remoteUrl = options.remoteUrl ?? process.env.KOE_REMOTE_URL ?? "";
   const remoteToken = options.remoteToken ?? process.env.KOE_REMOTE_TOKEN ?? "";
-  const localRelay = Boolean(remoteUrl);
   const requestedProvider = options.provider || process.env.ASR_PROVIDER || (apiKey ? "dashscope" : "mock");
+  const localDashscope = Boolean(options.localAsr || process.env.KOE_LOCAL_ASR === "1") && Boolean(apiKey);
+  const localRelay = !localDashscope && Boolean(remoteUrl);
   const config = {
     port: Number(options.port ?? process.env.PORT ?? DEFAULT_PORT),
-    provider: localRelay ? "relay" : requestedProvider === "dashscope" && !apiKey ? "mock" : requestedProvider,
+    provider: localDashscope ? "dashscope" : localRelay ? "relay" : requestedProvider === "dashscope" && !apiKey ? "mock" : requestedProvider,
     apiKey,
     apiToken: options.apiToken ?? process.env.KOE_API_TOKEN ?? "",
     ffmpegBin: options.ffmpegBin || process.env.FFMPEG_BIN || "ffmpeg",
     ytdlpBin: options.ytdlpBin ?? (process.env.YTDLP_BIN !== undefined ? process.env.YTDLP_BIN : "yt-dlp"),
     remoteUrl,
     remoteToken,
-    mode: localRelay ? "local-relay" : "batch"
+    mode: localDashscope ? "local" : localRelay ? "local-relay" : "batch"
   };
   const jobs = createJobManager({
     provider: config.provider,
@@ -55,7 +56,7 @@ export function createServer(options = {}) {
           service: "koe",
           provider: config.provider,
           mode: config.mode,
-          localProcessing: localRelay,
+          localProcessing: localDashscope || localRelay,
           authRequired: Boolean(config.apiToken),
           activeJobs: jobs.activeCount,
           tools: { ffmpeg: config.ffmpegBin, ytDlp: config.ytdlpBin || null }

@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/node-20%2B-5FA04E" alt="Node.js 20 or later">
 </p>
 
-Koe（こえ / 声）是一个本地媒体、批处理优先的 Chrome 视频字幕项目。视频下载和音频提取发生在你的电脑上；只有压缩后的音频会发送给 Koe API 做完整识别，完成后再把 WebVTT 加载回原视频。
+Koe（こえ / 声）是一个本地媒体、批处理优先的 Chrome 视频字幕项目。视频下载、音频提取、VAD、识别和双语翻译全部在你的电脑上完成（识别/翻译直接调用云端模型），完成后再把 WebVTT 加载回原视频。线上 Koe API 服务器不是主路径，仅作可选兜底。
 
 Koe 不做边播边听写，也不会在分析过程中显示不完整的中间字幕。项目参考了 `ding-frame` 的时间轴思路，优先使用 Fun-ASR 的词级时间戳，再按标点、停顿和句长整理字幕。
 
@@ -21,8 +21,8 @@ Koe 不做边播边听写，也不会在分析过程中显示不完整的中间�
 浏览器真实媒体地址 → 本地 FFmpeg 提取音频 ─┐
 拿不到媒体地址时 → 本地 yt-dlp 兜底 ───────┤
                                               ↓
-                       仅上传音频 → Fun-ASR 完整识别
-                       → 生成 WebVTT → 视频加载字幕
+                        本地 VAD 跳过静音 → Fun-ASR 完整识别
+                        → 双语翻译 → 生成 WebVTT → 视频加载字幕
 ```
 
 ## 快速开始
@@ -35,7 +35,7 @@ Koe 不做边播边听写，也不会在分析过程中显示不完整的中间�
 ./scripts/install-local-helper.sh
 ```
 
-安装程序会把远端 Koe Token 保存到 macOS 钥匙串，继承当前 macOS 系统代理，创建用户级 LaunchAgent，并启动 `http://127.0.0.1:8787`。完整视频不会上传到 Koe API。
+安装程序会把 DashScope API Key 保存到 macOS 钥匙串（用于本地识别和翻译），继承当前 macOS 系统代理，创建用户级 LaunchAgent，并启动 `http://127.0.0.1:8787`。完整视频和识别过程都不再经过线上 Koe 服务器。
 
 ### 2. 加载 Chrome 插件
 
