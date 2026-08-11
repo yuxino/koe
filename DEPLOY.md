@@ -14,9 +14,10 @@ Chrome extension → https://koe-api.yuxino.cn
 批处理模式需要 Node.js 20+、FFmpeg 和 yt-dlp：
 
 ```bash
-apt-get update
-apt-get install -y ffmpeg python3-pip
-python3 -m pip install --upgrade yt-dlp
+dnf install -y https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-8.noarch.rpm
+dnf install -y ffmpeg
+curl -L --fail -o /usr/local/bin/yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp
+chmod 755 /usr/local/bin/yt-dlp
 ```
 
 确认：
