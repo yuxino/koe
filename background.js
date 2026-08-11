@@ -44,7 +44,7 @@ async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl, selection, tr
     durationMs: source.durationMs || null,
     translate
   });
-  return beginWatching({ tabId, frameId: source.frameId, serverUrl, apiToken, job });
+  return beginWatching({ tabId, frameId: source.frameId, serverUrl, apiToken, job, pageUrl: jobPageUrl, selection, translate });
 }
 
 async function watchJob({ tabId, frameId, serverUrl, apiToken, jobId }) {
@@ -52,7 +52,7 @@ async function watchJob({ tabId, frameId, serverUrl, apiToken, jobId }) {
   return beginWatching({ tabId: Number(tabId), frameId: Number(frameId) || 0, serverUrl, apiToken, job });
 }
 
-async function beginWatching({ tabId, frameId = 0, serverUrl, apiToken, job }) {
+async function beginWatching({ tabId, frameId = 0, serverUrl, apiToken, job, pageUrl = "", selection = null, translate }) {
   stopPolling(tabId);
   const state = {
     tabId,
@@ -66,7 +66,11 @@ async function beginWatching({ tabId, frameId = 0, serverUrl, apiToken, job }) {
     jobStatus: job.status || "analyzing",
     stageDetail: job.stageDetail || "",
     hasDuration: Boolean(job.hasDuration),
-    lastPartialVtt: ""
+    lastPartialVtt: "",
+    pageUrl,
+    selection,
+    translate,
+    retried: false
   };
   tabStates.set(tabId, state);
   await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: state.jobStatus, stageDetail: state.stageDetail, hasDuration: state.hasDuration, startedAt: state.startedAt }, frameId);
@@ -91,6 +95,21 @@ async function pollJob(tabId) {
   }
   if (job.status === "error") {
     stopPolling(tabId);
+    if (!state.retried && /过期|被拦截|没有可提取的音轨|does not contain any stream|403/i.test(job.error || "")) {
+      state.retried = true;
+      try {
+        return await analyzeVideo({
+          tabId,
+          serverUrl: state.serverUrl,
+          apiToken: state.apiToken,
+          pageUrl: state.pageUrl,
+          selection: state.selection,
+          translate: state.translate
+        });
+      } catch {
+        // 页面可能已关闭，保留原始错误
+      }
+    }
     return failJob(tabId, new Error(job.error || "视频分析失败。"));
   }
   state.status = "analyzing";
