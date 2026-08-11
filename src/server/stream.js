@@ -1,13 +1,143 @@
 import { spawn } from "node:child_process";
-import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { transcribeWav } from "./asr.js";
-import { detectSpeechRanges } from "./media.js";
+import { createRealtimeAsr } from "./realtime.js";
+import { groupWordsToSubtitles } from "./transcript.js";
 
 const FIRST_CHUNK_MS = 5_000;
 const CHUNK_MS = Math.max(10_000, Number(process.env.KOE_STREAM_CHUNK_SECONDS || 30) * 1_000);
+const REALTIME_FRAME_BYTES = Math.max(3_200, 16_000 * 2 * (Number(process.env.KOE_REALTIME_FRAME_MS || 250) / 1_000));
 
 export async function streamExtractAndTranscribe({
+  pageUrl,
+  sourceUrl,
+  ffmpegBin,
+  apiKey,
+  asrAcquire,
+  onLines,
+  onPartial,
+  onProgress,
+  startMs = 0
+}) {
+  if (!/^https?:/i.test(sourceUrl || "")) {
+    throw new Error("页面没有可直接获取的视频地址，无法分析。");
+  }
+  if (process.env.KOE_REALTIME_ASR !== "0") {
+    try {
+      return await streamRealtimeTranscribe({
+        pageUrl,
+        sourceUrl,
+        ffmpegBin,
+        apiKey,
+        onLines,
+        onPartial,
+        onProgress,
+        startMs
+      });
+    } catch (error) {
+      console.log(`[koe] realtime failed, falling back to chunked: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return streamChunkedTranscribe({
+    pageUrl,
+    sourceUrl,
+    ffmpegBin,
+    apiKey,
+    asrAcquire,
+    onLines,
+    onProgress,
+    startMs
+  });
+}
+
+async function streamRealtimeTranscribe({
+  pageUrl,
+  sourceUrl,
+  ffmpegBin,
+  apiKey,
+  onLines,
+  onPartial,
+  onProgress,
+  startMs = 0
+}) {
+  const startedAt = Date.now();
+  const log = (message) => console.log(`[koe] realtime +${((Date.now() - startedAt) / 1_000).toFixed(1)}s ${message}`);
+  const headers = pageUrl
+    ? ["-headers", `Referer: ${pageUrl}\r\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/136 Safari/537.36\r\n`]
+    : [];
+  const seekArgs = Number(startMs) > 0 ? ["-ss", String(Number(startMs) / 1_000)] : [];
+  const hlsArgs = /\.m3u8(\?|$)/i.test(String(sourceUrl || "")) ? ["-http_multiple", "1"] : [];
+  const spawned = spawnFfmpeg(ffmpegBin, [...headers, ...seekArgs, ...hlsArgs, "-i", sourceUrl]);
+  const offsetMs = Number(startMs) || 0;
+  const asr = createRealtimeAsr({
+    apiKey,
+    model: process.env.KOE_REALTIME_MODEL || undefined,
+    parameters: {
+      semantic_punctuation_enabled: false,
+      max_sentence_silence: Math.max(200, Number(process.env.KOE_REALTIME_SILENCE_MS || 800)),
+      multi_threshold_mode_enabled: true,
+      heartbeat: true
+    }
+  });
+  let sentenceCount = 0;
+
+  try {
+    await asr.connect({
+      onSentence: (sentence, final) => {
+        if (final) {
+          const lines = sentenceToLines(sentence);
+          if (lines.length) {
+            sentenceCount += lines.length;
+            onLines(lines.map((line) => ({
+              ...line,
+              startMs: line.startMs + offsetMs,
+              endMs: line.endMs + offsetMs
+            })));
+            onProgress(Math.min(0.95, 0.06 + sentenceCount * 0.012));
+          }
+          return;
+        }
+        const text = String(sentence.text || "").trim();
+        if (!onPartial || !text) return;
+        const begin = Number(sentence.begin_time) || 0;
+        const end = Math.max(begin + 2_000, Number(sentence.end_time) || begin + 2_000);
+        onPartial([{ startMs: begin + offsetMs, endMs: end + offsetMs, text }]);
+      }
+    });
+
+    log(`task started, pumping audio`);
+    let frame = Buffer.alloc(0);
+    for await (const chunk of spawned.stream) {
+      if (!chunk.length) continue;
+      frame = Buffer.concat([frame, chunk]);
+      while (frame.length >= REALTIME_FRAME_BYTES) {
+        await asr.sendFrame(frame.subarray(0, REALTIME_FRAME_BYTES));
+        frame = frame.subarray(REALTIME_FRAME_BYTES);
+      }
+    }
+    if (frame.length) await asr.sendFrame(frame);
+    const failed = spawned.diagnostics.filter((entry) => entry.code !== 0);
+    if (failed.length) {
+      throw new Error(`realtime pipeline failed (${failed.map((entry) => `${entry.command} exit ${entry.code}`).join(", ")})`);
+    }
+    log(`audio pumped, finishing`);
+    await Promise.race([
+      asr.finish(),
+      delay(20_000).then(() => {
+        throw new Error("realtime_finish_timeout");
+      })
+    ]);
+    asr.close();
+    log(`finished with ${sentenceCount} lines`);
+    return { chunks: sentenceCount, realtime: true };
+  } catch (error) {
+    asr.terminate();
+    spawned.kill();
+    throw error;
+  }
+}
+
+async function streamChunkedTranscribe({
   pageUrl,
   sourceUrl,
   ffmpegBin,
@@ -105,15 +235,6 @@ async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, on
       const chunkStartMs = offsetMs;
       offsetMs += chunkMs;
       chunkCount += 1;
-      if (process.env.ASR_VAD !== "0" && index !== 0) {
-        // 静音门：跳过整块都没声音的块；第一块不检查，尽快出字幕
-        const silent = await isSilentWav(audio, ffmpegBin);
-        if (silent === true) {
-          log(`chunk ${index} silent, skipped`);
-          onProgress(Math.min(1, chunkCount * 0.05));
-          continue;
-        }
-      }
       try {
         const lines = await transcribeChunk(audio, chunkMs, apiKey, asrAcquire);
         onLines(lines.map((line) => ({
@@ -172,13 +293,38 @@ function spawnFfmpeg(ffmpegBin, args) {
     "pipe:1"
   ], { stdio: ["ignore", "pipe", "ignore"] });
   children.push(ff);
+  const kill = () => {
+    for (const child of children) {
+      try { child.kill("SIGTERM"); } catch { /* ignore */ }
+    }
+  };
   const closePromise = Promise.all(children.map((child) => new Promise((resolve) => {
     child.on("close", (code) => {
       diagnostics.push({ command: String(child.spawnargs?.[0] || "child").split("/").pop(), code });
       resolve();
     });
   })));
-  return { stream: ff.stdout, closePromise, diagnostics };
+  return { stream: ff.stdout, closePromise, diagnostics, kill };
+}
+
+function sentenceToLines(sentence) {
+  const words = Array.isArray(sentence.words) && sentence.words.length
+    ? sentence.words.map((word) => ({
+        text: String(word.text || ""),
+        begin_time: Number(word.begin_time) || 0,
+        end_time: Number(word.end_time) || 0,
+        punctuation: String(word.punctuation || "")
+      }))
+    : null;
+  if (words?.length) {
+    const lines = groupWordsToSubtitles(words);
+    if (lines.length) return lines;
+  }
+  const text = String(sentence.text || "").trim();
+  if (!text) return [];
+  const begin = Number(sentence.begin_time) || 0;
+  const end = Math.max(begin + 500, Number(sentence.end_time) || begin + 500);
+  return [{ startMs: begin, endMs: end, text }];
 }
 
 async function transcribeChunk(audio, chunkMs, apiKey, asrAcquire) {
@@ -189,20 +335,6 @@ async function transcribeChunk(audio, chunkMs, apiKey, asrAcquire) {
     return await run();
   } finally {
     release();
-  }
-}
-
-async function isSilentWav(audio, ffmpegBin) {
-  if (audio.length < 44) return true;
-  const tempPath = `/tmp/koe-silence-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}.wav`;
-  try {
-    await writeFile(tempPath, audio);
-    const ranges = await detectSpeechRanges({ inputPath: tempPath, ffmpegBin });
-    return !ranges.length;
-  } catch {
-    return false;
-  } finally {
-    await rm(tempPath, { force: true }).catch(() => undefined);
   }
 }
 

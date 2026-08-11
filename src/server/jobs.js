@@ -137,11 +137,12 @@ export function createJobManager(options = {}) {
 
   function getPartial(id) {
     const job = getJobOrThrow(id);
+    const partialLines = Array.isArray(job.partialSentences) ? job.partialSentences : [];
     return {
       status: job.status,
       progress: job.progress,
       lineCount: job.lines.length,
-      vtt: toWebVtt(job.lines)
+      vtt: toWebVtt([...job.lines, ...partialLines])
     };
   }
 
@@ -280,6 +281,9 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
             const task = translateSegment(segmentLines, { apiKey, translateAcquire }).catch(() => undefined);
             translationTasks.push(task);
           }
+        },
+        onPartial: (partialLines) => {
+          job.partialSentences = partialLines || [];
         },
         onProgress: (value) => {
           streamChunks += 1;
