@@ -204,6 +204,9 @@ export function createJobManager(options = {}) {
     job.startedAt = Date.now();
     let lastStatus = "";
     const signal = job.controller.signal;
+    const timeoutMs = Number(process.env.KOE_JOB_TIMEOUT_MS || 30 * 60_000);
+    const timeoutTimer = setTimeout(() => job.controller.abort(), timeoutMs);
+    timeoutTimer.unref?.();
     if (signal.aborted) {
       job.status = "cancelled";
       job.completedAt = Date.now();
@@ -271,7 +274,7 @@ export function createJobManager(options = {}) {
       console.log(`[koe] job ${job.id.slice(0, 8)} ready in ${((job.completedAt - job.startedAt) / 1_000).toFixed(1)}s (${job.lines.length} lines)`);
     } catch (error) {
       const aborted = error?.name === "AbortError" || signal.aborted;
-      if (aborted && job.sourceUrl && job.lines.length) {
+      if (job.sourceUrl && job.lines.length) {
         try {
           await cache.save(job.sourceUrl, {
             lines: job.lines,
@@ -288,6 +291,7 @@ export function createJobManager(options = {}) {
       job.completedAt = Date.now();
       console.log(`[koe] job ${job.id.slice(0, 8)} ${aborted ? "cancelled" : "error"} in ${((job.completedAt - job.startedAt) / 1_000).toFixed(1)}s: ${job.error}`);
     } finally {
+      clearTimeout(timeoutTimer);
       job.running = false;
       activeCount = Math.max(0, activeCount - 1);
       if (job.directory) await rm(job.directory, { recursive: true, force: true }).catch(() => undefined);

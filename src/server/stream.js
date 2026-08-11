@@ -240,6 +240,11 @@ async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, on
   const { stream, closePromise, diagnostics } = spawned;
   signal?.addEventListener("abort", () => spawned.kill(), { once: true });
   let gotAudio = false;
+  let lastAudioAt = Date.now();
+  const streamStallMs = Number(process.env.KOE_STREAM_STALL_MS || 90_000);
+  const stallTimer = setInterval(() => {
+    if (Date.now() - lastAudioAt > streamStallMs) spawned.kill();
+  }, 10_000);
   const connectTicker = setInterval(() => {
     if (gotAudio || !onProgress) return;
     const waited = Math.floor((Date.now() - startedAt) / 1_000);
@@ -269,6 +274,7 @@ async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, on
 
     stream.on("data", (chunk) => {
       gotAudio = true;
+      lastAudioAt = Date.now();
       buffer = Buffer.concat([buffer, chunk]);
       if (!header) {
         if (buffer.length < 44) return;
@@ -333,6 +339,7 @@ async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, on
   }
 
   await Promise.all([collector(), ...Array.from({ length: workerCount }, () => worker())]);
+  clearInterval(stallTimer);
   clearInterval(connectTicker);
   if (signal?.aborted) throw abortError();
   const failed = diagnostics.filter((entry) => entry.code !== 0);
