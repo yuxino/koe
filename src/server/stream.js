@@ -24,7 +24,8 @@ export async function streamExtractAndTranscribe({
     ? ["-headers", `Referer: ${pageUrl}\r\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/136 Safari/537.36\r\n`]
     : [];
   const seekArgs = Number(startMs) > 0 ? ["-ss", String(Number(startMs) / 1_000)] : [];
-  return runPipeline(() => spawnFfmpeg(ffmpegBin, [...headers, ...seekArgs, "-i", sourceUrl]), {
+  const hlsArgs = /\.m3u8(\?|$)/i.test(String(sourceUrl || "")) ? ["-http_multiple", "1"] : [];
+  return runPipeline(() => spawnFfmpeg(ffmpegBin, [...headers, ...seekArgs, ...hlsArgs, "-i", sourceUrl]), {
     ffmpegBin,
     apiKey,
     asrAcquire,

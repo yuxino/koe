@@ -192,7 +192,7 @@ function renderState() {
   elements.toggle.textContent = analyzing ? "Analyzing…" : "Analyze video";
   elements.toggle.classList.toggle("running", analyzing);
   elements.batchMark.textContent = unknownDownload ? "提取中" : analyzing ? `${percent}%` : "BATCH";
-  elements.engineStatus.textContent = unknownDownload ? "下载 / 提取声音中" : analyzing ? stageLabel : status === "ready" ? "字幕已就绪" : "准备就绪";
+  elements.engineStatus.textContent = unknownDownload ? "下载 / 提取声音中" : analyzing ? stageLabel : status === "ready" ? (currentState.fromCache ? "字幕已就绪（缓存）" : "字幕已就绪") : "准备就绪";
   elements.engineDetail.textContent = unknownDownload
     ? "时长未知，暂时无法显示百分比"
     : analyzing

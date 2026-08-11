@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { homedir } from "node:os";
+import { mkdtemp, rm } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "../src/server/index.js";
 
@@ -32,6 +33,48 @@ test("mock server creates a complete batch caption job", async (t) => {
   const vtt = await fetch(`${baseUrl}/api/jobs/${created.id}/vtt`).then((response) => response.text());
   assert.match(vtt, /^WEBVTT/);
   assert.match(vtt, /演示字幕/);
+});
+
+test("reuses cached subtitles for the same source url", async (t) => {
+  const cacheDir = await mkdtemp(join(tmpdir(), "koe-cache-test-"));
+  t.after(() => rm(cacheDir, { recursive: true, force: true }));
+  let runs = 0;
+  const app = createServer({
+    port: 0,
+    provider: "mock",
+    cacheRoot: cacheDir,
+    processJob: async () => {
+      runs += 1;
+      const lines = [{ startMs: 0, endMs: 1_000, text: "缓存测试", translated: "缓存测试" }];
+      return { lines, vtt: `WEBVTT\n\n1\n00:00:00.000 --> 00:00:01.000\n缓存测试\n缓存测试\n` };
+    }
+  });
+  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
+  t.after(() => app.server.close());
+  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
+  const sourceUrl = "https://cdn.example.com/video.mp4";
+
+  const first = await createJob({ sourceUrl });
+  assert.equal((await waitForJob(baseUrl, first.id)).status, "ready");
+  assert.equal(runs, 1);
+
+  const second = await createJob({ sourceUrl });
+  assert.equal(second.status, "ready");
+  assert.equal(second.fromCache, true);
+  assert.equal(runs, 1);
+
+  const seek = await createJob({ sourceUrl, startMs: 500 });
+  assert.equal(seek.status, "ready");
+  assert.equal(seek.fromCache, true);
+  assert.equal(runs, 1);
+
+  async function createJob(body) {
+    return fetch(`${baseUrl}/api/jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pageUrl: "https://www.pornhub.com/view_video.php?viewkey=test", filename: "cached.mp4", ...body })
+    }).then((response) => response.json());
+  }
 });
 
 test("accepts a local video upload as a batch job", async (t) => {

@@ -226,6 +226,7 @@ export async function normalizeToAac({ input, outputPath, pageUrl = "", ffmpegBi
         `Referer: ${pageUrl}\r\nUser-Agent: ${MEDIA_USER_AGENT}\r\n`
       ]
     : [];
+  const hlsOptions = /\.m3u8(\?|$)/i.test(String(input || "")) ? ["-http_multiple", "1"] : [];
   await run(ffmpegBin, [
     "-nostdin",
     "-hide_banner",
@@ -233,6 +234,7 @@ export async function normalizeToAac({ input, outputPath, pageUrl = "", ffmpegBi
     "error",
     "-y",
     ...inputOptions,
+    ...hlsOptions,
     "-i",
     input,
     "-vn",

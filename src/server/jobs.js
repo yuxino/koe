@@ -2,9 +2,10 @@ import { createWriteStream } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { createSubtitleCache } from "./cache.js";
 import { extractAudioLocally, normalizeToAac, normalizeToWav, validateSourceRequest } from "./media.js";
 import { transcribeCompleteWav } from "./asr.js";
 import { relayAudioToKoe } from "./relay.js";
@@ -17,6 +18,9 @@ export function createJobManager(options = {}) {
   const jobs = new Map();
   const provider = options.provider || "mock";
   const processJob = options.processJob || ((job, context) => processDefaultJob(job, context));
+  const cache = createSubtitleCache({
+    cacheRoot: options.cacheRoot ?? process.env.KOE_CACHE_DIR ?? join(homedir(), ".koe", "cache")
+  });
   const asrSemaphore = createSemaphore(options.asrMaxConcurrent ?? process.env.ASR_MAX_CONCURRENT ?? 8);
   const extractSemaphore = createSemaphore(options.localExtractConcurrency ?? process.env.LOCAL_EXTRACT_CONCURRENCY ?? 4);
   const translateSemaphore = createSemaphore(Number(options.translateConcurrency ?? (process.env.KOE_TRANSLATE_CONCURRENCY || 2)));
@@ -52,6 +56,36 @@ export function createJobManager(options = {}) {
       running: false
     };
     jobs.set(id, job);
+    if (source.sourceUrl) {
+      const cached = await cache.lookup(source.sourceUrl);
+      if (cached && (job.translate ? cached.translated : true)) {
+        const cachedLines = job.translate
+          ? cached.lines
+          : cached.lines.map((line) => {
+              const { translated, ...rest } = line;
+              return rest;
+            });
+        const lines = job.startMs > 0
+          ? cachedLines
+              .filter((line) => Number(line.endMs || 0) > job.startMs)
+              .map((line) => ({
+                ...line,
+                startMs: Math.max(0, Number(line.startMs || 0) - job.startMs),
+                endMs: Math.max(0, Number(line.endMs || 0) - job.startMs)
+              }))
+          : cachedLines;
+        if (lines.length || cached.lines.length === 0) {
+          job.lines = lines;
+          job.vtt = toWebVtt(lines);
+          job.status = "ready";
+          job.progress = 1;
+          job.completedAt = Date.now();
+          job.fromCache = true;
+          console.log(`[koe] job ${id.slice(0, 8)} cache hit (${lines.length} lines)`);
+          return publicJob(job);
+        }
+      }
+    }
     if (source.sourceUrl || source.pageUrl) void run(job);
     return publicJob(job);
   }
@@ -141,6 +175,17 @@ export function createJobManager(options = {}) {
       });
       job.lines = result.lines || job.lines || [];
       job.vtt = result.vtt || toWebVtt(job.lines);
+      if (job.sourceUrl && !job.startMs) {
+        try {
+          await cache.save(job.sourceUrl, {
+            lines: job.lines,
+            durationMs: job.durationMs,
+            translated: Boolean(job.translate)
+          });
+        } catch {
+          // 缓存失败不影响任务结果
+        }
+      }
       job.status = "ready";
       job.progress = 1;
       job.completedAt = Date.now();
@@ -342,6 +387,7 @@ function publicJob(job) {
     stageDetail: job.stageDetail || "",
     error: job.error || undefined,
     lineCount: job.lines.length,
+    fromCache: Boolean(job.fromCache),
     createdAt: job.createdAt,
     startedAt: job.startedAt,
     completedAt: job.completedAt

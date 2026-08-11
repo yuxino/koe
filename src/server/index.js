@@ -33,6 +33,7 @@ export function createServer(options = {}) {
     apiKey: config.apiKey,
     processJob: options.processJob,
     tempRoot: options.tempRoot,
+    cacheRoot: options.cacheRoot,
     ffmpegBin: config.ffmpegBin,
     ytdlpBin: config.ytdlpBin,
     remoteUrl: config.remoteUrl,
