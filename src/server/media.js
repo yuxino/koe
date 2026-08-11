@@ -54,6 +54,9 @@ export async function acquireSource({
     return target;
   }
 
+  if (!ytdlpBin) {
+    throw new Error("yt_dlp_missing:页面没有可直接获取的媒体地址，且未安装 yt-dlp 兜底。");
+  }
   const template = join(outputDir, "source.%(ext)s");
   await run(ytdlpBin, [
     "--no-playlist",

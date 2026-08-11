@@ -22,7 +22,7 @@ export function createServer(options = {}) {
     apiKey,
     apiToken: options.apiToken ?? process.env.KOE_API_TOKEN ?? "",
     ffmpegBin: options.ffmpegBin || process.env.FFMPEG_BIN || "ffmpeg",
-    ytdlpBin: options.ytdlpBin || process.env.YTDLP_BIN || "yt-dlp",
+    ytdlpBin: options.ytdlpBin ?? (process.env.YTDLP_BIN !== undefined ? process.env.YTDLP_BIN : "yt-dlp"),
     remoteUrl,
     remoteToken,
     mode: localRelay ? "local-relay" : "batch"
@@ -58,7 +58,7 @@ export function createServer(options = {}) {
           localProcessing: localRelay,
           authRequired: Boolean(config.apiToken),
           activeJobs: jobs.activeCount,
-          tools: { ffmpeg: config.ffmpegBin, ytDlp: config.ytdlpBin }
+          tools: { ffmpeg: config.ffmpegBin, ytDlp: config.ytdlpBin || null }
         });
         return;
       }

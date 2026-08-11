@@ -107,7 +107,7 @@ export function createJobManager(options = {}) {
         provider,
         apiKey: options.apiKey || process.env.DASHSCOPE_API_KEY || "",
         ffmpegBin: options.ffmpegBin || process.env.FFMPEG_BIN || "ffmpeg",
-        ytdlpBin: options.ytdlpBin || process.env.YTDLP_BIN || "yt-dlp",
+        ytdlpBin: options.ytdlpBin ?? (process.env.YTDLP_BIN !== undefined ? process.env.YTDLP_BIN : "yt-dlp"),
         remoteUrl: options.remoteUrl || process.env.KOE_REMOTE_URL || "",
         remoteToken: options.remoteToken || process.env.KOE_REMOTE_TOKEN || "",
         asrAcquire: () => asrSemaphore.acquire(),

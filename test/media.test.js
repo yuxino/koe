@@ -162,6 +162,20 @@ test("passes non-HLS media URLs straight to ffmpeg", async (t) => {
   assert.deepEqual(inputs, ["https://cdn.example/media.mp4?token=1"]);
 });
 
+test("fails clearly when the yt-dlp fallback is unavailable", async (t) => {
+  const outputDir = await mkdtemp(join(tmpdir(), "koe-media-test-"));
+  t.after(() => rm(outputDir, { recursive: true, force: true }));
+
+  await assert.rejects(() => extractAudioLocally({
+    pageUrl: "https://unknown.example/watch/1",
+    sourceUrl: "https://cdn.example/expired.mp4",
+    outputDir,
+    ffmpegBin: "ffmpeg-test",
+    ytdlpBin: "",
+    run: async () => { throw new Error("signed URL expired"); }
+  }), /yt_dlp_missing|yt-dlp/);
+});
+
 test("falls back to local yt-dlp when direct media extraction fails", async (t) => {
   const outputDir = await mkdtemp(join(tmpdir(), "koe-media-test-"));
   t.after(() => rm(outputDir, { recursive: true, force: true }));

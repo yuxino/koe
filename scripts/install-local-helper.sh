@@ -32,10 +32,13 @@ fi
 
 [[ -n "${node_bin}" ]] || { print -u2 "Node.js 20+ 未安装。"; exit 1; }
 [[ -n "${ffmpeg_bin}" ]] || { print -u2 "ffmpeg 未安装。"; exit 1; }
-[[ -n "${ytdlp_bin}" ]] || { print -u2 "yt-dlp 未安装（它只作为无法读取浏览器媒体地址时的兜底）。"; exit 1; }
 node_bin="${node_bin:A}"
 ffmpeg_bin="${ffmpeg_bin:A}"
-ytdlp_bin="${ytdlp_bin:A}"
+if [[ -n "${ytdlp_bin}" ]]; then
+  ytdlp_bin="${ytdlp_bin:A}"
+else
+  print -u2 "提示：未检测到 yt-dlp（可选）。它只在页面不暴露视频直链时用作兜底，大多数视频用不到。"
+fi
 
 if [[ -n "${KOE_REMOTE_TOKEN:-}" ]]; then
   /usr/bin/security add-generic-password -U -a "${USER}" -s "${keychain_service}" -w "${KOE_REMOTE_TOKEN}" >/dev/null
