@@ -47,7 +47,7 @@ async function handlePageReady(message, sender) {
   }
 }
 
-async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl, selection, translate }) {
+async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl, selection, translate, startMs }) {
   tabId = Number(tabId);
   if (!Number.isInteger(tabId)) throw new Error("没有找到当前标签页。");
   const source = await discoverVideoSource(tabId, pageUrl, selection);
@@ -63,7 +63,8 @@ async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl, selection, tr
     sourceUrl,
     filename: source.filename || "video",
     durationMs: source.durationMs || null,
-    translate
+    translate,
+    startMs: Number(startMs) || 0
   });
   return beginWatching({ tabId, frameId: source.frameId, serverUrl, apiToken, job, pageUrl: jobPageUrl, selection, translate });
 }
@@ -155,16 +156,34 @@ async function pollPartial(state) {
 async function seekPrioritize(tabId, timeMs) {
   const state = tabStates.get(tabId);
   if (!state?.jobId) return { ok: true, ignored: true };
+  stopPolling(tabId);
   try {
-    await fetch(`${state.serverUrl}/api/jobs/${state.jobId}/prioritize`, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...authHeaders(state.apiToken) },
-      body: JSON.stringify({ timeMs: Math.max(0, Number(timeMs) || 0) })
+    const source = await discoverVideoSource(tabId, state.pageUrl, undefined);
+    if (!source?.hasVideo) return { ok: true, ignored: true };
+    const job = await createJob({
+      serverUrl: state.serverUrl,
+      apiToken: state.apiToken,
+      pageUrl: state.pageUrl || source.pageUrl,
+      sourceUrl: source.sourceUrl || "",
+      filename: source.filename || "video",
+      durationMs: source.durationMs || null,
+      translate: state.translate,
+      startMs: Math.max(0, Number(timeMs) || 0)
+    });
+    return beginWatching({
+      tabId,
+      frameId: source.frameId,
+      serverUrl: state.serverUrl,
+      apiToken: state.apiToken,
+      job,
+      pageUrl: state.pageUrl || source.pageUrl,
+      selection: state.selection,
+      translate: state.translate
     });
   } catch {
-    // 忽略失败，下一轮轮询会继续推进
+    // 重新发现失败时保留原任务
+    return { ok: true, ignored: true };
   }
-  return { ok: true };
 }
 
 async function publishReady(state) {
@@ -175,13 +194,13 @@ async function publishReady(state) {
   await forwardToTab(state.tabId, { type: "JOB_STATUS", tabId: state.tabId, status: "ready", progress: 1 }, state.frameId);
 }
 
-async function createJob({ serverUrl, apiToken, pageUrl, sourceUrl, filename }) {
+async function createJob({ serverUrl, apiToken, pageUrl, sourceUrl, filename, durationMs, translate, startMs }) {
   let response;
   try {
     response = await fetch(`${serverUrl}/api/jobs`, {
       method: "POST",
       headers: { "content-type": "application/json", ...authHeaders(apiToken) },
-      body: JSON.stringify({ pageUrl, sourceUrl, filename })
+      body: JSON.stringify({ pageUrl, sourceUrl, filename, durationMs, translate, startMs })
     });
   } catch {
     throw new Error("Koe 本地助手未启动。请先运行本地安装程序。");

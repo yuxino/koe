@@ -13,7 +13,8 @@ export async function streamExtractAndTranscribe({
   apiKey,
   asrAcquire,
   onLines,
-  onProgress
+  onProgress,
+  startMs = 0
 }) {
   if (!/^https?:/i.test(sourceUrl || "")) {
     throw new Error("页面没有可直接获取的视频地址，无法分析。");
@@ -21,10 +22,18 @@ export async function streamExtractAndTranscribe({
   const headers = pageUrl
     ? ["-headers", `Referer: ${pageUrl}\r\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/136 Safari/537.36\r\n`]
     : [];
-  return runPipeline(() => spawnFfmpeg(ffmpegBin, [...headers, "-i", sourceUrl]), { ffmpegBin, apiKey, asrAcquire, onLines, onProgress });
+  const seekArgs = Number(startMs) > 0 ? ["-ss", String(Number(startMs) / 1_000)] : [];
+  return runPipeline(() => spawnFfmpeg(ffmpegBin, [...headers, ...seekArgs, "-i", sourceUrl]), {
+    ffmpegBin,
+    apiKey,
+    asrAcquire,
+    onLines,
+    onProgress,
+    startMs
+  });
 }
 
-async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, onProgress }) {
+async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, onProgress, startMs = 0 }) {
   const startedAt = Date.now();
   const log = (message) => console.log(`[koe] stream +${((Date.now() - startedAt) / 1_000).toFixed(1)}s ${message}`);
   const { stream, closePromise, diagnostics } = factory();
@@ -32,7 +41,7 @@ async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, on
   const failures = [];
   const processed = new Set();
   const workerCount = Math.max(1, Number(process.env.KOE_STREAM_WORKERS || 8));
-  let offsetMs = 0;
+  let offsetMs = Number(startMs) || 0;
   let chunkCount = 0;
   let collectorDone = false;
 

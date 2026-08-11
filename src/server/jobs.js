@@ -35,6 +35,7 @@ export function createJobManager(options = {}) {
       sourceUrl: source.sourceUrl,
       filename: String(input.filename || "video"),
       durationMs: Number(input.durationMs) || null,
+      startMs: Number(input.startMs) || 0,
       hasDuration: Boolean(Number(input.durationMs)),
       translate: input.translate !== undefined ? Boolean(input.translate) : process.env.KOE_TRANSLATE !== "0",
       provider,
@@ -225,6 +226,7 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
         ffmpegBin,
         apiKey,
         asrAcquire,
+        startMs: job.startMs,
         onLines: (segmentLines) => {
           job.lines.push(...segmentLines);
           job.lines.sort((left, right) => left.startMs - right.startMs);
