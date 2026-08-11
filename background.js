@@ -291,11 +291,15 @@ async function listVideos(tabId) {
     target: { tabId, allFrames: true },
     func: () => [...document.querySelectorAll("video")].map((video, index) => {
       const current = video.currentSrc || video.src || video.querySelector("source")?.src || "";
+      let sourceUrl = /^https?:/i.test(current) ? current : "";
+      if (!sourceUrl || sourceUrl === location.href) {
+        sourceUrl = findPageMediaUrl();
+      }
       return {
         index,
         pageUrl: location.href,
         hasVideo: true,
-        sourceUrl: /^https?:/i.test(current) ? current : "",
+        sourceUrl,
         filename: document.title || "video",
         durationMs: Number.isFinite(video.duration) ? Math.round(video.duration * 1_000) : null,
         width: Number(video.videoWidth || 0),
@@ -304,6 +308,42 @@ async function listVideos(tabId) {
         currentTimeMs: Number.isFinite(video.currentTime) ? Math.round(video.currentTime * 1_000) : 0,
         muted: Boolean(video.muted)
       };
+
+      function findPageMediaUrl() {
+        try {
+          const text = [...document.scripts].map((script) => script.textContent || "").join("\n");
+          const unescapeUrl = (value) => String(value || "")
+            .replace(/\\\//g, "/")
+            .replace(/&amp;/g, "&")
+            .replace(/\\u0026/g, "&")
+            .replace(/\\u0022/g, '"');
+          const masters = text.match(/https?:\\?\/\\?\/[^"'\s<>]+?master\.m3u8[^"'\s<>]*/g) || [];
+          if (masters.length) {
+            const picked = [...masters].sort((left, right) => (
+              (bitrateOf(left) - bitrateOf(right)) || (resolutionOf(left) - resolutionOf(right))
+            ))[0];
+            return unescapeUrl(picked);
+          }
+          const hls = text.match(/https?:\\?\/\\?\/[^"'\s<>]+?\.m3u8[^"'\s<>]*/);
+          if (hls) return unescapeUrl(hls[0]);
+          const mp4s = text.match(/https?:\\?\/\\?\/[^"'\s<>]+?\.mp4[^"'\s<>]*/g) || [];
+          const video = mp4s.find((url) => !/thumb|poster|preview|sprite/i.test(url));
+          if (video) return unescapeUrl(video);
+        } catch {
+          return "";
+        }
+        return "";
+      }
+
+      function bitrateOf(url) {
+        const match = String(url).match(/(\d+)K/i);
+        return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+      }
+
+      function resolutionOf(url) {
+        const match = String(url).match(/(\d+)P/i);
+        return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+      }
     })
   });
   const videos = [];
