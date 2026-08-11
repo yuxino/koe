@@ -37,6 +37,8 @@
   let subtitleTimer;
   let subtitleReady = false;
   let analysisDone = false;
+  let lastCue = null;
+  let showingCue = false;
 
   const STAGE_TEXT = {
     downloading: "正在下载 / 提取声音",
@@ -61,31 +63,35 @@
     if (message.type === "JOB_STATUS") {
       if (message.status === "analyzing") {
         analysisDone = false;
-        const percent = Math.round(Number(message.progress || 0) * 100);
-        const elapsed = message.startedAt
-          ? Math.max(1, Math.round((Date.now() - Number(message.startedAt)) / 1_000))
-          : null;
-        if (message.jobStatus === "downloading") {
-          const timeText = elapsed ? `已用时 ${elapsed} 秒 · ` : "";
-          if (!message.hasDuration) {
-            showStatus("正在下载 / 提取声音…", `${timeText}视频越大这一步越久`, "ANALYZING");
+        if (!showingCue) {
+          const percent = Math.round(Number(message.progress || 0) * 100);
+          const elapsed = message.startedAt
+            ? Math.max(1, Math.round((Date.now() - Number(message.startedAt)) / 1_000))
+            : null;
+          if (message.jobStatus === "downloading") {
+            const timeText = elapsed ? `已用时 ${elapsed} 秒 · ` : "";
+            if (!message.hasDuration) {
+              showStatus("正在下载 / 提取声音…", `${timeText}视频越大这一步越久`, "ANALYZING");
+            } else {
+              showStatus(`正在下载 / 提取声音 ${percent}%`, `${timeText}视频越大这一步越久`, "ANALYZING");
+            }
           } else {
-            showStatus(`正在下载 / 提取声音 ${percent}%`, `${timeText}视频越大这一步越久`, "ANALYZING");
+            const stage = STAGE_TEXT[message.jobStatus] || "正在分析视频";
+            const hint = message.stageDetail || STAGE_HINT[message.jobStatus] || "字幕将在整段分析完成后出现";
+            showStatus(`${stage} ${percent}%`, hint, "ANALYZING");
           }
-        } else {
-          const stage = STAGE_TEXT[message.jobStatus] || "正在分析视频";
-          const hint = message.stageDetail || STAGE_HINT[message.jobStatus] || "字幕将在整段分析完成后出现";
-          showStatus(`${stage} ${percent}%`, hint, "ANALYZING");
         }
       }
       if (message.status === "ready") {
         subtitleReady = true;
         analysisDone = true;
-        showStatus("字幕已就绪", "点击播放后自动显示字幕", "READY");
+        if (!showingCue) showStatus("字幕已就绪", "点击播放后自动显示字幕", "READY");
       }
       if (message.status === "idle") {
         subtitleReady = false;
         analysisDone = false;
+        lastCue = null;
+        showingCue = false;
         hide();
       }
       return false;
@@ -211,12 +217,21 @@
     clearInterval(subtitleTimer);
     subtitleTimer = window.setInterval(() => {
       activeVideo ||= findVideo();
-      if (!activeVideo || !cues.length) return;
+      if (!activeVideo) return;
       const timeMs = activeVideo.currentTime * 1_000;
       const cue = cues.find((item) => timeMs >= item.startMs && timeMs < item.endMs);
-      if (cue) show(cue.text, `KOE · ${formatTime(cue.startMs)}`, "READY");
-      else if (activeVideo.paused && analysisDone) showStatus("字幕已就绪", "点击播放后自动显示字幕", "READY");
-      else hide();
+      if (cue) {
+        showingCue = true;
+        lastCue = { text: cue.text, meta: `KOE · ${formatTime(cue.startMs)}` };
+        show(cue.text, lastCue.meta, "READY");
+        return;
+      }
+      if (!activeVideo.paused) {
+        if (lastCue) show(lastCue.text, lastCue.meta, "READY");
+        return;
+      }
+      showingCue = false;
+      if (analysisDone) showStatus("字幕已就绪", "点击播放后自动显示字幕", "READY");
     }, 100);
   }
 
