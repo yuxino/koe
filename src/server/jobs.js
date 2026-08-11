@@ -11,6 +11,7 @@ import { relayAudioToKoe } from "./relay.js";
 import { toWebVtt } from "./transcript.js";
 import { translateLines } from "./translate.js";
 import { createSemaphore } from "./semaphore.js";
+import { streamExtractAndTranscribe } from "./stream.js";
 
 export function createJobManager(options = {}) {
   const jobs = new Map();
@@ -214,6 +215,37 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
     return { lines: [], vtt: result.vtt };
   }
 
+  const translationTasks = [];
+  if (!job.sourcePath && process.env.KOE_STREAM_EXTRACT !== "0") {
+    try {
+      updateProgress("downloading", 0.08, "正在分段下载/提取声音");
+      await withSemaphore(extractAcquire, () => streamExtractAndTranscribe({
+        pageUrl: job.pageUrl,
+        sourceUrl: job.sourceUrl,
+        directory: job.directory,
+        ffmpegBin,
+        ytdlpBin,
+        apiKey,
+        asrAcquire,
+        onLines: (segmentLines) => {
+          job.lines.push(...segmentLines);
+          job.lines.sort((left, right) => left.startMs - right.startMs);
+          if (job.translate && segmentLines.length) {
+            const task = translateSegment(segmentLines, { apiKey, translateAcquire }).catch(() => undefined);
+            translationTasks.push(task);
+          }
+        },
+        onProgress: (value) => updateProgress("downloading", 0.08 + Number(value || 0) * 0.22, "正在分段下载/提取声音")
+      }));
+      updateProgress("analyzing", 0.95, "收尾中");
+      await Promise.allSettled(translationTasks);
+      return { lines: job.lines, vtt: toWebVtt(job.lines) };
+    } catch (error) {
+      console.log(`[koe] job ${job.id.slice(0, 8)} stream failed, falling back: ${error instanceof Error ? error.message : String(error)}`);
+      job.lines = [];
+    }
+  }
+
   updateProgress("downloading", 0.08, "正在下载/提取声音");
   let audioPath;
   if (job.sourcePath) {
@@ -246,7 +278,6 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
   }
   const control = {};
   job.prioritize = (timeMs) => control.setPriority?.(Number(timeMs));
-  const translationTasks = [];
   const lines = await transcribeCompleteWav({
     audio,
     apiKey,
