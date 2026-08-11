@@ -34,16 +34,16 @@ async function handleVideoChanged(sender) {
   const tabId = sender?.tab?.id;
   if (!tabId) return { ok: true, skipped: true };
   if (tabStates.has(tabId)) await stopAnalysis(tabId);
-  let auto = false;
+  let auto;
   let translate;
   try {
     ({ koeAutoAnalyze: auto, koeTranslate: translate } = await chrome.storage.local.get(["koeAutoAnalyze", "koeTranslate"]));
   } catch {
-    auto = false;
+    auto = undefined;
   }
-  if (!auto) return { ok: true, skipped: true };
   const pageUrl = String(sender.tab?.url || "");
   if (!/^https?:/i.test(pageUrl)) return { ok: true, skipped: true };
+  if (!resolveAutoPreference(auto, pageUrl)) return { ok: true, skipped: true };
   try {
     return await analyzeVideo({ tabId, serverUrl: LOCAL_SERVER_URL, apiToken: "", pageUrl, translate });
   } catch (error) {
@@ -54,17 +54,17 @@ async function handleVideoChanged(sender) {
 async function handlePageReady(message, sender) {
   const tabId = sender?.tab?.id;
   if (!tabId) return { ok: true, skipped: true };
-  let auto = false;
+  let auto;
   let translate;
   try {
     ({ koeAutoAnalyze: auto, koeTranslate: translate } = await chrome.storage.local.get(["koeAutoAnalyze", "koeTranslate"]));
   } catch {
-    auto = false;
+    auto = undefined;
   }
-  if (!auto) return { ok: true, skipped: true };
   if (tabStates.has(tabId)) return { ok: true, skipped: true };
   const pageUrl = String(sender.tab?.url || "");
   if (!/^https?:/i.test(pageUrl)) return { ok: true, skipped: true };
+  if (!resolveAutoPreference(auto, pageUrl)) return { ok: true, skipped: true };
   try {
     return await analyzeVideo({ tabId, serverUrl: LOCAL_SERVER_URL, apiToken: "", pageUrl, translate });
   } catch (error) {
@@ -383,6 +383,18 @@ function isUsableMediaSource(video) {
     return !(source.hostname === page.hostname && source.pathname === page.pathname);
   } catch {
     return true;
+  }
+}
+
+function resolveAutoPreference(preference, pageUrl) {
+  if (preference === true) return true;
+  if (preference === false) return false;
+  try {
+    const hostname = new URL(String(pageUrl || "")).hostname.replace(/^www\./, "").toLowerCase();
+    return hostname === "pornhub.com" || hostname.endsWith(".pornhub.com")
+      || hostname === "xvideos.com" || hostname.endsWith(".xvideos.com");
+  } catch {
+    return false;
   }
 }
 

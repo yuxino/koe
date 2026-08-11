@@ -43,7 +43,7 @@ async function init() {
 async function initPrefs() {
   const { koeTranslate, koeAutoAnalyze } = await chrome.storage.local.get(["koeTranslate", "koeAutoAnalyze"]);
   elements.translateToggle.checked = koeTranslate !== undefined ? Boolean(koeTranslate) : true;
-  elements.autoToggle.checked = Boolean(koeAutoAnalyze);
+  elements.autoToggle.checked = koeAutoAnalyze !== false;
 }
 
 async function refreshActiveTab() {
