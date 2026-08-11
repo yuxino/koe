@@ -29,7 +29,7 @@ async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl }) {
   if (!Number.isInteger(tabId)) throw new Error("没有找到当前标签页。");
   await ensureContentScript(tabId);
   const source = await chrome.tabs.sendMessage(tabId, { type: "GET_VIDEO_SOURCE" });
-  if (!source?.sourceUrl && !source?.pageUrl) throw new Error("当前页面没有找到可分析的视频。");
+  if (!source?.hasVideo) throw new Error("当前页面没有找到视频，请先打开包含视频的页面。");
 
   const jobPageUrl = source.pageUrl || pageUrl;
   const sourceUrl = isExtractorPage(jobPageUrl) ? "" : source.sourceUrl || "";

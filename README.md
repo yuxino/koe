@@ -69,8 +69,7 @@ YTDLP_BIN=yt-dlp
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | `GET` | `/health` | 查看服务状态、模式和工具路径 |
-| `POST` | `/api/jobs` | 创建网页、直链或本地上传任务 |
-| `POST` | `/api/jobs/:id/source` | 上传本地视频二进制内容 |
+| `POST` | `/api/jobs` | 创建当前网页视频分析任务 |
 | `GET` | `/api/jobs/:id` | 查询任务进度 |
 | `GET` | `/api/jobs/:id/vtt` | 任务完成后获取完整 WebVTT |
 

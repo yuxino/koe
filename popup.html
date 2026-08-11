@@ -32,24 +32,18 @@
         <button id="toggle" class="toggle" type="button">Analyze video</button>
       </section>
 
-      <label class="server-field file-field">
-        <span class="section-label">LOCAL VIDEO <em>OPTIONAL</em></span>
-        <input id="video-file" type="file" accept="video/*,.mp4,.webm,.mov,.mkv">
-        <small>网页拿不到源文件时，可直接选择本地视频。</small>
-      </label>
-
       <label class="server-field">
         <span class="section-label">LOCAL SERVICE</span>
         <input id="server-url" type="url" value="https://koe-api.yuxino.cn" spellcheck="false">
       </label>
 
       <label class="server-field token-field">
-        <span class="section-label">API TOKEN <em>OPTIONAL</em></span>
-        <input id="api-token" type="password" placeholder="服务器开启保护时填写" spellcheck="false" autocomplete="off">
+        <span class="section-label">API TOKEN</span>
+        <input id="api-token" type="password" placeholder="填入服务端 KOE_API_TOKEN" spellcheck="false" autocomplete="off">
       </label>
 
       <footer>
-        <span id="hint">不会实时显示字幕，整段分析完成后才加载。</span>
+        <span id="hint">自动分析当前页面视频，完成后才加载字幕。</span>
         <a href="https://github.com/yuxino/ding-frame" target="_blank" rel="noreferrer">based on ding-frame ↗</a>
       </footer>
     </main>

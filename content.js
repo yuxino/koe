@@ -77,6 +77,7 @@
     const current = video?.currentSrc || video?.src || video?.querySelector("source")?.src || "";
     return {
       pageUrl: location.href,
+      hasVideo: Boolean(video),
       sourceUrl: current.startsWith("http") ? current : "",
       filename: document.title || "video",
       durationMs: video?.duration ? Math.round(video.duration * 1_000) : null
