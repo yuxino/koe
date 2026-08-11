@@ -23,18 +23,26 @@ export async function streamExtractAndTranscribe({
     throw new Error("页面没有可直接获取的视频地址，无法分析。");
   }
   if (process.env.KOE_REALTIME_ASR !== "0") {
+    let emittedLines = 0;
     try {
       return await streamRealtimeTranscribe({
         pageUrl,
         sourceUrl,
         ffmpegBin,
         apiKey,
-        onLines,
+        onLines: (lines) => {
+          emittedLines += lines.length;
+          onLines(lines);
+        },
         onPartial,
         onProgress,
         startMs
       });
     } catch (error) {
+      if (emittedLines > 0) {
+        console.log(`[koe] realtime partial success with ${emittedLines} lines, keeping them`);
+        return { chunks: emittedLines, realtime: true, partial: true };
+      }
       console.log(`[koe] realtime failed, falling back to chunked: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
@@ -80,6 +88,7 @@ async function streamRealtimeTranscribe({
     }
   });
   let sentenceCount = 0;
+  let totalAudioMs = 0;
 
   try {
     await asr.connect({
@@ -108,26 +117,44 @@ async function streamRealtimeTranscribe({
 
     log(`task started, pumping audio`);
     let frame = Buffer.alloc(0);
+    let lastAudioAt = Date.now();
+    const stallMs = Number(process.env.KOE_REALTIME_STALL_MS || 60_000);
+    const stallWatchdog = setInterval(() => {
+      if (Date.now() - lastAudioAt > stallMs) {
+        asr.terminate();
+        spawned.kill();
+      }
+    }, 10_000);
     for await (const chunk of spawned.stream) {
       if (!chunk.length) continue;
+      lastAudioAt = Date.now();
+      totalAudioMs += Math.round(chunk.length / 32);
       frame = Buffer.concat([frame, chunk]);
       while (frame.length >= REALTIME_FRAME_BYTES) {
         await asr.sendFrame(frame.subarray(0, REALTIME_FRAME_BYTES));
         frame = frame.subarray(REALTIME_FRAME_BYTES);
       }
     }
+    clearInterval(stallWatchdog);
     if (frame.length) await asr.sendFrame(frame);
     const failed = spawned.diagnostics.filter((entry) => entry.code !== 0);
     if (failed.length) {
       throw new Error(`realtime pipeline failed (${failed.map((entry) => `${entry.command} exit ${entry.code}`).join(", ")})`);
     }
     log(`audio pumped, finishing`);
-    await Promise.race([
-      asr.finish(),
-      delay(20_000).then(() => {
-        throw new Error("realtime_finish_timeout");
-      })
+    const finishTimeoutMs = Math.min(
+      Number(process.env.KOE_REALTIME_FINISH_TIMEOUT_MS || 600_000),
+      Math.max(90_000, Math.round(totalAudioMs * 0.3) + 30_000)
+    );
+    const finished = await Promise.race([
+      asr.finish().then(() => true).catch(() => false),
+      delay(finishTimeoutMs).then(() => false)
     ]);
+    if (!finished) {
+      log(`finish timeout after ${(finishTimeoutMs / 1_000).toFixed(0)}s, keeping ${sentenceCount} lines`);
+      asr.terminate();
+      return { chunks: sentenceCount, realtime: true, partial: true };
+    }
     asr.close();
     log(`finished with ${sentenceCount} lines`);
     return { chunks: sentenceCount, realtime: true };
