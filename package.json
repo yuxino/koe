@@ -5,7 +5,7 @@
   "type": "module",
   "description": "A Chrome extension and local service for accurate video subtitles.",
   "scripts": {
-    "start": "node src/server/index.js",
+    "start": "node src/server/start.js",
     "dev": "node --watch src/server/index.js",
     "test": "node --test",
     "check": "npm test && node --check src/server/index.js && node --check src/server/asr.js && node --check src/server/transcript.js"
