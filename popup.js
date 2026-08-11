@@ -159,7 +159,7 @@ function renderCapture() {
     elements.captureToggle.textContent = "采集播放声音";
     elements.captureToggle.classList.remove("running");
     if (elements.captureStatus.textContent.startsWith("采集中")) {
-      elements.captureStatus.textContent = "直链失效时，播放视频并采集声音";
+      elements.captureStatus.textContent = "播放视频后点“停止并分析”";
     }
   }
 }
