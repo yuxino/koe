@@ -8,7 +8,7 @@ import { pipeline } from "node:stream/promises";
 import { extractAudioLocally, normalizeToAac, normalizeToWav, validateSourceRequest } from "./media.js";
 import { transcribeCompleteWav } from "./asr.js";
 import { relayAudioToKoe } from "./relay.js";
-import { toWebVtt } from "./transcript.js";
+import { createLineFilter, toWebVtt } from "./transcript.js";
 import { translateLines } from "./translate.js";
 import { createSemaphore } from "./semaphore.js";
 import { streamExtractAndTranscribe } from "./stream.js";
@@ -216,6 +216,7 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
   }
 
   const translationTasks = [];
+  const lineFilter = createLineFilter();
   if (!job.sourcePath && process.env.KOE_STREAM_EXTRACT !== "0") {
     try {
       let streamChunks = 0;
@@ -228,7 +229,7 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
         asrAcquire,
         startMs: job.startMs,
         onLines: (segmentLines) => {
-          job.lines.push(...segmentLines);
+          job.lines.push(...lineFilter(segmentLines));
           job.lines.sort((left, right) => left.startMs - right.startMs);
           if (job.translate && segmentLines.length) {
             const task = translateSegment(segmentLines, { apiKey, translateAcquire }).catch(() => undefined);
@@ -286,7 +287,7 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
     control,
     onProgress: (value, detail) => updateProgress("analyzing", 0.35 + value * 0.6, detail || "整段识别中"),
     onLines: (segmentLines, segment) => {
-      job.lines.push(...segmentLines);
+      job.lines.push(...lineFilter(segmentLines));
       job.lines.sort((left, right) => left.startMs - right.startMs);
       if (job.translate && segmentLines.length) {
         const task = translateSegment(segmentLines, { apiKey, translateAcquire }).catch(() => undefined);

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { transcribeWav } from "./asr.js";
 import { detectSpeechRanges } from "./media.js";
 

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { groupWordsToSubtitles, toWebVtt } from "../src/server/transcript.js";
+import { createLineFilter, groupWordsToSubtitles, toWebVtt } from "../src/server/transcript.js";
 
 test("groups words at terminal punctuation", () => {
   const result = groupWordsToSubtitles([
@@ -78,4 +78,16 @@ test("enforces a minimum display duration without overlapping the next cue", () 
   ]);
   assert.match(vtt, /00:00:01\.000 --> 00:00:01\.420/);
   assert.match(vtt, /00:00:01\.500 --> 00:00:02\.500/);
+});
+
+test("drops long cross-language hallucinated lines", () => {
+  const filter = createLineFilter();
+  const kept = filter([
+    { startMs: 0, endMs: 1_000, text: "Oh wow" },
+    { startMs: 1_000, endMs: 2_000, text: "such a great apartment" },
+    { startMs: 2_000, endMs: 3_000, text: "oh my god i love that" }
+  ]);
+  const dropped = filter([{ startMs: 3_000, endMs: 5_000, text: "2016年1月19日，被告人李建平被公安机关抓获。" }]);
+  assert.equal(kept.length, 3);
+  assert.equal(dropped.length, 0);
 });

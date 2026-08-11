@@ -55,6 +55,33 @@ export function groupWordsToSubtitles(words, options = {}) {
   return lines;
 }
 
+export function createLineFilter() {
+  const stats = { han: 0, latin: 0 };
+  return function filterLines(lines) {
+    const batch = Array.isArray(lines) ? lines : [];
+    const total = stats.han + stats.latin;
+    const dominantHan = total > 20 && stats.han > stats.latin * 2;
+    const dominantLatin = total > 20 && stats.latin > stats.han * 2;
+    const accepted = [];
+    for (const line of batch) {
+      const text = String(line.text || "").trim();
+      const han = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+      const latin = (text.match(/[A-Za-z]/g) || []).length;
+      if (text.length >= 8 && dominantLatin && han > 0 && latin === 0) continue;
+      if (text.length >= 8 && dominantHan && latin > 0 && han === 0) continue;
+      accepted.push(line);
+    }
+    for (const line of accepted) {
+      const text = String(line.text || "").trim();
+      const han = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+      const latin = (text.match(/[A-Za-z]/g) || []).length;
+      if (han && !latin) stats.han += text.length;
+      if (latin && !han) stats.latin += text.length;
+    }
+    return accepted;
+  };
+}
+
 function isCommaMarker(punctuation) {
   return /[,，、;；:：]/.test(String(punctuation || ""));
 }
