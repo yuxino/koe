@@ -25,6 +25,15 @@ export function createJobManager(options = {}) {
   const extractSemaphore = createSemaphore(options.localExtractConcurrency ?? process.env.LOCAL_EXTRACT_CONCURRENCY ?? 4);
   const translateSemaphore = createSemaphore(Number(options.translateConcurrency ?? (process.env.KOE_TRANSLATE_CONCURRENCY || 4)));
   let activeCount = 0;
+  const cleanupTimer = setInterval(() => {
+    const cutoff = Date.now() - (Number(process.env.KOE_JOB_TTL_MS || 30 * 60_000));
+    for (const [id, job] of jobs) {
+      if (["ready", "error", "cancelled"].includes(job.status) && job.completedAt && job.completedAt < cutoff) {
+        jobs.delete(id);
+      }
+    }
+  }, 5 * 60_000);
+  cleanupTimer.unref?.();
 
   async function createJob(input = {}) {
     const source = input.upload
