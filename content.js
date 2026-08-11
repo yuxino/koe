@@ -258,7 +258,7 @@
     original.textContent = "";
     meta.textContent = detail;
     label.textContent = `KOE · ${mode}`;
-    stage.classList.remove("compact");
+    stage.classList.toggle("compact", !cue.translated);
     stage.classList.add("visible");
   }
 

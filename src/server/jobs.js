@@ -86,7 +86,7 @@ export function createJobManager(options = {}) {
           const relevant = cached.lines.filter((line) => Number(line.endMs || 0) > job.startMs);
           if (relevant.length) {
             const maxEndMs = Math.max(0, ...cached.lines.map((line) => Number(line.endMs || 0)));
-            if (job.startMs === 0 && job.durationMs > 0 && maxEndMs >= Number(job.durationMs) - 2_000) {
+            if ((!job.translate || cached.translated) && job.startMs === 0 && job.durationMs > 0 && maxEndMs >= Number(job.durationMs) - 2_000) {
               job.lines = job.translate ? cached.lines : stripTranslated(cached.lines);
               job.vtt = toWebVtt(job.lines);
               job.status = "ready";
@@ -218,6 +218,16 @@ export function createJobManager(options = {}) {
       }
       job.lines = mergeJobLines(job.lines, result.lines || []);
       job.vtt = result.vtt || toWebVtt(job.lines);
+      if (job.translate) {
+        const missing = job.lines.filter((line) => !line.translated);
+        if (missing.length) {
+          await translateSegment(missing, {
+            apiKey: options.apiKey || process.env.DASHSCOPE_API_KEY || "",
+            translateAcquire: () => translateSemaphore.acquire()
+          }).catch(() => undefined);
+        }
+        job.vtt = toWebVtt(job.lines);
+      }
       if (job.sourceUrl) {
         try {
           await cache.save(job.sourceUrl, {
@@ -335,6 +345,7 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
         ffmpegBin,
         apiKey,
         signal,
+        durationMs: job.durationMs,
         asrAcquire,
         startMs: job.streamStartMs ?? job.startMs,
         onLines: (segmentLines) => {

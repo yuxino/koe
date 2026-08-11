@@ -18,6 +18,7 @@ export async function streamExtractAndTranscribe({
   onPartial,
   onProgress,
   startMs = 0,
+  durationMs = null,
   signal = null
 }) {
   if (!/^https?:/i.test(sourceUrl || "")) {
@@ -38,6 +39,7 @@ export async function streamExtractAndTranscribe({
         onPartial,
         onProgress,
         startMs,
+        durationMs,
         signal
       });
     } catch (error) {
@@ -58,6 +60,7 @@ export async function streamExtractAndTranscribe({
     onLines,
     onProgress,
     startMs,
+    durationMs,
     signal
   });
 }
@@ -71,6 +74,7 @@ async function streamRealtimeTranscribe({
   onPartial,
   onProgress,
   startMs = 0,
+  durationMs = null,
   signal = null
 }) {
   const startedAt = Date.now();
@@ -112,7 +116,9 @@ async function streamRealtimeTranscribe({
               startMs: line.startMs + offsetMs,
               endMs: line.endMs + offsetMs
             })));
-            onProgress(Math.min(0.95, 0.06 + sentenceCount * 0.012), `实时识别中 · 已出 ${sentenceCount} 句`);
+            const position = Number(durationMs) > 0 ? Math.min(0.8, totalAudioMs / Number(durationMs)) : Math.min(0.8, sentenceCount * 0.012);
+            const positionText = Number(durationMs) > 0 ? ` · 已到 ${formatPosition(totalAudioMs)}` : "";
+            onProgress(Math.min(0.95, 0.06 + position), `实时识别中 · 已出 ${sentenceCount} 句${positionText}`);
           }
           return;
         }
@@ -195,6 +201,7 @@ async function streamChunkedTranscribe({
   onLines,
   onProgress,
   startMs = 0,
+  durationMs = null,
   signal = null
 }) {
   if (!/^https?:/i.test(sourceUrl || "")) {
@@ -212,11 +219,12 @@ async function streamChunkedTranscribe({
     onLines,
     onProgress,
     startMs,
+    durationMs,
     signal
   });
 }
 
-async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, onProgress, startMs = 0, signal = null }) {
+async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, onProgress, startMs = 0, durationMs = null, signal = null }) {
   const startedAt = Date.now();
   const log = (message) => console.log(`[koe] stream +${((Date.now() - startedAt) / 1_000).toFixed(1)}s ${message}`);
   const spawned = factory();
@@ -296,7 +304,10 @@ async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, on
           startMs: line.startMs + chunkStartMs,
           endMs: line.endMs + chunkStartMs
         })));
-        onProgress(Math.min(1, chunkCount * 0.05));
+        const progress = Number(durationMs) > 0
+          ? Math.min(1, (chunkStartMs + chunkMs) / Number(durationMs))
+          : Math.min(1, chunkCount * 0.05);
+        onProgress(progress);
         log(`chunk ${index} done (${lines.length} lines)`);
       } catch (error) {
         log(`chunk ${index} failed, will retry: ${error instanceof Error ? error.message : String(error)}`);
@@ -421,4 +432,9 @@ function abortError() {
   const error = new Error("job_cancelled");
   error.name = "AbortError";
   return error;
+}
+
+function formatPosition(ms) {
+  const total = Math.max(0, Math.round(Number(ms || 0) / 1_000));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
