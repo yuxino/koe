@@ -28,25 +28,28 @@ export function createSubtitleCache({ cacheRoot } = {}) {
     }
   }
 
-  async function save(sourceUrl, { lines = [], durationMs = null, translated = false } = {}) {
+  async function save(sourceUrl, { lines = [], durationMs = null, translated = false, full = false } = {}) {
     if (!root || !sourceUrl) return;
     try {
       await ensureRoot();
+      const existing = await lookup(sourceUrl);
+      const merged = mergeLines(existing?.lines || [], lines.map((line) => {
+        const translatedText = String(line.translated || "").trim();
+        return {
+          startMs: Number(line.startMs) || 0,
+          endMs: Number(line.endMs) || 0,
+          text: String(line.text || ""),
+          ...(translatedText ? { translated: translatedText } : {})
+        };
+      }));
       const entry = {
         version: CACHE_VERSION,
         sourceUrl,
-        createdAt: Date.now(),
-        durationMs: durationMs ? Number(durationMs) : null,
-        translated: Boolean(translated),
-        lines: lines.map((line) => {
-          const translatedText = String(line.translated || "").trim();
-          return {
-            startMs: Number(line.startMs) || 0,
-            endMs: Number(line.endMs) || 0,
-            text: String(line.text || ""),
-            ...(translatedText ? { translated: translatedText } : {})
-          };
-        })
+        createdAt: existing?.createdAt || Date.now(),
+        durationMs: Number(durationMs) || existing?.durationMs || null,
+        translated: Boolean(existing?.translated || translated),
+        full: Boolean(existing?.full || full),
+        lines: merged
       };
       const target = fileFor(sourceUrl);
       const previous = pendingWrites.get(sourceUrl) || Promise.resolve();
@@ -66,4 +69,19 @@ export function createSubtitleCache({ cacheRoot } = {}) {
   }
 
   return { lookup, save };
+}
+
+function mergeLines(existing, incoming) {
+  const byKey = new Map();
+  for (const line of [...existing, ...incoming]) {
+    const key = `${Math.round(Number(line.startMs) || 0)}:${String(line.text || "")}`;
+    const current = byKey.get(key);
+    if (!current) {
+      byKey.set(key, { ...line });
+      continue;
+    }
+    if (!current.translated && line.translated) current.translated = line.translated;
+    if (Number(line.endMs || 0) > Number(current.endMs || 0)) current.endMs = line.endMs;
+  }
+  return [...byKey.values()].sort((left, right) => Number(left.startMs || 0) - Number(right.startMs || 0));
 }

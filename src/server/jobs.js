@@ -40,6 +40,7 @@ export function createJobManager(options = {}) {
       filename: String(input.filename || "video"),
       durationMs: Number(input.durationMs) || null,
       startMs: Number(input.startMs) || 0,
+      streamStartMs: Number(input.startMs) || 0,
       hasDuration: Boolean(Number(input.durationMs)),
       translate: input.translate !== undefined ? Boolean(input.translate) : process.env.KOE_TRANSLATE !== "0",
       provider,
@@ -59,31 +60,55 @@ export function createJobManager(options = {}) {
     jobs.set(id, job);
     if (source.sourceUrl) {
       const cached = await cache.lookup(source.sourceUrl);
-      if (cached && (job.translate ? cached.translated : true)) {
-        const cachedLines = job.translate
-          ? cached.lines
-          : cached.lines.map((line) => {
-              const { translated, ...rest } = line;
-              return rest;
-            });
-        const lines = job.startMs > 0
-          ? cachedLines
-              .filter((line) => Number(line.endMs || 0) > job.startMs)
-              .map((line) => ({
-                ...line,
-                startMs: Math.max(0, Number(line.startMs || 0) - job.startMs),
-                endMs: Math.max(0, Number(line.endMs || 0) - job.startMs)
-              }))
-          : cachedLines;
-        if (lines.length || cached.lines.length === 0) {
-          job.lines = lines;
-          job.vtt = toWebVtt(lines);
-          job.status = "ready";
-          job.progress = 1;
-          job.completedAt = Date.now();
-          job.fromCache = true;
-          console.log(`[koe] job ${id.slice(0, 8)} cache hit (${lines.length} lines)`);
-          return publicJob(job);
+      if (cached && Array.isArray(cached.lines)) {
+        if (cached.full && (job.translate ? cached.translated : true)) {
+          const cachedLines = job.translate ? cached.lines : stripTranslated(cached.lines);
+          const lines = job.startMs > 0
+            ? cachedLines
+                .filter((line) => Number(line.endMs || 0) > job.startMs)
+                .map((line) => ({
+                  ...line,
+                  startMs: Math.max(0, Number(line.startMs || 0) - job.startMs),
+                  endMs: Math.max(0, Number(line.endMs || 0) - job.startMs)
+                }))
+            : cachedLines;
+          if (lines.length || cached.lines.length === 0) {
+            job.lines = lines;
+            job.vtt = toWebVtt(lines);
+            job.status = "ready";
+            job.progress = 1;
+            job.completedAt = Date.now();
+            job.fromCache = true;
+            console.log(`[koe] job ${id.slice(0, 8)} cache hit (${lines.length} lines)`);
+            return publicJob(job);
+          }
+        } else if (cached.lines.length) {
+          const relevant = cached.lines.filter((line) => Number(line.endMs || 0) > job.startMs);
+          if (relevant.length) {
+            const maxEndMs = Math.max(0, ...cached.lines.map((line) => Number(line.endMs || 0)));
+            if (job.startMs === 0 && job.durationMs > 0 && maxEndMs >= Number(job.durationMs) - 2_000) {
+              job.lines = job.translate ? cached.lines : stripTranslated(cached.lines);
+              job.vtt = toWebVtt(job.lines);
+              job.status = "ready";
+              job.progress = 1;
+              job.completedAt = Date.now();
+              job.fromCache = true;
+              console.log(`[koe] job ${id.slice(0, 8)} cache covers full video (${job.lines.length} lines)`);
+              return publicJob(job);
+            }
+            const seeded = job.translate ? relevant : stripTranslated(relevant);
+            job.lines = seeded;
+            job.streamStartMs = Math.max(job.startMs, ...seeded.map((line) => Number(line.endMs || 0)));
+            job.seededFromCache = true;
+            job.fromCache = true;
+            console.log(`[koe] job ${id.slice(0, 8)} seeded ${seeded.length} cached lines, continuing from ${job.streamStartMs}ms`);
+            if (job.translate && seeded.some((line) => !line.translated)) {
+              void translateSegment(seeded.filter((line) => !line.translated), {
+                apiKey: options.apiKey || process.env.DASHSCOPE_API_KEY || "",
+                translateAcquire: () => translateSemaphore.acquire()
+              }).catch(() => undefined);
+            }
+          }
         }
       }
     }
@@ -191,14 +216,15 @@ export function createJobManager(options = {}) {
         console.log(`[koe] job ${job.id.slice(0, 8)} cancelled`);
         return;
       }
-      job.lines = result.lines || job.lines || [];
+      job.lines = mergeJobLines(job.lines, result.lines || []);
       job.vtt = result.vtt || toWebVtt(job.lines);
-      if (job.sourceUrl && !job.startMs) {
+      if (job.sourceUrl) {
         try {
           await cache.save(job.sourceUrl, {
             lines: job.lines,
             durationMs: job.durationMs,
-            translated: Boolean(job.translate)
+            translated: Boolean(job.translate),
+            full: !job.seededFromCache && job.streamStartMs === 0
           });
         } catch {
           // 缓存失败不影响任务结果
@@ -214,6 +240,18 @@ export function createJobManager(options = {}) {
       job.error = aborted ? "" : error instanceof Error ? error.message : String(error);
       job.completedAt = Date.now();
       console.log(`[koe] job ${job.id.slice(0, 8)} ${aborted ? "cancelled" : "error"} in ${((job.completedAt - job.startedAt) / 1_000).toFixed(1)}s: ${job.error}`);
+      if (aborted && job.sourceUrl && job.lines.length) {
+        try {
+          await cache.save(job.sourceUrl, {
+            lines: job.lines,
+            durationMs: job.durationMs,
+            translated: Boolean(job.translate),
+            full: false
+          });
+        } catch {
+          // 缓存失败不影响任务结果
+        }
+      }
     } finally {
       job.running = false;
       activeCount = Math.max(0, activeCount - 1);
@@ -298,7 +336,7 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
         apiKey,
         signal,
         asrAcquire,
-        startMs: job.startMs,
+        startMs: job.streamStartMs ?? job.startMs,
         onLines: (segmentLines) => {
           job.lines.push(...lineFilter(segmentLines));
           job.lines.sort((left, right) => left.startMs - right.startMs);
@@ -319,6 +357,7 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
       await Promise.allSettled(translationTasks);
       return { lines: job.lines, vtt: toWebVtt(job.lines) };
     } catch (error) {
+      if (error?.name === "AbortError") throw error;
       console.log(`[koe] job ${job.id.slice(0, 8)} stream failed, falling back: ${error instanceof Error ? error.message : String(error)}`);
       job.lines = [];
     }
@@ -427,4 +466,27 @@ function publicJob(job) {
 function safeFilename(value) {
   const cleaned = String(value || "video").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
   return cleaned || "video";
+}
+
+function stripTranslated(lines) {
+  return lines.map((line) => {
+    const { translated, ...rest } = line;
+    return rest;
+  });
+}
+
+function mergeJobLines(existing, incoming) {
+  const byKey = new Map();
+  for (const line of [...(existing || []), ...(incoming || [])]) {
+    if (!line || !String(line.text || "").trim()) continue;
+    const key = `${Number(line.startMs) || 0}:${String(line.text).trim()}`;
+    const current = byKey.get(key);
+    if (!current) {
+      byKey.set(key, { ...line });
+      continue;
+    }
+    if (!current.translated && line.translated) current.translated = line.translated;
+    if (Number(line.endMs || 0) > Number(current.endMs || 0)) current.endMs = line.endMs;
+  }
+  return [...byKey.values()].sort((left, right) => Number(left.startMs || 0) - Number(right.startMs || 0));
 }

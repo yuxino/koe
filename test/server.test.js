@@ -77,6 +77,48 @@ test("reuses cached subtitles for the same source url", async (t) => {
   }
 });
 
+test("seeds cached subtitles and continues analysis from the covered region", async (t) => {
+  const cacheDir = await mkdtemp(join(tmpdir(), "koe-cache-seed-"));
+  t.after(() => rm(cacheDir, { recursive: true, force: true }));
+  const runs = [];
+  const app = createServer({
+    port: 0,
+    provider: "mock",
+    cacheRoot: cacheDir,
+    processJob: async (job) => {
+      runs.push({ streamStartMs: job.streamStartMs, seededLines: job.lines.length });
+      const startMs = Number(job.streamStartMs) || 0;
+      const lines = [{ startMs, endMs: startMs + 2_000, text: `line@${startMs}` }];
+      return { lines, vtt: `WEBVTT\n\n1\n00:00:00.000 --> 00:00:02.000\nline@${startMs}\n` };
+    }
+  });
+  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
+  t.after(() => app.server.close());
+  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
+  const sourceUrl = "https://cdn.example.com/progressive.mp4";
+
+  const first = await createJob({ sourceUrl, startMs: 120_000 });
+  assert.equal((await waitForJob(baseUrl, first.id)).status, "ready");
+  assert.deepEqual(runs[0], { streamStartMs: 120_000, seededLines: 0 });
+
+  const second = await createJob({ sourceUrl, startMs: 0 });
+  assert.notEqual(second.status, "ready");
+  assert.equal((await waitForJob(baseUrl, second.id)).status, "ready");
+  assert.deepEqual(runs[1], { streamStartMs: 122_000, seededLines: 1 });
+
+  const third = await createJob({ sourceUrl, startMs: 90_000 });
+  assert.equal((await waitForJob(baseUrl, third.id)).status, "ready");
+  assert.deepEqual(runs[2], { streamStartMs: 124_000, seededLines: 2 });
+
+  async function createJob(body) {
+    return fetch(`${baseUrl}/api/jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pageUrl: "https://www.pornhub.com/view_video.php?viewkey=test", filename: "progressive.mp4", ...body })
+    }).then((response) => response.json());
+  }
+});
+
 test("accepts a local video upload as a batch job", async (t) => {
   const app = createServer({ port: 0, provider: "mock" });
   await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
