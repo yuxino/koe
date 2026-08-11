@@ -368,6 +368,9 @@ function isUsableMediaSource(video) {
 function videoScore(video) {
   if (isAdSource(video.sourceUrl || "")) return -1_000_000_000_000;
   let score = video.sourceUrl ? 1_000_000_000 : 0;
+  if (Number(video.width) > 0 && (Number(video.width) < 320 || Number(video.height) < 180)) {
+    score -= 500_000_000;
+  }
   score += Math.min(Number(video.durationMs || 0) / 1_000, 600) * 100;
   if (video.playing) score += 100_000;
   if (Number(video.currentTimeMs || 0) > 0) score += 10_000;

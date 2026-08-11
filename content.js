@@ -218,7 +218,11 @@
   }
 
   function findVideo() {
-    return [...document.querySelectorAll("video")]
+    const videos = [...document.querySelectorAll("video")];
+    const main = videos
+      .filter((video) => Number(video.videoWidth) >= 320 && Number(video.videoHeight) >= 180)
+      .sort((left, right) => (right.videoWidth * right.videoHeight) - (left.videoWidth * left.videoHeight))[0];
+    return main || videos
       .sort((left, right) => (right.videoWidth * right.videoHeight) - (left.videoWidth * left.videoHeight))[0] || null;
   }
 
