@@ -70,7 +70,7 @@ export function toWebVtt(lines) {
     .map((line, index) => [
       String(index + 1),
       `${formatVttTime(line.startMs)} --> ${formatVttTime(Math.max(Number(line.startMs || 0) + 200, Number(line.endMs || 0)))}`,
-      String(line.text).trim()
+      [String(line.text).trim(), String(line.translated || "").trim()].filter(Boolean).join("\n")
     ].join("\n"));
   return `WEBVTT\n\n${cues.join("\n\n")}\n`;
 }

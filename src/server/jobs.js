@@ -9,6 +9,7 @@ import { acquireSource, detectSpeechRanges, extractAudioLocally, normalizeToAac,
 import { transcribeCompleteWav } from "./asr.js";
 import { relayAudioToKoe } from "./relay.js";
 import { toWebVtt } from "./transcript.js";
+import { translateLines } from "./translate.js";
 import { createSemaphore } from "./semaphore.js";
 
 export function createJobManager(options = {}) {
@@ -32,6 +33,7 @@ export function createJobManager(options = {}) {
       sourceUrl: source.sourceUrl,
       filename: String(input.filename || "video"),
       durationMs: Number(input.durationMs) || null,
+      translate: input.translate !== undefined ? Boolean(input.translate) : process.env.KOE_TRANSLATE !== "0",
       provider,
       directory,
       sourcePath: null,
@@ -179,6 +181,7 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
       audioPath,
       remoteUrl,
       remoteToken,
+      translate: job.translate,
       onProgress: (value, detail) => updateProgress("analyzing", 0.32 + Number(value || 0) * 0.64, detail || "整段识别中")
     });
     return { lines: [], vtt: result.vtt };
@@ -204,7 +207,7 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
     const rangesSec = await withSemaphore(extractAcquire, () => detectSpeechRanges({ inputPath: wavPath, ffmpegBin }));
     speechRangesMs = rangesSec.map(([startSec, endSec]) => [Math.round(startSec * 1_000), Math.round(endSec * 1_000)]);
   }
-  const lines = await transcribeCompleteWav({
+  let lines = await transcribeCompleteWav({
     audio,
     apiKey,
     baseUrl: process.env.DASHSCOPE_BASE_URL,
@@ -215,6 +218,20 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
     acquire: asrAcquire,
     onProgress: (value, detail) => updateProgress("analyzing", 0.35 + value * 0.6, detail || "整段识别中")
   });
+  if (job.translate) {
+    updateProgress("analyzing", 0.98, "正在翻译字幕");
+    try {
+      lines = await translateLines({
+        lines,
+        apiKey,
+        model: process.env.KOE_TRANSLATE_MODEL,
+        target: process.env.KOE_TRANSLATE_TARGET || "zh",
+        concurrency: Number(process.env.KOE_TRANSLATE_CONCURRENCY || 4)
+      });
+    } catch (error) {
+      console.log(`[koe] job ${job.id.slice(0, 8)} translation failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   return { lines, vtt: toWebVtt(lines) };
 }
 

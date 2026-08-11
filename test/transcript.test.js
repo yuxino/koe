@@ -36,3 +36,15 @@ test("formats the complete transcript as WebVTT", () => {
     ""
   ].join("\n"));
 });
+
+test("formats bilingual cues with original and translated lines", () => {
+  assert.equal(toWebVtt([{ startMs: 1_000, endMs: 2_500, text: "Hello world", translated: "你好世界" }]), [
+    "WEBVTT",
+    "",
+    "1",
+    "00:00:01.000 --> 00:00:02.500",
+    "Hello world",
+    "你好世界",
+    ""
+  ].join("\n"));
+});

@@ -6,6 +6,7 @@ export async function relayAudioToKoe({
   filename = "audio.m4a",
   remoteUrl,
   remoteToken = "",
+  translate,
   pollIntervalMs = 2_000,
   maxPolls = 1_800,
   onProgress = () => undefined,
@@ -16,7 +17,7 @@ export async function relayAudioToKoe({
   const created = await requestJson(fetchImpl, `${baseUrl}/api/jobs`, {
     method: "POST",
     headers: { "content-type": "application/json", ...headers },
-    body: JSON.stringify({ upload: true, filename })
+    body: JSON.stringify({ upload: true, filename, ...(translate !== undefined ? { translate } : {}) })
   }, "remote_job_create_failed");
 
   const file = await stat(audioPath);

@@ -11,12 +11,16 @@ const elements = {
   engineDetail: document.querySelector("#engine-detail"),
   toggle: document.querySelector("#toggle"),
   videoSelect: document.querySelector("#video-select"),
+  translateToggle: document.querySelector("#translate-toggle"),
   batchMark: document.querySelector("#batch-mark"),
   hint: document.querySelector("#hint")
 };
 
 document.addEventListener("DOMContentLoaded", init);
 elements.toggle.addEventListener("click", analyze);
+elements.translateToggle.addEventListener("change", async () => {
+  await chrome.storage.local.set({ koeTranslate: elements.translateToggle.checked });
+});
 chrome.tabs.onActivated.addListener(refreshActiveTab);
 
 async function init() {
@@ -24,6 +28,12 @@ async function init() {
   await checkHealth();
   await refreshState();
   await refreshVideos();
+  await initPrefs();
+}
+
+async function initPrefs() {
+  const { koeTranslate } = await chrome.storage.local.get("koeTranslate");
+  elements.translateToggle.checked = koeTranslate !== undefined ? Boolean(koeTranslate) : true;
 }
 
 async function refreshActiveTab() {
@@ -48,6 +58,7 @@ async function analyze() {
     return;
   }
   const selection = elements.videoSelect?.value || undefined;
+  const translate = elements.translateToggle.checked;
   elements.toggle.disabled = true;
   elements.engineStatus.textContent = "正在创建任务…";
   try {
@@ -57,7 +68,8 @@ async function analyze() {
       pageUrl: activeTab.url,
       serverUrl: LOCAL_SERVER_URL,
       apiToken: "",
-      selection
+      selection,
+      translate
     });
     if (!response?.ok) throw new Error(response?.error || "无法创建分析任务。");
     currentState = response.state;

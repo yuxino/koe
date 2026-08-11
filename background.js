@@ -25,7 +25,7 @@ async function handleMessage(message) {
   return { ok: true };
 }
 
-async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl, selection }) {
+async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl, selection, translate }) {
   tabId = Number(tabId);
   if (!Number.isInteger(tabId)) throw new Error("没有找到当前标签页。");
   const source = await discoverVideoSource(tabId, pageUrl, selection);
@@ -40,7 +40,8 @@ async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl, selection }) 
     pageUrl: jobPageUrl,
     sourceUrl,
     filename: source.filename || "video",
-    durationMs: source.durationMs || null
+    durationMs: source.durationMs || null,
+    translate
   });
   return beginWatching({ tabId, frameId: source.frameId, serverUrl, apiToken, job });
 }
