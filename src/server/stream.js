@@ -253,7 +253,7 @@ async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, on
   const queue = [];
   const failures = [];
   const processed = new Set();
-  const workerCount = Math.max(1, Number(process.env.KOE_STREAM_WORKERS || 8));
+  const workerCount = Math.max(1, Number(process.env.KOE_STREAM_WORKERS || 16));
   let offsetMs = Number(startMs) || 0;
   let chunkCount = 0;
   let collectorDone = false;
