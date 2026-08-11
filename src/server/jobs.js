@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { acquireSource, extractAudioLocally, normalizeToWav, validateSourceRequest } from "./media.js";
+import { acquireSource, extractAudioLocally, normalizeToAac, normalizeToWav, validateSourceRequest } from "./media.js";
 import { transcribeCompleteWav } from "./asr.js";
 import { relayAudioToKoe } from "./relay.js";
 import { toWebVtt } from "./transcript.js";
@@ -147,14 +147,21 @@ async function processDefaultJob(job, { provider, apiKey, ffmpegBin, ytdlpBin, r
 
   if (provider === "relay") {
     updateProgress("downloading", 0.08);
-    const audioPath = await extractAudioLocally({
-      pageUrl: job.pageUrl,
-      sourceUrl: job.sourceUrl,
-      outputDir: job.directory,
-      ffmpegBin,
-      ytdlpBin,
-      onProgress: (value) => updateProgress("downloading", 0.08 + Number(value || 0) * 0.22)
-    });
+    let audioPath;
+    if (job.sourcePath) {
+      audioPath = join(job.directory, "audio.m4a");
+      await normalizeToAac({ input: job.sourcePath, outputPath: audioPath, ffmpegBin });
+      updateProgress("downloading", 0.3);
+    } else {
+      audioPath = await extractAudioLocally({
+        pageUrl: job.pageUrl,
+        sourceUrl: job.sourceUrl,
+        outputDir: job.directory,
+        ffmpegBin,
+        ytdlpBin,
+        onProgress: (value) => updateProgress("downloading", 0.08 + Number(value || 0) * 0.22)
+      });
+    }
     updateProgress("uploading_audio", 0.32);
     const result = await relayAudioToKoe({
       audioPath,

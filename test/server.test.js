@@ -1,5 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { createServer } from "../src/server/index.js";
 
 test("mock server creates a complete batch caption job", async (t) => {
@@ -110,6 +114,38 @@ test("local relay mode accepts a generic public video page", async (t) => {
   assert.equal((await waitForJob(baseUrl, created.id)).status, "ready");
 });
 
+const ffmpegBin = resolveFfmpeg();
+
+test("local relay mode relays an uploaded audio file", { skip: !ffmpegBin && "ffmpeg not available" }, async (t) => {
+  const remote = createServer({ port: 0, provider: "mock" });
+  await new Promise((resolve) => remote.server.listen(0, "127.0.0.1", resolve));
+  t.after(() => remote.server.close());
+  const app = createServer({
+    port: 0,
+    ffmpegBin,
+    remoteUrl: `http://127.0.0.1:${remote.server.address().port}`,
+    remoteToken: ""
+  });
+  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
+  t.after(() => app.server.close());
+  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
+
+  const created = await fetch(`${baseUrl}/api/jobs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ upload: true, filename: "capture.wav" })
+  }).then((response) => response.json());
+  assert.equal(created.status, "queued");
+
+  const upload = await fetch(`${baseUrl}/api/jobs/${created.id}/source`, {
+    method: "POST",
+    headers: { "content-type": "audio/wav", "x-filename": "capture.wav" },
+    body: createSilentWav(1_600)
+  });
+  assert.equal(upload.status, 202);
+  assert.equal((await waitForJob(baseUrl, created.id)).status, "ready");
+});
+
 async function waitForJob(baseUrl, id) {
   for (let attempt = 0; attempt < 30; attempt += 1) {
     const job = await fetch(`${baseUrl}/api/jobs/${id}`).then((response) => response.json());
@@ -117,4 +153,38 @@ async function waitForJob(baseUrl, id) {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error("job did not finish in time");
+}
+
+function createSilentWav(sampleCount) {
+  const data = Buffer.alloc(sampleCount * 2);
+  const wav = Buffer.alloc(44 + data.length);
+  wav.write("RIFF", 0, "ascii");
+  wav.writeUInt32LE(36 + data.length, 4);
+  wav.write("WAVE", 8, "ascii");
+  wav.write("fmt ", 12, "ascii");
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(16_000, 24);
+  wav.writeUInt32LE(32_000, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write("data", 36, "ascii");
+  wav.writeUInt32LE(data.length, 40);
+  data.copy(wav, 44);
+  return wav;
+}
+
+function resolveFfmpeg() {
+  const candidates = [
+    process.env.FFMPEG_BIN,
+    "ffmpeg",
+    "/opt/homebrew/bin/ffmpeg",
+    "/usr/local/bin/ffmpeg",
+    join(homedir(), ".local/share/koe/venv/lib/python3.9/site-packages/imageio_ffmpeg/binaries/ffmpeg-macos-aarch64-v7.1")
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (existsSync(candidate) || spawnSync("which", [candidate]).status === 0) return candidate;
+  }
+  return null;
 }

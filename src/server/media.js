@@ -144,7 +144,7 @@ export async function normalizeToWav({ inputPath, outputPath, ffmpegBin = "ffmpe
   return outputPath;
 }
 
-async function normalizeToAac({ input, outputPath, pageUrl = "", ffmpegBin, run }) {
+export async function normalizeToAac({ input, outputPath, pageUrl = "", ffmpegBin, run = runCommand }) {
   const inputOptions = pageUrl
     ? [
         "-headers",
