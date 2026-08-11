@@ -26,6 +26,28 @@ test("groups words after a long pause", () => {
   assert.equal(result[1].startMs, 2_200);
 });
 
+test("keeps short complete sentences on their own lines", () => {
+  const result = groupWordsToSubtitles([
+    { begin_time: 0, end_time: 200, text: "好", punctuation: "" },
+    { begin_time: 200, end_time: 400, text: "。", punctuation: "。" },
+    { begin_time: 500, end_time: 1_000, text: "我们走吧", punctuation: "" },
+    { begin_time: 1_000, end_time: 1_200, text: "。", punctuation: "。" }
+  ]);
+  assert.deepEqual(result.map((line) => line.text), ["好。", "我们走吧。"]);
+});
+
+test("breaks overlong lines at the last comma", () => {
+  const result = groupWordsToSubtitles([
+    { begin_time: 0, end_time: 2_000, text: "第一", punctuation: "" },
+    { begin_time: 2_000, end_time: 4_000, text: "部分", punctuation: "" },
+    { begin_time: 4_000, end_time: 4_200, text: "，", punctuation: "，" },
+    { begin_time: 4_200, end_time: 6_500, text: "第二", punctuation: "" },
+    { begin_time: 6_500, end_time: 8_500, text: "部分", punctuation: "" },
+    { begin_time: 8_500, end_time: 11_000, text: "第三", punctuation: "" }
+  ]);
+  assert.deepEqual(result.map((line) => line.text), ["第一部分，", "第二部分第三"]);
+});
+
 test("formats the complete transcript as WebVTT", () => {
   assert.equal(toWebVtt([{ startMs: 1_000, endMs: 2_500, text: "你好" }]), [
     "WEBVTT",

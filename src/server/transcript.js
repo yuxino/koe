@@ -1,33 +1,26 @@
 export function groupWordsToSubtitles(words, options = {}) {
   const {
     maxLineMs = 8_000,
-    minGapMs = 1_500,
-    minLineMs = 1_200
+    minGapMs = 1_200
   } = options;
   const lines = [];
-  let buffer = [];
+  const buffer = [];
   let startMs = null;
   let endMs = null;
-  let lastWasTerminal = false;
 
-  const flush = () => {
-    if (!buffer.length) return;
-    const text = buffer
-      .map((word) => String(word.text || ""))
-      .join("")
-      .replace(/\s+/g, " ")
-      .trim();
+  const flushUntil = (count) => {
+    if (count <= 0) return;
+    const slice = buffer.splice(0, count);
+    const text = slice.map((word) => word.text).join("").replace(/\s+/g, " ").trim();
     if (text) {
       lines.push({
         startMs: startMs ?? 0,
-        endMs: endMs ?? startMs ?? 0,
+        endMs: slice[slice.length - 1].endMs ?? startMs ?? 0,
         text
       });
     }
-    buffer = [];
-    startMs = null;
-    endMs = null;
-    lastWasTerminal = false;
+    startMs = buffer.length ? buffer[0].beginMs : null;
+    endMs = buffer.length ? buffer[buffer.length - 1].endMs : null;
   };
 
   for (const word of words) {
@@ -39,23 +32,31 @@ export function groupWordsToSubtitles(words, options = {}) {
     if (buffer.length) {
       const gap = begin - (endMs ?? begin);
       const lineMs = end - (startMs ?? begin);
-      if (
-        (lastWasTerminal && lineMs >= minLineMs) ||
-        gap > minGapMs ||
-        lineMs > maxLineMs
-      ) {
-        flush();
+      if (isTerminal) {
+        buffer.push({ text: String(word.text || ""), beginMs: begin, endMs: end, punctuation });
+        flushUntil(buffer.length);
+        continue;
+      }
+      if (gap > minGapMs) {
+        flushUntil(buffer.length);
+      } else if (lineMs > maxLineMs) {
+        const lastComma = buffer.map((item) => isCommaMarker(item.punctuation)).lastIndexOf(true);
+        if (lastComma >= 0) flushUntil(lastComma + 1);
+        else flushUntil(buffer.length);
       }
     }
 
-    buffer.push(word);
+    buffer.push({ text: String(word.text || ""), beginMs: begin, endMs: end, punctuation });
     if (startMs === null) startMs = begin;
     endMs = end;
-    lastWasTerminal = isTerminal;
   }
 
-  flush();
+  flushUntil(buffer.length);
   return lines;
+}
+
+function isCommaMarker(punctuation) {
+  return /[,，、;；:：]/.test(String(punctuation || ""));
 }
 
 export function compactTranscriptText(value) {
