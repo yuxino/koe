@@ -29,22 +29,26 @@
       .processing span:nth-child(2) { animation-delay: .2s; }
       .processing span:nth-child(3) { animation-delay: .4s; }
       @keyframes koe-blink { 0%, 100% { opacity: .25; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-3px); } }
-      .analyze-btn { position: fixed; right: 18px; bottom: 18px; display: none; align-items: center; gap: 6px; padding: 9px 15px; border: 1px solid rgba(255, 248, 224, .25); border-radius: 99px; background: rgba(25, 35, 30, .85); color: #fbf4df; font: 600 13px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .02em; cursor: pointer; backdrop-filter: blur(12px); box-shadow: 0 8px 30px rgba(0, 0, 0, .35); pointer-events: auto; z-index: 1; }
-      .analyze-btn:hover { background: rgba(43, 49, 37, .95); }
-      .analyze-btn.visible { display: inline-flex; }
+      .orb { position: fixed; right: 18px; bottom: 18px; width: 46px; height: 46px; display: none; align-items: center; justify-content: center; border-radius: 50%; border: 1px solid rgba(255, 248, 224, .3); background: radial-gradient(circle at 32% 28%, rgba(70, 86, 73, .98), rgba(24, 32, 28, .96)); color: #f6efd9; cursor: pointer; box-shadow: 0 10px 32px rgba(0, 0, 0, .45); pointer-events: auto; z-index: 1; user-select: none; touch-action: none; }
+      .orb:hover { filter: brightness(1.15); }
+      .orb.visible { display: flex; }
+      .orb svg { width: 22px; height: 22px; }
+      .orb.analyzing::after { content: ""; position: absolute; inset: -3px; border-radius: 50%; border: 2px solid transparent; border-top-color: #cbdc77; animation: koe-spin 1s linear infinite; }
+      .orb.ready { border-color: rgba(203, 220, 119, .6); }
+      @keyframes koe-spin { to { transform: rotate(360deg); } }
     </style>
     <div class="stage" aria-live="polite" aria-atomic="true">
       <div class="eyebrow"><span class="dot"></span><span class="label">KOE · READY</span></div>
       <div class="card"><p class="translated"></p><p class="original"></p><div class="meta"></div></div>
       <div class="processing"><span></span><span></span><span></span></div>
     </div>
-    <button class="analyze-btn" type="button">分析字幕</button>
+    <div class="orb" role="button" aria-label="分析字幕" title="分析字幕"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4"/></svg></div>
   `;
 
   const stage = shadow.querySelector(".stage");
   const card = shadow.querySelector(".card");
   const processingEl = shadow.querySelector(".processing");
-  const analyzeBtn = shadow.querySelector(".analyze-btn");
+  const orb = shadow.querySelector(".orb");
   const translated = shadow.querySelector(".translated");
   const original = shadow.querySelector(".original");
   const meta = shadow.querySelector(".meta");
@@ -192,18 +196,51 @@
     updateAnalyzeButton();
   }, true);
 
-  analyzeBtn.addEventListener("click", () => {
+  function updateAnalyzeButton() {
+    const fullscreenVideo = (document.fullscreenElement || document.webkitFullscreenElement) instanceof HTMLVideoElement;
+    const show = !fullscreenVideo && Boolean(findVideo());
+    orb.classList.toggle("visible", show);
+    orb.classList.toggle("analyzing", processing);
+    orb.classList.toggle("ready", subtitleReady && !processing);
+  }
+  window.setInterval(updateAnalyzeButton, 1_000);
+
+  // 悬浮球可拖动；拖动的位移超过阈值才算拖，否则视为点击
+  let orbDragging = false;
+  let orbMoved = false;
+  let orbStartX = 0;
+  let orbStartY = 0;
+  let orbBaseLeft = 0;
+  let orbBaseTop = 0;
+  orb.addEventListener("pointerdown", (event) => {
+    orbDragging = true;
+    orbMoved = false;
+    orbStartX = event.clientX;
+    orbStartY = event.clientY;
+    const rect = orb.getBoundingClientRect();
+    orbBaseLeft = rect.left;
+    orbBaseTop = rect.top;
+    try { orb.setPointerCapture(event.pointerId); } catch { /* ignore */ }
+  });
+  orb.addEventListener("pointermove", (event) => {
+    if (!orbDragging) return;
+    const dx = event.clientX - orbStartX;
+    const dy = event.clientY - orbStartY;
+    if (Math.abs(dx) + Math.abs(dy) > 6) orbMoved = true;
+    if (orbMoved) {
+      orb.style.left = `${orbBaseLeft + dx}px`;
+      orb.style.top = `${orbBaseTop + dy}px`;
+      orb.style.right = "auto";
+      orb.style.bottom = "auto";
+    }
+  });
+  orb.addEventListener("pointerup", () => {
+    orbDragging = false;
+    if (orbMoved) return;
     if (!findVideo()) return;
     chrome.runtime.sendMessage({ type: "ANALYZE_VIDEO", pageUrl: location.href, serverUrl: "http://127.0.0.1:8787", apiToken: "" })
       .catch(() => undefined);
   });
-
-  function updateAnalyzeButton() {
-    const fullscreenVideo = (document.fullscreenElement || document.webkitFullscreenElement) instanceof HTMLVideoElement;
-    const show = !fullscreenVideo && Boolean(findVideo());
-    analyzeBtn.classList.toggle("visible", show);
-  }
-  window.setInterval(updateAnalyzeButton, 1_000);
 
   function tryAutoPlay() {
     const now = Date.now();
