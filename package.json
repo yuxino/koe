@@ -1,0 +1,13 @@
+{
+  "name": "koe",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A Chrome extension and local service for accurate video subtitles.",
+  "scripts": {
+    "start": "node src/server/index.js",
+    "dev": "node --watch src/server/index.js",
+    "test": "node --test",
+    "check": "npm test && node --check src/server/index.js && node --check src/server/asr.js && node --check src/server/transcript.js"
+  }
+}

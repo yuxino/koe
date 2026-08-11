@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Koe</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <div class="mark">こ</div>
+        <div>
+          <div class="kicker">VOICE / CAPTION LAB</div>
+          <h1>Koe</h1>
+        </div>
+        <span class="live-mark" id="live-mark"></span>
+      </header>
+
+      <section class="current-tab">
+        <span class="section-label">CURRENT TAB</span>
+        <strong id="tab-host">正在读取…</strong>
+        <span id="tab-title">点击开始，让字幕跟上视频。</span>
+      </section>
+
+      <section class="control-card">
+        <div class="control-copy">
+          <span class="section-label">CAPTION ENGINE</span>
+          <strong id="engine-status">准备就绪</strong>
+          <span id="engine-detail">本地服务 · 检查中</span>
+        </div>
+        <button id="toggle" class="toggle" type="button">Start captions</button>
+      </section>
+
+      <label class="server-field">
+        <span class="section-label">LOCAL SERVICE</span>
+        <input id="server-url" type="url" value="http://127.0.0.1:8787" spellcheck="false">
+      </label>
+
+      <footer>
+        <span id="hint">默认 mock 模式，可先验证插件链路。</span>
+        <a href="https://github.com/yuxino/ding-frame" target="_blank" rel="noreferrer">based on ding-frame ↗</a>
+      </footer>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
