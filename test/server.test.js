@@ -104,11 +104,11 @@ test("seeds cached subtitles and continues analysis from the covered region", as
   const second = await createJob({ sourceUrl, startMs: 0 });
   assert.notEqual(second.status, "ready");
   assert.equal((await waitForJob(baseUrl, second.id)).status, "ready");
-  assert.deepEqual(runs[1], { streamStartMs: 122_000, seededLines: 1 });
+  assert.deepEqual(runs[1], { streamStartMs: 0, seededLines: 1 });
 
   const third = await createJob({ sourceUrl, startMs: 90_000 });
   assert.equal((await waitForJob(baseUrl, third.id)).status, "ready");
-  assert.deepEqual(runs[2], { streamStartMs: 124_000, seededLines: 2 });
+  assert.deepEqual(runs[2], { streamStartMs: 122_000, seededLines: 1 });
 
   async function createJob(body) {
     return fetch(`${baseUrl}/api/jobs`, {

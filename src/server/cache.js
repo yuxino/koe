@@ -83,5 +83,27 @@ function mergeLines(existing, incoming) {
     if (!current.translated && line.translated) current.translated = line.translated;
     if (Number(line.endMs || 0) > Number(current.endMs || 0)) current.endMs = line.endMs;
   }
-  return [...byKey.values()].sort((left, right) => Number(left.startMs || 0) - Number(right.startMs || 0));
+  const merged = [...byKey.values()].sort((left, right) => Number(left.startMs || 0) - Number(right.startMs || 0));
+  return squashNearDuplicates(merged);
+}
+
+function squashNearDuplicates(lines) {
+  const result = [];
+  for (const line of lines) {
+    const previous = result[result.length - 1];
+    const sameText = previous && normalizeText(previous.text) === normalizeText(line.text);
+    const near = previous && Math.abs(Number(previous.startMs || 0) - Number(line.startMs || 0)) <= 400;
+    if (previous && sameText && near) {
+      if (!previous.translated && line.translated) previous.translated = line.translated;
+      previous.startMs = Math.min(Number(previous.startMs || 0), Number(line.startMs || 0));
+      previous.endMs = Math.max(Number(previous.endMs || 0), Number(line.endMs || 0));
+      continue;
+    }
+    result.push({ ...line });
+  }
+  return result;
+}
+
+function normalizeText(value) {
+  return String(value || "").trim().replace(/\s+/g, " ");
 }

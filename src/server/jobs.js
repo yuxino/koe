@@ -83,10 +83,21 @@ export function createJobManager(options = {}) {
             return publicJob(job);
           }
         } else if (cached.lines.length) {
-          const relevant = cached.lines.filter((line) => Number(line.endMs || 0) > job.startMs);
-          if (relevant.length) {
-            const maxEndMs = Math.max(0, ...cached.lines.map((line) => Number(line.endMs || 0)));
-            if ((!job.translate || cached.translated) && job.startMs === 0 && job.durationMs > 0 && maxEndMs >= Number(job.durationMs) - 2_000) {
+          const sorted = [...cached.lines].sort((left, right) => Number(left.startMs || 0) - Number(right.startMs || 0));
+          const gapMs = Number(process.env.KOE_CACHE_GAP_MS || 30_000);
+          let cursor = job.startMs;
+          for (const line of sorted) {
+            const start = Number(line.startMs || 0);
+            const end = Number(line.endMs || 0);
+            if (start < cursor - gapMs) {
+              cursor = Math.max(cursor, end);
+              continue;
+            }
+            if (start - cursor > gapMs) break;
+            cursor = Math.max(cursor, end);
+          }
+          const reachesEnd = Number(job.durationMs) > 0 && cursor >= Number(job.durationMs) - 2_000;
+          if ((!job.translate || cached.translated) && job.startMs === 0 && reachesEnd) {
               job.lines = job.translate ? cached.lines : stripTranslated(cached.lines);
               job.vtt = toWebVtt(job.lines);
               job.status = "ready";
@@ -96,9 +107,11 @@ export function createJobManager(options = {}) {
               console.log(`[koe] job ${id.slice(0, 8)} cache covers full video (${job.lines.length} lines)`);
               return publicJob(job);
             }
+          const relevant = sorted.filter((line) => Number(line.endMs || 0) > job.startMs);
+          if (relevant.length) {
             const seeded = job.translate ? relevant : stripTranslated(relevant);
             job.lines = seeded;
-            job.streamStartMs = Math.max(job.startMs, ...seeded.map((line) => Number(line.endMs || 0)));
+            job.streamStartMs = Math.max(job.startMs, cursor);
             job.seededFromCache = true;
             job.fromCache = true;
             console.log(`[koe] job ${id.slice(0, 8)} seeded ${seeded.length} cached lines, continuing from ${job.streamStartMs}ms`);
@@ -499,5 +512,19 @@ function mergeJobLines(existing, incoming) {
     if (!current.translated && line.translated) current.translated = line.translated;
     if (Number(line.endMs || 0) > Number(current.endMs || 0)) current.endMs = line.endMs;
   }
-  return [...byKey.values()].sort((left, right) => Number(left.startMs || 0) - Number(right.startMs || 0));
+  const merged = [...byKey.values()].sort((left, right) => Number(left.startMs || 0) - Number(right.startMs || 0));
+  const result = [];
+  for (const line of merged) {
+    const previous = result[result.length - 1];
+    const sameText = previous && String(previous.text || "").trim().replace(/\s+/g, " ") === String(line.text || "").trim().replace(/\s+/g, " ");
+    const near = previous && Math.abs(Number(previous.startMs || 0) - Number(line.startMs || 0)) <= 400;
+    if (previous && sameText && near) {
+      if (!previous.translated && line.translated) previous.translated = line.translated;
+      previous.startMs = Math.min(Number(previous.startMs || 0), Number(line.startMs || 0));
+      previous.endMs = Math.max(Number(previous.endMs || 0), Number(line.endMs || 0));
+      continue;
+    }
+    result.push({ ...line });
+  }
+  return result;
 }
