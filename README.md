@@ -21,7 +21,7 @@ npm start
 4. 打开一个有视频声音的网页
 5. 点击扩展图标，再点 `Start captions`
 
-默认服务地址是 `http://localhost:8787`。插件面板里可以修改服务地址。
+默认服务地址是 `https://koe-api.yuxino.cn`。本地开发时可以在插件面板里改成 `http://127.0.0.1:8787`。
 
 ## 使用真实 ASR
 
