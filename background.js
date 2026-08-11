@@ -35,8 +35,9 @@ async function handleVideoChanged(sender) {
   if (!tabId) return { ok: true, skipped: true };
   if (tabStates.has(tabId)) await stopAnalysis(tabId);
   let auto = false;
+  let translate;
   try {
-    ({ koeAutoAnalyze: auto } = await chrome.storage.local.get("koeAutoAnalyze"));
+    ({ koeAutoAnalyze: auto, koeTranslate: translate } = await chrome.storage.local.get(["koeAutoAnalyze", "koeTranslate"]));
   } catch {
     auto = false;
   }
@@ -44,7 +45,7 @@ async function handleVideoChanged(sender) {
   const pageUrl = String(sender.tab?.url || "");
   if (!/^https?:/i.test(pageUrl)) return { ok: true, skipped: true };
   try {
-    return await analyzeVideo({ tabId, serverUrl: LOCAL_SERVER_URL, apiToken: "", pageUrl });
+    return await analyzeVideo({ tabId, serverUrl: LOCAL_SERVER_URL, apiToken: "", pageUrl, translate });
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -54,8 +55,9 @@ async function handlePageReady(message, sender) {
   const tabId = sender?.tab?.id;
   if (!tabId) return { ok: true, skipped: true };
   let auto = false;
+  let translate;
   try {
-    ({ koeAutoAnalyze: auto } = await chrome.storage.local.get("koeAutoAnalyze"));
+    ({ koeAutoAnalyze: auto, koeTranslate: translate } = await chrome.storage.local.get(["koeAutoAnalyze", "koeTranslate"]));
   } catch {
     auto = false;
   }
@@ -64,7 +66,7 @@ async function handlePageReady(message, sender) {
   const pageUrl = String(sender.tab?.url || "");
   if (!/^https?:/i.test(pageUrl)) return { ok: true, skipped: true };
   try {
-    return await analyzeVideo({ tabId, serverUrl: LOCAL_SERVER_URL, apiToken: "", pageUrl });
+    return await analyzeVideo({ tabId, serverUrl: LOCAL_SERVER_URL, apiToken: "", pageUrl, translate });
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
