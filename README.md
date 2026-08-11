@@ -1,29 +1,53 @@
-# koe
+<div align="center">
+  <img src="./assets/koe-avatar.png" alt="Koe avatar" width="180">
+  <h1>Koe</h1>
+  <p><strong>先分析，再加字幕。</strong></p>
+  <p>Batch video analysis for accurate, timestamped captions.</p>
+</div>
 
-一个批处理优先的 Chrome 视频字幕实验项目：先取得完整视频，再分析整段音频并生成 VTT，最后把字幕加载回视频。它不做边播边听写，也不会在分析过程中显示中间字幕。
+<p align="center">
+  <img src="https://img.shields.io/badge/mode-batch-586b4f" alt="Batch mode">
+  <img src="https://img.shields.io/badge/chrome-MV3-4285F4" alt="Chrome MV3">
+  <img src="https://img.shields.io/badge/node-20%2B-5FA04E" alt="Node.js 20 or later">
+</p>
 
-`koe`（こえ / 声）参考 `ding-frame` 的时间轴思路，优先使用 Fun-ASR 的词级时间戳，再按标点、停顿和句长整理字幕。
+Koe（こえ / 声）是一个批处理优先的 Chrome 视频字幕项目。它会先取得完整视频，分析整段音频，生成带时间轴的 WebVTT，然后把字幕加载回原视频。
+
+Koe 不做边播边听写，也不会在分析过程中显示不完整的中间字幕。项目参考了 `ding-frame` 的时间轴思路，优先使用 Fun-ASR 的词级时间戳，再按标点、停顿和句长整理字幕。
+
+## 工作方式
+
+```text
+视频来源 → 下载 / 上传 → FFmpeg 提取音频 → Fun-ASR 分段识别
+        → 合并完整时间轴 → 生成 WebVTT → 视频加载字幕
+```
 
 ## 支持的来源
 
-- PornHub / XVideos 页面：服务端使用 `yt-dlp` 提取视频
-- 普通网页 HTML5 视频：插件尝试读取当前视频的直接源地址
-- 本地视频：在插件面板选择文件后上传分析
+| 来源 | 处理方式 | 说明 |
+| --- | --- | --- |
+| PornHub / XVideos 页面 | 服务端使用 `yt-dlp` 提取视频 | 站点改版、登录墙或 DRM 可能导致失败 |
+| 普通 HTML5 视频 | 插件尝试读取当前视频的直接源地址 | 适用于页面暴露可访问媒体地址的情况 |
+| 本地视频 | 在插件面板选择文件后上传 | 适合网页无法暴露源文件时使用 |
 
-站点改版、登录墙、DRM、不可下载的分片流会明确报错；项目不绕过 DRM 或访问控制。yt-dlp 的站点支持本身也会随网站变化，需要实际请求验证。
+Koe 不绕过 DRM、登录限制或访问控制。第三方站点的可用性取决于站点本身和 `yt-dlp` 的支持情况，请只处理你有权访问和使用的内容。
 
-## 运行
+## 快速开始
 
-需要 Node.js 20+，真实视频分析还需要 `ffmpeg` 和 `yt-dlp`。
+### 1. 启动服务端
+
+需要 Node.js 20+；真实视频分析还需要 `ffmpeg` 和 `yt-dlp`。
 
 ```bash
 npm install
 cp .env.example .env
-# 编辑 .env，填入 DASHSCOPE_API_KEY
+# 编辑 .env，至少填入 DASHSCOPE_API_KEY
 npm start
 ```
 
-然后在 Chrome 打开 `chrome://extensions`：
+### 2. 加载 Chrome 插件
+
+在 Chrome 打开 `chrome://extensions`：
 
 1. 打开「开发者模式」
 2. 点击「加载已解压的扩展程序」
@@ -31,11 +55,11 @@ npm start
 4. 打开视频页面，点击 Koe
 5. 点击 `Analyze video`
 
-插件默认连接 `https://koe-api.yuxino.cn`；本地开发时可以改为 `http://127.0.0.1:8787`。
+插件默认连接 `https://koe-api.yuxino.cn`。本地开发时，在插件面板将服务地址改为 `http://127.0.0.1:8787`。
 
-分析流程是：创建任务 → 下载/上传视频 → FFmpeg 提取 16 kHz 单声道音频 → 服务端内部分段调用 Fun-ASR → 合并完整时间轴 → 生成 VTT → 插件加载字幕并从头播放。
+## 配置
 
-## 服务端配置
+服务端配置写在 `.env` 中：
 
 ```env
 PORT=8787
@@ -48,34 +72,45 @@ FFMPEG_BIN=ffmpeg
 YTDLP_BIN=yt-dlp
 ```
 
-API token 只保存在 Chrome 本地存储，并通过 Bearer Token 发送。真实 ASR 的 Key 只保留在服务端。
+当服务端设置了 `KOE_API_TOKEN`，插件会把面板中保存的 token 以 Bearer Token 发送。真实 ASR Key 只保留在服务端，不会写入插件。
 
 ## API
 
-- `GET /health`：服务状态、模式、工具路径
-- `POST /api/jobs`：创建网页/直链任务，或用 `{ "upload": true }` 创建本地文件任务
-- `POST /api/jobs/:id/source`：上传本地视频二进制内容
-- `GET /api/jobs/:id`：查询任务进度
-- `GET /api/jobs/:id/vtt`：任务完成后获取完整 WebVTT
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `GET` | `/health` | 查看服务状态、模式和工具路径 |
+| `POST` | `/api/jobs` | 创建网页、直链或本地上传任务 |
+| `POST` | `/api/jobs/:id/source` | 上传本地视频二进制内容 |
+| `GET` | `/api/jobs/:id` | 查询任务进度 |
+| `GET` | `/api/jobs/:id/vtt` | 任务完成后获取完整 WebVTT |
 
 ## 部署
 
-服务器部署见 [DEPLOY.md](DEPLOY.md)。当前 API 地址是 `https://koe-api.yuxino.cn`。
+服务器部署说明见 [DEPLOY.md](DEPLOY.md)。当前线上 API 地址为 `https://koe-api.yuxino.cn`。
 
-## 开发检查
+## 开发
+
+运行检查：
 
 ```bash
 npm run check
 ```
 
-目录说明：
+主要目录：
 
-- `manifest.json`：Chrome MV3 配置
-- `background.js`：分析任务创建、轮询和字幕发布
-- `content.js`：视频源发现与完整 VTT 的时间轴覆盖层
-- `popup.*`：批处理控制面板
-- `src/server/media.js`：视频来源与 FFmpeg 适配
-- `src/server/jobs.js`：异步分析任务
-- `src/server/asr.js`：Fun-ASR 与完整音频分段
-- `src/server/transcript.js`：字幕聚合与 WebVTT
-- `test/`：Node 测试
+```text
+manifest.json       Chrome MV3 配置
+background.js       分析任务创建、轮询和字幕发布
+content.js          视频源发现与 VTT 时间轴覆盖层
+popup.*             批处理控制面板
+src/server/media.js 视频来源与 FFmpeg 适配
+src/server/jobs.js  异步分析任务
+src/server/asr.js   Fun-ASR 与完整音频分段
+src/server/transcript.js
+                    字幕聚合与 WebVTT
+test/               Node 测试
+```
+
+## 项目状态
+
+Koe 目前是一个持续迭代中的实验项目。字幕准确度会受到音频质量、说话人、语言混合、背景音乐以及 ASR 模型版本影响。

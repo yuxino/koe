@@ -14,7 +14,7 @@ body { width: 340px; min-height: 450px; margin: 0; overflow: hidden; background:
 body::before { position: fixed; inset: 0; pointer-events: none; content: ""; opacity: .2; background-image: radial-gradient(rgba(255,255,255,.12) .6px, transparent .6px); background-size: 5px 5px; mix-blend-mode: soft-light; }
 .shell { position: relative; padding: 22px 20px 17px; }
 .masthead { display: flex; align-items: center; gap: 11px; padding-bottom: 21px; border-bottom: 1px solid var(--line); }
-.mark { display: grid; width: 35px; height: 35px; place-items: center; border: 1px solid rgba(203,220,119,.55); border-radius: 50%; color: var(--moss); font: 700 21px/1 Georgia, serif; transform: rotate(-8deg); }
+.avatar { width: 35px; height: 35px; flex: 0 0 auto; border: 1px solid rgba(203,220,119,.55); border-radius: 50%; object-fit: cover; box-shadow: 0 5px 14px rgba(0,0,0,.22); }
 .kicker, .section-label { color: var(--moss); font: 600 9px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .14em; text-transform: uppercase; }
 h1 { margin: 3px 0 0; font-size: 22px; font-weight: 500; letter-spacing: -.02em; }
 .batch-mark { margin-left: auto; color: var(--moss); font: 700 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; }

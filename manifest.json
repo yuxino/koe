@@ -3,6 +3,11 @@
   "name": "Koe",
   "version": "0.1.0",
   "description": "Batch-analyze videos first, then load accurate timestamped captions.",
+  "icons": {
+    "16": "assets/koe-avatar-16.png",
+    "48": "assets/koe-avatar-48.png",
+    "128": "assets/koe-avatar-128.png"
+  },
   "permissions": [
     "activeTab",
     "scripting",
