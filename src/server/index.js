@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve, join } from "node:path";
 import { createJobManager } from "./jobs.js";
-import { analyzeCaptureChunk } from "./capture.js";
 
 loadDotEnv();
 
@@ -69,22 +68,6 @@ export function createServer(options = {}) {
         if (!isAuthorized(request, config.apiToken)) return unauthorized(response);
         const job = await jobs.createJob(await readJson(request));
         sendJson(response, 202, job);
-        return;
-      }
-
-      if (request.method === "POST" && url.pathname === "/api/capture/analyze") {
-        if (!isAuthorized(request, config.apiToken)) return unauthorized(response);
-        const startMs = Number(request.headers["x-start-ms"] || 0);
-        const translate = String(request.headers["x-translate"] || "1") !== "0";
-        const audioBuffer = await readBody(request, 32 * 1024 * 1024);
-        const lines = await analyzeCaptureChunk({
-          audioBuffer,
-          startMs,
-          ffmpegBin: config.ffmpegBin,
-          apiKey: config.apiKey,
-          translate
-        });
-        sendJson(response, 200, { ok: true, lines });
         return;
       }
 
