@@ -21,6 +21,9 @@
       .card { padding: 15px 24px 17px; border: 1px solid rgba(255, 248, 224, .18); border-radius: 14px; background: linear-gradient(135deg, rgba(20, 29, 25, .94), rgba(43, 49, 37, .84)); box-shadow: 0 18px 60px rgba(0, 0, 0, .32); }
       .text { margin: 0; font-size: clamp(19px, 2.2vw, 30px); line-height: 1.34; letter-spacing: .03em; text-shadow: 0 2px 16px rgba(0, 0, 0, .38); white-space: pre-line; }
       .meta { margin-top: 9px; color: rgba(251, 244, 223, .56); font: 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em; }
+      .stage.compact .card { padding: 8px 15px 9px; border-radius: 10px; box-shadow: 0 10px 32px rgba(0, 0, 0, .26); }
+      .stage.compact .text { font-size: 13px; }
+      .stage.compact .meta { display: none; }
     </style>
     <div class="stage" aria-live="polite" aria-atomic="true">
       <div class="eyebrow"><span class="dot"></span><span class="label">KOE · READY</span></div>
@@ -85,7 +88,6 @@
       if (message.status === "ready") {
         subtitleReady = true;
         analysisDone = true;
-        if (!showingCue) showStatus("字幕已就绪", "点击播放后自动显示字幕", "READY");
       }
       if (message.status === "idle") {
         subtitleReady = false;
@@ -106,11 +108,7 @@
         if (!alreadyStarted) {
           activeVideo.currentTime = 0;
           activeVideo.play().catch(() => showStatus("字幕已就绪", "请点击视频播放", "READY"));
-        } else {
-          showStatus("字幕已就绪", "已补全当前进度", "READY");
         }
-      } else {
-        showStatus("字幕已就绪", "请回到视频页面", "READY");
       }
       startSubtitleClock();
       refreshNativeTrack();
@@ -231,7 +229,16 @@
         return;
       }
       showingCue = false;
-      if (analysisDone) showStatus("字幕已就绪", "点击播放后自动显示字幕", "READY");
+      if (analysisDone) {
+        if (lastCue) show(lastCue.text, lastCue.meta, "READY");
+        else {
+          text.textContent = "";
+          meta.textContent = "";
+          label.textContent = "KOE · READY";
+          stage.classList.remove("compact");
+          stage.classList.add("visible");
+        }
+      }
     }, 100);
   }
 
@@ -239,6 +246,7 @@
     text.textContent = value;
     meta.textContent = detail;
     label.textContent = `KOE · ${mode}`;
+    stage.classList.toggle("compact", mode === "ANALYZING");
     stage.classList.add("visible");
   }
 
