@@ -189,7 +189,7 @@
     while (track.cues && track.cues.length) track.removeCue(track.cues[0]);
     for (const cue of cues) {
       try {
-        const nativeText = [cue.translated, cue.original].filter(Boolean).join("\n");
+        const nativeText = cue.translated || cue.original;
         track.addCue(new VTTCue(cue.startMs / 1_000, Math.max(cue.endMs / 1_000, cue.startMs / 1_000 + 0.2), nativeText));
       } catch {
         // 单条失效不影响其它
@@ -255,7 +255,7 @@
 
   function show(cue, detail, mode) {
     translated.textContent = cue.translated || cue.original || "";
-    original.textContent = cue.translated && cue.original ? cue.original : "";
+    original.textContent = "";
     meta.textContent = detail;
     label.textContent = `KOE · ${mode}`;
     stage.classList.remove("compact");
