@@ -40,7 +40,6 @@
   let subtitleTimer;
   let subtitleReady = false;
   let analysisDone = false;
-  let lastCue = null;
   let showingCue = false;
 
   const STAGE_TEXT = {
@@ -92,7 +91,6 @@
       if (message.status === "idle") {
         subtitleReady = false;
         analysisDone = false;
-        lastCue = null;
         showingCue = false;
         hide();
       }
@@ -220,26 +218,24 @@
       const cue = cues.find((item) => timeMs >= item.startMs && timeMs < item.endMs);
       if (cue) {
         showingCue = true;
-        lastCue = { text: cue.text, meta: `KOE · ${formatTime(cue.startMs)}` };
-        show(cue.text, lastCue.meta, "READY");
+        show(cue.text, `KOE · ${formatTime(cue.startMs)}`, "READY");
         return;
       }
       if (!activeVideo.paused) {
-        if (lastCue) show(lastCue.text, lastCue.meta, "READY");
+        if (analysisDone) clearCue();
         return;
       }
       showingCue = false;
-      if (analysisDone) {
-        if (lastCue) show(lastCue.text, lastCue.meta, "READY");
-        else {
-          text.textContent = "";
-          meta.textContent = "";
-          label.textContent = "KOE · READY";
-          stage.classList.remove("compact");
-          stage.classList.add("visible");
-        }
-      }
+      if (analysisDone) clearCue();
     }, 100);
+  }
+
+  function clearCue() {
+    text.textContent = "";
+    meta.textContent = "";
+    label.textContent = "KOE · READY";
+    stage.classList.remove("compact");
+    stage.classList.add("visible");
   }
 
   function showStatus(value, detail, mode) {
