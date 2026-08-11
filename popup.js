@@ -58,6 +58,7 @@ async function refreshState() {
 
 async function analyze() {
   await refreshActiveTab();
+  await refreshVideos();
   if (!activeTab?.id) {
     elements.engineStatus.textContent = "无法分析";
     elements.engineDetail.textContent = "没有找到当前标签页。";
@@ -65,11 +66,13 @@ async function analyze() {
   }
   const selection = elements.videoSelect?.value || undefined;
   const translate = elements.translateToggle.checked;
-  const selectedVideo = selection
-    ? videos.find((video) => `${video.frameId}:${video.index}` === selection)
-    : videos[0];
-  if (selectedVideo && (!selectedVideo.sourceUrl || selectedVideo.sourceUrl === activeTab.url)) {
+  const candidates = selection
+    ? videos.filter((video) => `${video.frameId}:${video.index}` === selection)
+    : videos;
+  const usable = candidates.find((video) => video.sourceUrl && isUsableSource(video.sourceUrl, activeTab.url));
+  if (!usable) {
     elements.captureStatus.textContent = "这个网站拿不到视频直链，已自动切换为采集模式";
+    elements.hint.textContent = "自动切换为采集：播放视频即可实时出字幕";
     await toggleCapture();
     return;
   }
@@ -82,7 +85,7 @@ async function analyze() {
       pageUrl: activeTab.url,
       serverUrl: LOCAL_SERVER_URL,
       apiToken: "",
-      selection,
+      selection: `${usable.frameId}:${usable.index}`,
       translate
     });
     if (!response?.ok) throw new Error(response?.error || "无法创建分析任务。");
@@ -97,6 +100,18 @@ async function analyze() {
       : "请确认当前页面的视频已经开始播放。";
   } finally {
     elements.toggle.disabled = false;
+  }
+}
+
+function isUsableSource(sourceUrl, tabUrl) {
+  if (!/^https?:/i.test(sourceUrl)) return false;
+  if (!tabUrl) return true;
+  try {
+    const source = new URL(sourceUrl);
+    const page = new URL(tabUrl);
+    return !(source.hostname === page.hostname && source.pathname === page.pathname);
+  } catch {
+    return sourceUrl !== tabUrl;
   }
 }
 

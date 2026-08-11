@@ -28,7 +28,15 @@ async function startCapture({ streamId, serverUrl, offsetMs }) {
   // tabCapture 会静音标签页，把采集到的声音在后台播回去，保证能听到
   monitorAudio = new Audio();
   monitorAudio.srcObject = stream;
-  monitorAudio.play().catch(() => undefined);
+  monitorAudio.play().catch(() => {
+    try {
+      const context = new AudioContext();
+      const sourceNode = context.createMediaStreamSource(stream);
+      sourceNode.connect(context.destination);
+    } catch {
+      // 自动播放被拦时保持录制，声音缺失由浏览器策略决定
+    }
+  });
   captureServerUrl = String(serverUrl || "").replace(/\/+$/, "");
   captureOffsetMs = Number(offsetMs) || 0;
   chunkIndex = 0;
