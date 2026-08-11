@@ -175,6 +175,17 @@
     chrome.runtime.sendMessage({ type: "POSITION_UPDATE", timeMs, playing: !video.paused }).catch(() => undefined);
   }, 5_000);
 
+  // 按下播放时自动开始分析（静音预览缩略图不会触发，已有任务时不重复）
+  let lastPlayTriggerAt = 0;
+  document.addEventListener("play", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLVideoElement) || target.muted) return;
+    const now = Date.now();
+    if (now - lastPlayTriggerAt < 3_000) return;
+    lastPlayTriggerAt = now;
+    chrome.runtime.sendMessage({ type: "PLAY_ANALYZE" }).catch(() => undefined);
+  }, true);
+
   // 视频切换：清掉旧字幕并通知后台
   document.addEventListener("emptied", (event) => {
     const target = event.target;

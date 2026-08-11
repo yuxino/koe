@@ -26,6 +26,7 @@ async function handleMessage(message, sender) {
   if (message.type === "LIST_VIDEOS") return listVideos(Number(message.tabId));
   if (message.type === "SEEK_PRIORITIZE") return seekPrioritize(Number(message.tabId), Number(message.timeMs));
   if (message.type === "VIDEO_CHANGED") return handleVideoChanged(sender);
+  if (message.type === "PLAY_ANALYZE") return handlePlayAnalyze(message, sender);
   if (message.type === "POSITION_UPDATE") return handlePositionUpdate(message, sender);
   if (message.type === "GET_STATE") {
     const state = tabStates.get(Number(message.tabId));
@@ -41,6 +42,22 @@ async function handleVideoChanged(sender) {
   if (now - (lastVideoChangeAt.get(tabId) || 0) < 1_500) return { ok: true, skipped: true };
   lastVideoChangeAt.set(tabId, now);
   if (tabStates.has(tabId)) await stopAnalysis(tabId);
+  const pageUrl = String(sender.tab?.url || "");
+  if (!/^https?:/i.test(pageUrl)) return { ok: true, skipped: true };
+  try {
+    return await analyzeVideo({ tabId, serverUrl: LOCAL_SERVER_URL, apiToken: "", pageUrl });
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+async function handlePlayAnalyze(message, sender) {
+  const tabId = sender?.tab?.id;
+  if (!tabId) return { ok: true, skipped: true };
+  const state = tabStates.get(tabId);
+  if (state && ["analyzing", "downloading", "uploading_audio", "queued"].includes(state.jobStatus)) {
+    return { ok: true, skipped: true };
+  }
   const pageUrl = String(sender.tab?.url || "");
   if (!/^https?:/i.test(pageUrl)) return { ok: true, skipped: true };
   try {
