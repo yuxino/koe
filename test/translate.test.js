@@ -60,3 +60,21 @@ test("retries translation on transient failures", async () => {
   assert.equal(calls, 2);
   assert.equal(lines[0].translated, "你好");
 });
+
+test("keeps line alignment when some lines are empty", async () => {
+  const lines = await translateLines({
+    lines: [
+      { startMs: 0, endMs: 1_000, text: "hello" },
+      { startMs: 1_000, endMs: 2_000, text: "" },
+      { startMs: 2_000, endMs: 3_000, text: "world" }
+    ],
+    apiKey: "test-key",
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({ output: { choices: [{ message: { content: "1. 你好\n2. 世界" } }] } })
+    })
+  });
+  assert.equal(lines[0].translated, "你好");
+  assert.equal(lines[1].translated, undefined);
+  assert.equal(lines[2].translated, "世界");
+});

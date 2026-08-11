@@ -12,14 +12,17 @@ export async function translateLines({
   fetchImpl = fetch
 }) {
   if (!lines?.length || !apiKey) return lines;
-  const texts = lines.map((line) => String(line.text || "")).filter((text) => text.trim());
-  if (!texts.length) return lines;
+  const entries = lines
+    .map((line, index) => ({ index, text: String(line.text || "").trim() }))
+    .filter((entry) => entry.text);
+  if (!entries.length) return lines;
+  const texts = entries.map((entry) => entry.text);
 
   const chunks = [];
   for (let offset = 0; offset < texts.length; offset += batchSize) {
     chunks.push(texts.slice(offset, offset + batchSize));
   }
-  const translated = new Array(texts.length).fill(null);
+  const translated = new Array(lines.length).fill(null);
   let cursor = 0;
 
   async function worker() {
@@ -30,7 +33,7 @@ export async function translateLines({
       const offset = chunkIndex * batchSize;
       const result = await translateChunk({ texts: chunk, apiKey, model, target, timeoutMs, fetchImpl });
       for (let index = 0; index < chunk.length; index += 1) {
-        if (result[index]) translated[offset + index] = result[index];
+        if (result[index]) translated[entries[offset + index].index] = result[index];
       }
     }
   }
