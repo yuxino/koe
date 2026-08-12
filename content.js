@@ -57,6 +57,7 @@
   let processing = false;
   let lastErrorShown = "";
   let errorShown = false;
+  let lastSeenSource = "";
 
   const STAGE_TEXT = {
     downloading: "正在下载 / 提取声音",
@@ -109,6 +110,7 @@
     if (message.type === "SUBTITLE_READY") {
       errorShown = false;
       processing = false;
+      lastSeenSource = currentVideoSource();
       cues = acceptCues(parseVtt(message.vtt || ""));
       activeVideo = findVideo();
       subtitleReady = true;
@@ -126,6 +128,7 @@
     }
     if (message.type === "PARTIAL_SUBTITLES") {
       errorShown = false;
+      lastSeenSource = currentVideoSource();
       cues = acceptCues(parseVtt(message.vtt || ""));
       subtitleReady = true;
       if (cues.length) tryAutoPlay();
@@ -215,6 +218,29 @@
     orb.classList.toggle("ready", subtitleReady && !processing);
   }
   window.setInterval(updateAnalyzeButton, 1_000);
+  window.setInterval(trackVideoSource, 1_000);
+
+  function currentVideoSource() {
+    const video = (activeVideo?.isConnected ? activeVideo : null) || findVideo();
+    return video ? (video.currentSrc || video.src || "") : "";
+  }
+
+  function trackVideoSource() {
+    const source = currentVideoSource();
+    if (!source) return;
+    if (lastSeenSource && source !== lastSeenSource) {
+      lastSeenSource = source;
+      cues = [];
+      processing = false;
+      errorShown = false;
+      subtitleReady = false;
+      showingCue = false;
+      hide();
+      chrome.runtime.sendMessage({ type: "VIDEO_CHANGED" }).catch(() => undefined);
+      return;
+    }
+    lastSeenSource = source;
+  }
 
   // 悬浮球可拖动；拖动的位移超过阈值才算拖，否则视为点击
   let orbDragging = false;
@@ -337,11 +363,14 @@
 
   function findVideo() {
     const videos = [...document.querySelectorAll("video")];
+    const score = (video) => {
+      const area = Number(video.videoWidth || 0) * Number(video.videoHeight || 0);
+      return area + (video.muted ? 0 : 1_000_000) + (video.paused ? 0 : 500_000);
+    };
     const main = videos
-      .filter((video) => Number(video.videoWidth) >= 320 && Number(video.videoHeight) >= 180)
-      .sort((left, right) => (right.videoWidth * right.videoHeight) - (left.videoWidth * left.videoHeight))[0];
-    return main || videos
-      .sort((left, right) => (right.videoWidth * right.videoHeight) - (left.videoWidth * left.videoHeight))[0] || null;
+      .filter((video) => Number(video.videoWidth) >= 320 && Number(video.videoHeight) >= 180 && (video.currentSrc || video.src))
+      .sort((left, right) => score(right) - score(left))[0];
+    return main || videos.sort((left, right) => score(right) - score(left))[0] || null;
   }
 
   function findVideoSource() {

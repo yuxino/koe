@@ -42,6 +42,13 @@ async function handleVideoChanged(sender) {
   const now = Date.now();
   if (now - (lastVideoChangeAt.get(tabId) || 0) < 1_500) return { ok: true, skipped: true };
   lastVideoChangeAt.set(tabId, now);
+  const pageUrl = String(sender.tab?.url || "");
+  if (!/^https?:/i.test(pageUrl)) return { ok: true, skipped: true };
+  const state = tabStates.get(tabId);
+  const source = await discoverVideoSource(tabId, pageUrl, undefined).catch(() => null);
+  if (source?.sourceUrl && state?.sourceUrl && normalizeSourceKey(source.sourceUrl) === normalizeSourceKey(state.sourceUrl)) {
+    return { ok: true, skipped: true };
+  }
   if (tabStates.has(tabId)) await stopAnalysis(tabId);
   return handlePageReady({}, sender);
 }
@@ -113,7 +120,7 @@ async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl, selection, tr
     translate,
     startMs: Number(startMs) || 0
   });
-  return beginWatching({ tabId, frameId: source.frameId, serverUrl, apiToken, job, pageUrl: jobPageUrl, selection, translate });
+  return beginWatching({ tabId, frameId: source.frameId, serverUrl, apiToken, job, pageUrl: jobPageUrl, selection, translate, sourceUrl: source.sourceUrl });
 }
 
 async function watchJob({ tabId, frameId, serverUrl, apiToken, jobId }) {
@@ -121,7 +128,7 @@ async function watchJob({ tabId, frameId, serverUrl, apiToken, jobId }) {
   return beginWatching({ tabId: Number(tabId), frameId: Number(frameId) || 0, serverUrl, apiToken, job });
 }
 
-async function beginWatching({ tabId, frameId = 0, serverUrl, apiToken, job, pageUrl = "", selection = null, translate }) {
+async function beginWatching({ tabId, frameId = 0, serverUrl, apiToken, job, pageUrl = "", selection = null, translate, sourceUrl = "" }) {
   stopPolling(tabId);
   const previous = tabStates.get(tabId);
   if (previous?.jobId && previous.jobId !== job.id) void cancelJob(previous);
@@ -142,6 +149,7 @@ async function beginWatching({ tabId, frameId = 0, serverUrl, apiToken, job, pag
     pageUrl,
     selection,
     translate,
+    sourceUrl: String(sourceUrl || ""),
     retried: false
   };
   tabStates.set(tabId, state);
@@ -230,7 +238,8 @@ async function seekPrioritize(tabId, timeMs) {
       job,
       pageUrl: state.pageUrl || source.pageUrl,
       selection: state.selection,
-      translate: state.translate
+      translate: state.translate,
+      sourceUrl: source.sourceUrl
     });
   } catch {
     // 重新发现失败时保留原任务
@@ -491,6 +500,25 @@ async function forwardToTab(tabId, message, frameId = 0) {
 
 function publicState(state) {
   return { status: state.status, jobId: state.jobId, startedAt: state.startedAt, progress: state.progress, jobStatus: state.jobStatus, stageDetail: state.stageDetail, hasDuration: Boolean(state.hasDuration), fromCache: Boolean(state.fromCache) };
+}
+
+function normalizeSourceKey(value) {
+  try {
+    const url = new URL(String(value || ""));
+    url.hash = "";
+    const volatile = new Set([
+      "secure", "token", "signature", "sig", "expires", "expiration", "expiry", "e",
+      "key", "auth", "access_token", "x-id", "x-amz-signature", "x-amz-credential",
+      "x-amz-date", "x-amz-expires", "x-amz-signedheaders", "x-amz-security-token",
+      "awsaccesskeyid", "policy", "credential"
+    ]);
+    for (const param of [...url.searchParams.keys()]) {
+      if (volatile.has(String(param).toLowerCase())) url.searchParams.delete(param);
+    }
+    return url.toString();
+  } catch {
+    return String(value || "");
+  }
 }
 
 async function parseResponse(response, fallback) {
