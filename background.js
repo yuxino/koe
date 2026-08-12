@@ -1,3 +1,4 @@
+const LOCAL_SERVER_URL = "http://127.0.0.1:8787";
 const tabStates = new Map();
 const pollers = new Map();
 const recoveryAttempts = new Map();

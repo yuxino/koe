@@ -17,10 +17,14 @@ export function isSupportedPageUrl(value) {
 
 export function validateSourceRequest({ pageUrl = "", sourceUrl = "" } = {}, { allowAnyPage = false } = {}) {
   if (!pageUrl && !sourceUrl) throw new Error("video_source_required");
-  if (pageUrl) assertHttpUrl(pageUrl, "page_url");
   if (sourceUrl) {
     if (allowAnyPage) assertHttpUrl(sourceUrl, "source_url");
     else assertPublicHttpUrl(sourceUrl, "source_url");
+  }
+  // 页面地址只作为媒体下载的 Referer；只要视频源是公开直链，允许本地/内网页面地址
+  if (pageUrl) {
+    if (sourceUrl) assertHttpUrlAllowLocal(pageUrl, "page_url");
+    else assertHttpUrl(pageUrl, "page_url");
   }
   if (!sourceUrl && !allowAnyPage && !isSupportedPageUrl(pageUrl)) {
     throw new Error("unsupported_page_source");
@@ -242,6 +246,12 @@ function assertHttpUrl(value, field) {
   try { url = new URL(value); } catch { throw new Error(`${field}_invalid`); }
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`${field}_scheme_not_allowed`);
   if (isPrivateHostname(url.hostname)) throw new Error(`${field}_private_host_not_allowed`);
+}
+
+function assertHttpUrlAllowLocal(value, field) {
+  let url;
+  try { url = new URL(value); } catch { throw new Error(`${field}_invalid`); }
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`${field}_scheme_not_allowed`);
 }
 
 function assertPublicHttpUrl(value, field) {
