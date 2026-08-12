@@ -46,6 +46,7 @@ async function handle(message, sender) {
   if (message.type === "GET_STATE") return { ok: true, state: publicState(tabStates.get(tabId)) };
   if (message.type === "CAPTURE_LINES") return forwardCaptureLines(message, "LIVE_SUBTITLES");
   if (message.type === "CAPTURE_PARTIAL") return forwardCaptureLines(message, "LIVE_PARTIAL");
+  if (message.type === "CAPTURE_TRANSLATED") return forwardCaptureLines(message, "LIVE_TRANSLATED");
   if (message.type === "CAPTURE_ERROR") return handleCaptureError(message);
   if (message.type === "START_CAPTURE") return startCaptureForTab(message);
   if (message.type === "STOP_CAPTURE") return stopCaptureForTab(Number(message.tabId));
@@ -256,7 +257,8 @@ async function forwardCaptureLines(message, type) {
   const sent = await forwardToTab(tabId, {
     type,
     jobId: state.jobId,
-    lines
+    lines,
+    seq: message.seq
   }, state.frameId);
   if (sent?.ignored && !state.contentScriptPinged) {
     // 页面里还没有字幕脚本（比如扩展重载后没刷新页面）：

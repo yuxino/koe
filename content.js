@@ -47,6 +47,7 @@
   let lastPageReadyAt = 0;
   let lastAckAt = 0;
   let liveHideTimer = null;
+  let latestFinalSeq = 0;
 
   chrome.runtime.onMessage.addListener((message) => {
     if (!message || typeof message.type !== "string") return false;
@@ -55,6 +56,7 @@
       ack(`state:${message.status}`, true);
       if (message.translate !== undefined) translateOn = Boolean(message.translate);
       if (message.status === "live") {
+        latestFinalSeq = 0;
         hideStatus();
       } else if (message.captureNeedsGesture) {
         showStatus(message.stageDetail || "点一下 Koe 图标，立即开始实时字幕");
@@ -66,25 +68,39 @@
       return false;
     }
 
-    if (message.type === "LIVE_SUBTITLES" || message.type === "LIVE_PARTIAL") {
+    if (message.type === "LIVE_PARTIAL") {
       try {
         const lines = Array.isArray(message.lines) ? message.lines : [];
         const line = lines[lines.length - 1];
-        ack(`recv:${message.type}:${lines.length}:${String(line?.text || line?.translated || "").slice(0, 20)}`);
-        if (line && (line.text || line.translated)) {
-          const text = translateOn
-            ? (line.translated || line.text || "")
-            : (line.text || line.translated || "");
-          if (text) {
-            subtitleEl.textContent = text;
-            subtitleEl.classList.add("visible");
-            ack(`shown:${String(text).slice(0, 20)}`);
-            clearTimeout(liveHideTimer);
-            liveHideTimer = setTimeout(() => {
-              subtitleEl.classList.remove("visible");
-            }, 6_000);
-          }
-        }
+        const text = line?.text;
+        if (text) showSubtitle(text);
+      } catch (error) {
+        ack(`display-error:${String(error).slice(0, 60)}`, true);
+      }
+      return false;
+    }
+
+    if (message.type === "LIVE_SUBTITLES") {
+      try {
+        if (message.seq) latestFinalSeq = Number(message.seq);
+        const lines = Array.isArray(message.lines) ? message.lines : [];
+        const line = lines[lines.length - 1];
+        const text = line?.text;
+        if (text) showSubtitle(text);
+      } catch (error) {
+        ack(`display-error:${String(error).slice(0, 60)}`, true);
+      }
+      return false;
+    }
+
+    if (message.type === "LIVE_TRANSLATED") {
+      try {
+        if (!translateOn) return false;
+        if (Number(message.seq) !== latestFinalSeq) return false;
+        const lines = Array.isArray(message.lines) ? message.lines : [];
+        const line = lines[lines.length - 1];
+        const text = line?.translated;
+        if (text) showSubtitle(text);
       } catch (error) {
         ack(`display-error:${String(error).slice(0, 60)}`, true);
       }
@@ -95,6 +111,7 @@
       clearTimeout(liveHideTimer);
       subtitleEl.textContent = "";
       subtitleEl.classList.remove("visible");
+      latestFinalSeq = 0;
       return false;
     }
     return false;
@@ -184,6 +201,16 @@
   }
   function hideStatus() {
     statusEl.classList.remove("visible");
+  }
+
+  function showSubtitle(text) {
+    subtitleEl.textContent = text;
+    subtitleEl.classList.add("visible");
+    ack(`shown:${String(text).slice(0, 20)}`);
+    clearTimeout(liveHideTimer);
+    liveHideTimer = setTimeout(() => {
+      subtitleEl.classList.remove("visible");
+    }, 6_000);
   }
 
   function ack(stage, force = false) {

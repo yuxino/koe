@@ -5,7 +5,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { createCaptureManager } from "../src/server/capture.js";
 import { createServer } from "../src/server/index.js";
 
-test("capture ws streams pcm frames into the realtime asr and returns translated lines", async (t) => {
+test("capture ws streams pcm frames into the realtime asr and returns final lines", async (t) => {
   const fake = createFakeAsr({ finalText: "你好世界" });
   const manager = createCaptureManager({
     apiKey: "test-key",
@@ -27,7 +27,7 @@ test("capture ws streams pcm frames into the realtime asr and returns translated
   assert.equal(fake.frames[0].length, 3_200, "pcm 按 100ms 帧切块后发送");
 });
 
-test("capture ws attaches the translation and sends it to the client", async (t) => {
+test("capture ws sends original immediately and follows with the translation", async (t) => {
   const fake = createFakeAsr({ finalText: "Hello world" });
   const manager = createCaptureManager({
     apiKey: "test-key",
@@ -43,9 +43,13 @@ test("capture ws attaches the translation and sends it to the client", async (t)
   await client.waitFor((message) => message.type === "ready");
 
   client.send(Buffer.alloc(9_000, 1));
-  const message = await client.waitFor((event) => event.type === "lines");
-  assert.equal(message.lines[0].text, "Hello world");
-  assert.equal(message.lines[0].translated, "译:Hello world");
+  const original = await client.waitFor((event) => event.type === "lines");
+  assert.equal(original.lines[0].text, "Hello world");
+  assert.equal(original.lines[0].translated, undefined);
+
+  const translated = await client.waitFor((event) => event.type === "translated");
+  assert.equal(translated.seq, original.seq);
+  assert.equal(translated.lines[0].translated, "译:Hello world");
 });
 
 test("capture ws forwards in-progress partial sentences", async (t) => {

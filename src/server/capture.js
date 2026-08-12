@@ -16,6 +16,7 @@ export function createCaptureManager({
   translateAcquire = null,
   translate = translateLines
 } = {}) {
+  let emitSeq = 0;
   const sessions = new Set();
   const translateSemaphore = translateAcquire || createSemaphore(Number(process.env.KOE_TRANSLATE_CONCURRENCY || 4));
   const maxSessions = Math.max(1, Number(process.env.KOE_CAPTURE_MAX_SESSIONS || 1));
@@ -39,6 +40,7 @@ export function createCaptureManager({
       keepalive: null,
       sendFailed: false,
       filter: createLineFilter(),
+      latestFinalSeq: 0,
       finished: false,
       disposed: false
     };
@@ -111,7 +113,7 @@ export function createCaptureManager({
     trace("capture-asr-ready");
   }
 
-  async function handleSentence(session, sentence, final) {
+  function handleSentence(session, sentence, final) {
     const rawLines = sentenceToLines(sentence).map((line) => ({
       ...line,
       startMs: Math.max(0, line.startMs - session.injectedMs),
@@ -119,26 +121,37 @@ export function createCaptureManager({
     }));
     if (!rawLines.length || session.disposed) return;
     // 过滤单字母/纯符号等识别噪声（比如把 “T” 当字幕的误识别）
-    let lines = session.filter(rawLines);
+    const lines = session.filter(rawLines);
     if (!lines.length) return;
+    const seq = ++emitSeq;
     trace(`capture-send ${final ? "final" : "partial"} n=${lines.length} text=${lines.map((line) => String(line.text || "")).join(" ").slice(0, 60)}`);
     if (!final) {
-      sendJson(session.ws, { type: "partial", lines });
+      sendJson(session.ws, { type: "partial", seq, lines });
       return;
     }
-    if (session.translate) {
+    // 最终句先把原文立刻发出去，保证字幕跟着说话节奏走；翻译再异步补发
+    session.latestFinalSeq = seq;
+    sendJson(session.ws, { type: "lines", seq, lines });
+    if (!session.translate) return;
+    void translateAfterFinal(session, seq, lines);
+  }
+
+  async function translateAfterFinal(session, seq, lines) {
+    let translated;
+    try {
+      const release = await translateSemaphore.acquire();
       try {
-        const release = await translateSemaphore.acquire();
-        try {
-          lines = await translate({ lines, apiKey });
-        } finally {
-          release();
-        }
-      } catch {
-        // 翻译失败保留原文
+        translated = await translate({ lines, apiKey });
+      } finally {
+        release();
       }
+    } catch {
+      // 翻译失败保留原文，不再补发
+      return;
     }
-    if (!session.disposed) sendJson(session.ws, { type: "lines", lines });
+    // 期间如果已经出现更新的“整句”，就不覆盖新字幕；普通中间句不算
+    if (session.disposed || !session.translate || seq !== session.latestFinalSeq) return;
+    sendJson(session.ws, { type: "translated", seq, lines: translated });
   }
 
   function feedPcm(session, chunk) {

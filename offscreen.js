@@ -141,7 +141,18 @@ function handleServerMessage(event) {
     if (!lines.length) return;
     chrome.runtime.sendMessage({
       type: message.type === "lines" ? "CAPTURE_LINES" : "CAPTURE_PARTIAL",
-      lines
+      lines,
+      seq: message.seq
+    }).catch(() => undefined);
+    return;
+  }
+  if (message.type === "translated") {
+    const lines = Array.isArray(message.lines) ? message.lines : [];
+    if (!lines.length) return;
+    chrome.runtime.sendMessage({
+      type: "CAPTURE_TRANSLATED",
+      lines,
+      seq: message.seq
     }).catch(() => undefined);
     return;
   }
