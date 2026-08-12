@@ -52,6 +52,53 @@ test("capture ws sends original immediately and follows with the translation", a
   assert.equal(translated.lines[0].translated, "译:Hello world");
 });
 
+test("capture ws keeps a pending translation when only a newer partial arrives", async (t) => {
+  let callbacks = null;
+  const frames = [];
+  const fake = {
+    frames,
+    async connect(cb) { callbacks = cb; },
+    async sendFrame(frame) {
+      frames.push(Buffer.from(frame));
+      if (frames.length === 1) {
+        callbacks.onSentence({ text: "Hello world", begin_time: 0, end_time: 2_000, sentence_end: true }, true);
+      } else if (frames.length === 2) {
+        callbacks.onSentence({ text: "How are", begin_time: 2_000, end_time: 2_800, sentence_end: false }, false);
+      }
+    },
+    async finish() { return { duration: 0 }; },
+    close() {},
+    terminate() {}
+  };
+
+  let releaseTranslation;
+  const translationGate = new Promise((resolve) => { releaseTranslation = resolve; });
+  const manager = createCaptureManager({
+    apiKey: "test-key",
+    asrFactory: () => fake,
+    translate: async ({ lines }) => {
+      await translationGate;
+      return lines.map((line) => ({ ...line, translated: `译:${line.text}` }));
+    }
+  });
+  const { httpServer, wss, port } = await listen((ws) => manager.handleConnection(ws));
+  t.after(() => { httpServer.close(); wss.close(); });
+
+  const client = await connect(`ws://127.0.0.1:${port}/api/capture/ws`);
+  t.after(() => client.close());
+  client.send(JSON.stringify({ type: "start", format: "pcm", translate: true }));
+  await client.waitFor((message) => message.type === "ready");
+
+  client.send(Buffer.alloc(9_000, 1));
+  const original = await client.waitFor((event) => event.type === "lines");
+  await client.waitFor((event) => event.type === "partial");
+
+  releaseTranslation();
+  const translated = await client.waitFor((event) => event.type === "translated");
+  assert.equal(translated.seq, original.seq);
+  assert.equal(translated.lines[0].translated, "译:Hello world");
+});
+
 test("capture ws forwards in-progress partial sentences", async (t) => {
   const fake = createFakeAsr({ partialText: "正在…" });
   const manager = createCaptureManager({
