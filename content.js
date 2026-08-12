@@ -109,7 +109,7 @@
     if (message.type === "SUBTITLE_READY") {
       errorShown = false;
       processing = false;
-      cues = parseVtt(message.vtt || "");
+      cues = acceptCues(parseVtt(message.vtt || ""));
       activeVideo = findVideo();
       subtitleReady = true;
       analysisDone = true;
@@ -126,7 +126,7 @@
     }
     if (message.type === "PARTIAL_SUBTITLES") {
       errorShown = false;
-      cues = parseVtt(message.vtt || "");
+      cues = acceptCues(parseVtt(message.vtt || ""));
       subtitleReady = true;
       if (cues.length) tryAutoPlay();
       startSubtitleClock();
@@ -401,6 +401,12 @@
         translated: bodyLines[1] || ""
       };
     }).filter((cue) => cue && (cue.original || cue.translated) && cue.endMs > cue.startMs);
+  }
+
+  // 双语模式下只显示中文：只要存在翻译，就过滤掉只有原文的实时草稿（原文隐藏）
+  function acceptCues(parsed) {
+    const hasTranslation = parsed.some((cue) => Boolean(cue.translated));
+    return hasTranslation ? parsed.filter((cue) => Boolean(cue.translated)) : parsed;
   }
 
   function parseVttTime(value) {
