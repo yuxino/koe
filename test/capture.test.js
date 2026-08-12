@@ -117,6 +117,42 @@ test("capture ws forwards in-progress partial sentences", async (t) => {
   assert.equal(partial.lines[0].text, "正在…");
 });
 
+test("capture ws drops early audio while the ASR is still connecting", async (t) => {
+  let callbacks = null;
+  let releaseConnect;
+  const connectGate = new Promise((resolve) => { releaseConnect = resolve; });
+  const frames = [];
+  const fake = {
+    frames,
+    async connect(cb) { callbacks = cb; await connectGate; },
+    async sendFrame(frame) {
+      frames.push(Buffer.from(frame));
+      if (frames.length === 1) {
+        callbacks.onSentence({ text: "Hello", begin_time: 0, end_time: 1_000, sentence_end: true }, true);
+      }
+    },
+    async finish() { return { duration: 0 }; },
+    close() {},
+    terminate() {}
+  };
+  const manager = createCaptureManager({ apiKey: "test-key", asrFactory: () => fake });
+  const { httpServer, wss, port } = await listen((ws) => manager.handleConnection(ws));
+  t.after(() => { httpServer.close(); wss.close(); });
+
+  const client = await connect(`ws://127.0.0.1:${port}/api/capture/ws`);
+  t.after(() => client.close());
+  client.send(JSON.stringify({ type: "start", format: "pcm", translate: false }));
+  client.send(Buffer.alloc(3_200, 1));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  releaseConnect();
+  await client.waitFor((message) => message.type === "ready");
+  client.send(Buffer.alloc(3_200, 2));
+  const lines = await client.waitFor((message) => message.type === "lines");
+  assert.equal(lines.lines[0].text, "Hello");
+  assert.equal(fake.frames.length, 1, "连接建立前到达的音频帧应被丢弃而不是触发失败");
+});
+
 test("capture ws drops single-letter and symbol-only noise", async (t) => {
   const fake = createFakeAsr({ finalText: "T" });
   const manager = createCaptureManager({

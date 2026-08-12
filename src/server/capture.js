@@ -104,11 +104,15 @@ export function createCaptureManager({
 
   async function startAsr(session) {
     if (!apiKey) throw new Error("DASHSCOPE_API_KEY is not configured.");
-    session.asr = asrFactory({ apiKey, model: process.env.KOE_REALTIME_MODEL || undefined });
-    await session.asr.connect({
+    const asr = asrFactory({ apiKey, model: process.env.KOE_REALTIME_MODEL || undefined });
+    await asr.connect({
       onSentence: (sentence, final) => handleSentence(session, sentence, final)
     });
-    if (session.disposed) return;
+    if (session.disposed) {
+      asr.terminate();
+      return;
+    }
+    session.asr = asr;
     sendJson(session.ws, { type: "ready" });
     trace("capture-asr-ready");
   }
