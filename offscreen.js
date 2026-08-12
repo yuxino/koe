@@ -8,6 +8,9 @@ let processor = null;
 let socket = null;
 let captureServerUrl = "";
 let captureTranslate = false;
+let retryCount = 0;
+let retryTimer = null;
+const MAX_AUTO_RETRIES = 5;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message.type !== "string") return false;
@@ -33,6 +36,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 async function startCapture({ streamId, serverUrl, translate }) {
+  retryCount = 0;
+  clearRetryTimer();
   await stopCapture();
   if (!streamId || !serverUrl) throw new Error("缺少标签页音频流或服务地址。");
   captureServerUrl = String(serverUrl || "").replace(/\/+$/, "");
@@ -156,17 +161,54 @@ function handleServerMessage(event) {
     }).catch(() => undefined);
     return;
   }
+  if (message.type === "ready") {
+    // 识别会话重新建立成功，重置自动重连计数
+    retryCount = 0;
+    clearRetryTimer();
+    return;
+  }
   if (message.type === "error") {
-    chrome.runtime.sendMessage({
-      type: "CAPTURE_ERROR",
-      error: message.error || "实时字幕采集失败"
-    }).catch(() => undefined);
+    const errorText = message.error || "实时字幕采集失败";
+    if (isRetryable(errorText)) {
+      scheduleAutoReconnect();
+      return;
+    }
+    chrome.runtime.sendMessage({ type: "CAPTURE_ERROR", error: errorText }).catch(() => undefined);
     void stopCapture();
     return;
   }
   if (message.type === "done") {
     void stopCapture();
   }
+}
+
+function scheduleAutoReconnect() {
+  if (retryTimer) return;
+  if (retryCount >= MAX_AUTO_RETRIES) {
+    chrome.runtime.sendMessage({
+      type: "CAPTURE_ERROR",
+      error: "本地助手重连失败，请检查 Koe 本地助手。"
+    }).catch(() => undefined);
+    void stopCapture();
+    return;
+  }
+  retryCount += 1;
+  const delayMs = Math.min(2_000, 250 * 2 ** Math.max(0, retryCount - 1));
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    void resetSocket({ serverUrl: captureServerUrl, translate: captureTranslate })
+      .catch(() => scheduleAutoReconnect());
+  }, delayMs);
+}
+
+function clearRetryTimer() {
+  if (retryTimer) clearTimeout(retryTimer);
+  retryTimer = null;
+}
+
+function isRetryable(error) {
+  const text = String(error || "").toLowerCase();
+  return /realtime_connection_closed|socket|connection|timeout|1006|econnreset|etimedout|closed/.test(text);
 }
 
 async function stopPcmCapture() {
@@ -182,6 +224,7 @@ async function stopPcmCapture() {
 }
 
 async function stopCapture() {
+  clearRetryTimer();
   await stopPcmCapture();
   if (monitorAudio) {
     try { monitorAudio.srcObject = null; } catch { /* ignore */ }
