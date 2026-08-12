@@ -232,23 +232,29 @@
 
   function trackVideoSource() {
     const source = currentVideoSource();
-    if (!source) return;
-    if (lastSeenSource && source !== lastSeenSource) {
-      lastSeenSource = source;
-      cues = [];
-      processing = false;
-      errorShown = false;
-      subtitleReady = false;
-      showingCue = false;
-      if (processing) {
-        showLoading();
+    if (source) {
+      if (lastSeenSource && source !== lastSeenSource) {
+        lastSeenSource = source;
+        cues = [];
+        processing = false;
+        errorShown = false;
+        subtitleReady = false;
+        showingCue = false;
+        hide();
+        chrome.runtime.sendMessage({ type: "VIDEO_CHANGED" }).catch(() => undefined);
         return;
       }
-      hide();
-      chrome.runtime.sendMessage({ type: "VIDEO_CHANGED" }).catch(() => undefined);
-      return;
+      lastSeenSource = source;
     }
-    lastSeenSource = source;
+    // 视频已经在播放但还没开始分析（含静音自动播放）→ 自动触发
+    const playing = (activeVideo?.isConnected ? activeVideo : null) || findVideo();
+    if (playing && !playing.paused && (playing.currentSrc || playing.src) && !processing && !subtitleReady && !errorShown) {
+      const now = Date.now();
+      if (now - lastPlayTriggerAt >= 3_000) {
+        lastPlayTriggerAt = now;
+        chrome.runtime.sendMessage({ type: "PAGE_READY" }).catch(() => undefined);
+      }
+    }
   }
 
   // 悬浮球可拖动；拖动的位移超过阈值才算拖，否则视为点击

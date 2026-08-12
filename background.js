@@ -61,7 +61,7 @@ async function handlePageReady(message, sender) {
   const tabId = sender?.tab?.id;
   if (!tabId) return { ok: true, skipped: true };
   const state = tabStates.get(tabId);
-  if (state && ["analyzing", "downloading", "uploading_audio", "queued", "ready"].includes(state.jobStatus)) {
+  if (state && ["analyzing", "downloading", "uploading_audio", "queued"].includes(state.jobStatus)) {
     return { ok: true, skipped: true };
   }
   const pageUrl = String(sender.tab?.url || "");
