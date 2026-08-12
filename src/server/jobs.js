@@ -101,7 +101,7 @@ export function createJobManager(options = {}) {
             if (start - cursor > gapMs) break;
             cursor = Math.max(cursor, end);
           }
-          const reachesEnd = Number(job.durationMs) > 0 && cursor >= Number(job.durationMs) - 2_000;
+          const reachesEnd = Number(job.durationMs) > 0 && cursor >= Number(job.durationMs) - 15_000;
           if ((!job.translate || cached.translated) && job.startMs === 0 && reachesEnd) {
               job.lines = job.translate ? cached.lines : stripTranslated(cached.lines);
               job.vtt = toWebVtt(job.lines);
