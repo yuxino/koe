@@ -103,6 +103,7 @@
       if (message.status === "idle") {
         errorShown = false;
         processing = false;
+        cues = [];
         subtitleReady = false;
         analysisDone = false;
         autoPlayedPartial = false;
