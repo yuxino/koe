@@ -154,6 +154,7 @@ export function createCaptureManager({
     }
     // 期间如果已经出现更新的“整句”，就不覆盖新字幕；普通中间句不算
     if (session.disposed || !session.translate || seq !== session.latestFinalSeq) return;
+    trace(`capture-translated seq=${seq} n=${translated.length}`);
     sendJson(session.ws, { type: "translated", seq, lines: translated });
   }
 
