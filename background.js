@@ -26,6 +26,7 @@ async function handleMessage(message, sender) {
   if (message.type === "LIST_VIDEOS") return listVideos(Number(message.tabId));
   if (message.type === "SEEK_PRIORITIZE") return seekPrioritize(Number(message.tabId), Number(message.timeMs));
   if (message.type === "VIDEO_CHANGED") return handleVideoChanged(sender);
+  if (message.type === "PAGE_READY") return handlePageReady(message, sender);
   if (message.type === "PLAY_ANALYZE") return handlePlayAnalyze(message, sender);
   if (message.type === "POSITION_UPDATE") return handlePositionUpdate(message, sender);
   if (message.type === "GET_STATE") {
@@ -46,6 +47,10 @@ async function handleVideoChanged(sender) {
 }
 
 async function handlePlayAnalyze(message, sender) {
+  return handlePageReady(message, sender);
+}
+
+async function handlePageReady(message, sender) {
   const tabId = sender?.tab?.id;
   if (!tabId) return { ok: true, skipped: true };
   const state = tabStates.get(tabId);
@@ -57,7 +62,8 @@ async function handlePlayAnalyze(message, sender) {
   try {
     return await analyzeVideo({ tabId, serverUrl: LOCAL_SERVER_URL, apiToken: "", pageUrl });
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    // 页面没有可用视频时静默跳过
+    return { ok: true, skipped: true };
   }
 }
 

@@ -175,7 +175,11 @@
     chrome.runtime.sendMessage({ type: "POSITION_UPDATE", timeMs, playing: !video.paused }).catch(() => undefined);
   }, 5_000);
 
-  // 按下播放时自动开始分析（静音预览缩略图不会触发，已有任务时不重复）
+  // 页面有视频即自动分析；按下播放也会触发（静音预览缩略图不触发，已有任务时不重复）
+  chrome.runtime.sendMessage({ type: "PAGE_READY" }).catch(() => undefined);
+  window.setTimeout(() => {
+    chrome.runtime.sendMessage({ type: "PAGE_READY" }).catch(() => undefined);
+  }, 3_000);
   let lastPlayTriggerAt = 0;
   document.addEventListener("play", (event) => {
     const target = event.target;
@@ -183,7 +187,7 @@
     const now = Date.now();
     if (now - lastPlayTriggerAt < 3_000) return;
     lastPlayTriggerAt = now;
-    chrome.runtime.sendMessage({ type: "PLAY_ANALYZE" }).catch(() => undefined);
+    chrome.runtime.sendMessage({ type: "PAGE_READY" }).catch(() => undefined);
   }, true);
 
   // 视频切换：清掉旧字幕并通知后台
