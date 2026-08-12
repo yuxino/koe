@@ -24,6 +24,9 @@
       .meta { display: none; }
       .stage.compact .card { padding: 8px 15px 9px; border-radius: 10px; box-shadow: 0 10px 32px rgba(0, 0, 0, .26); }
       .stage.compact .translated { font-size: 13px; }
+      .loading { display: none; padding: 8px 16px; border-radius: 99px; background: rgba(25, 35, 30, .55); color: rgba(251, 244, 223, .8); font: 500 13px/1.4 Georgia, 'Songti SC', serif; letter-spacing: .08em; backdrop-filter: blur(10px); animation: koe-pulse 1.6s ease-in-out infinite; }
+      .loading.visible { display: inline-block; }
+      @keyframes koe-pulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
       .orb { position: fixed; right: 18px; bottom: 18px; width: 46px; height: 46px; display: none; align-items: center; justify-content: center; border-radius: 50%; border: 1px solid rgba(255, 248, 224, .3); background: radial-gradient(circle at 32% 28%, rgba(70, 86, 73, .98), rgba(24, 32, 28, .96)); color: #f6efd9; cursor: pointer; box-shadow: 0 10px 32px rgba(0, 0, 0, .45); pointer-events: auto; z-index: 1; user-select: none; touch-action: none; }
       .orb:hover { filter: brightness(1.15); }
       .orb.visible { display: flex; }
@@ -35,12 +38,14 @@
     <div class="stage" aria-live="polite" aria-atomic="true">
       <div class="eyebrow"><span class="dot"></span><span class="label">KOE · READY</span></div>
       <div class="card"><p class="translated"></p><p class="original"></p><div class="meta"></div></div>
+      <div class="loading">字幕加载中…</div>
     </div>
     <div class="orb" role="button" aria-label="分析字幕" title="分析字幕"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4"/></svg></div>
   `;
 
   const stage = shadow.querySelector(".stage");
   const card = shadow.querySelector(".card");
+  const loadingEl = shadow.querySelector(".loading");
   const orb = shadow.querySelector(".orb");
   const translated = shadow.querySelector(".translated");
   const original = shadow.querySelector(".original");
@@ -235,6 +240,10 @@
       errorShown = false;
       subtitleReady = false;
       showingCue = false;
+      if (processing) {
+        showLoading();
+        return;
+      }
       hide();
       chrome.runtime.sendMessage({ type: "VIDEO_CHANGED" }).catch(() => undefined);
       return;
@@ -406,6 +415,7 @@
 
   function showStatus(value, detail, mode) {
     card.style.display = "";
+    loadingEl.classList.remove("visible");
     translated.textContent = value;
     original.textContent = "";
     meta.textContent = detail;
@@ -416,6 +426,7 @@
 
   function show(cue, detail, mode) {
     card.style.display = "";
+    loadingEl.classList.remove("visible");
     translated.textContent = cue.translated || cue.original || "";
     original.textContent = "";
     meta.textContent = detail;
@@ -426,6 +437,13 @@
 
   function hide() {
     stage.classList.remove("visible");
+    loadingEl.classList.remove("visible");
+  }
+
+  function showLoading() {
+    card.style.display = "none";
+    loadingEl.classList.add("visible");
+    stage.classList.add("visible");
   }
 
   function parseVtt(value) {
