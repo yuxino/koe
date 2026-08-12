@@ -10,25 +10,26 @@
     <main class="shell">
       <header class="masthead">
         <img class="avatar" src="assets/koe-avatar-48.png" alt="Koe">
-        <div>
-          <div class="kicker">KOE</div>
+        <div class="titles">
           <h1>Koe</h1>
+          <span class="version" id="version"></span>
         </div>
-        <span class="version" id="version"></span>
+        <span class="dot" id="status-dot" title="状态"></span>
       </header>
 
       <section class="status-card">
-        <span class="section-label">状态</span>
-        <strong id="engine-status">准备就绪</strong>
-        <span id="engine-detail">本地助手 · 检查中</span>
+        <div class="status-line">
+          <strong id="engine-status">未开启</strong>
+          <span id="engine-detail">打开此弹窗或按 Alt+K 开启</span>
+        </div>
       </section>
 
-      <label class="toggle-row" for="translate-toggle">
-        <input type="checkbox" id="translate-toggle" checked>
-        <span>双语字幕</span>
-      </label>
+      <button id="start-button" class="start-button" type="button">开始实时字幕</button>
 
-      <button id="toggle" class="toggle primary" type="button">分析字幕</button>
+      <label class="toggle-row" for="translate-toggle">
+        <span>显示中文翻译</span>
+        <input type="checkbox" id="translate-toggle" checked>
+      </label>
 
       <footer>
         <span id="hint"></span>

@@ -11,20 +11,17 @@ Chrome extension → https://koe-api.yuxino.cn
 
 ## 服务器依赖
 
-批处理模式需要 Node.js 20+、FFmpeg 和 yt-dlp：
+需要 Node.js 20+ 和 FFmpeg：
 
 ```bash
 dnf install -y https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-8.noarch.rpm
 dnf install -y ffmpeg
-curl -L --fail -o /usr/local/bin/yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp
-chmod 755 /usr/local/bin/yt-dlp
 ```
 
 确认：
 
 ```bash
 ffmpeg -version
-yt-dlp --version
 ```
 
 ## 项目与环境变量
@@ -39,7 +36,6 @@ ASR_SEGMENT_SECONDS=60
 DASHSCOPE_API_KEY=...
 KOE_API_TOKEN=long-random-client-token
 FFMPEG_BIN=ffmpeg
-YTDLP_BIN=yt-dlp
 ```
 
 启动或重载：

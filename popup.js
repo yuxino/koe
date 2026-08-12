@@ -1,21 +1,30 @@
-const LOCAL_SERVER_URL = "http://127.0.0.1:8787";
+const SERVER_URL = "http://127.0.0.1:8787";
+
 let activeTab;
 let currentState = { status: "idle" };
-let healthDetail = "本地助手 · 检查中";
+let healthOk = false;
 
 const elements = {
   version: document.querySelector("#version"),
+  statusDot: document.querySelector("#status-dot"),
   engineStatus: document.querySelector("#engine-status"),
   engineDetail: document.querySelector("#engine-detail"),
-  toggle: document.querySelector("#toggle"),
+  startButton: document.querySelector("#start-button"),
   translateToggle: document.querySelector("#translate-toggle"),
   hint: document.querySelector("#hint")
 };
 
 document.addEventListener("DOMContentLoaded", init);
-elements.toggle.addEventListener("click", analyze);
+elements.startButton.addEventListener("click", () => {
+  if (currentState.captureActive) void stopForTab();
+  else void startForTab();
+});
 elements.translateToggle.addEventListener("change", async () => {
-  await chrome.storage.local.set({ koeTranslate: elements.translateToggle.checked });
+  const translate = elements.translateToggle.checked;
+  await chrome.storage.local.set({ koeTranslate: translate });
+  if (activeTab?.id) {
+    await chrome.runtime.sendMessage({ type: "SET_TRANSLATE", tabId: activeTab.id, translate }).catch(() => undefined);
+  }
 });
 chrome.tabs.onActivated.addListener(refreshActiveTab);
 
@@ -44,64 +53,87 @@ async function refreshState() {
   renderState();
 }
 
-async function analyze() {
-  await refreshActiveTab();
-  if (!activeTab?.id) {
-    elements.engineStatus.textContent = "无法分析";
-    elements.engineDetail.textContent = "没有找到当前标签页。";
-    return;
-  }
-  elements.toggle.disabled = true;
-  elements.engineStatus.textContent = "正在创建任务…";
-  try {
-    const response = await chrome.runtime.sendMessage({
-      type: "ANALYZE_VIDEO",
-      tabId: activeTab.id,
-      pageUrl: activeTab.url,
-      serverUrl: LOCAL_SERVER_URL,
-      apiToken: "",
-      translate: elements.translateToggle.checked
-    });
-    if (!response?.ok) throw new Error(response?.error || "无法创建分析任务。");
-    currentState = response.state;
-    renderState();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    elements.engineStatus.textContent = "创建失败";
-    elements.engineDetail.textContent = message;
-  } finally {
-    elements.toggle.disabled = false;
-  }
-}
-
 async function checkHealth() {
   try {
-    const response = await fetch(`${LOCAL_SERVER_URL}/health`);
+    const response = await fetch(`${SERVER_URL}/health`);
     const body = await response.json();
     if (!response.ok || !body.ok) throw new Error("unhealthy");
-    healthDetail = body.mode === "local" ? "本地识别 · 实时" : "本地服务";
-    elements.hint.textContent = "打开视频后点击页面右下角「分析字幕」，或直接点下面的按钮。";
+    healthOk = true;
+    elements.hint.textContent = "按 Alt+K 或打开此弹窗即可开启，同一页面内切换视频自动继续。";
   } catch {
-    healthDetail = "本地助手 · 未连接";
+    healthOk = false;
     elements.hint.textContent = "请先启动 Koe 本地助手。";
   }
   renderState();
 }
 
+async function startForTab() {
+  if (!activeTab?.id) return;
+  setButtonBusy(true);
+  try {
+    const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: activeTab.id });
+    const response = await chrome.runtime.sendMessage({
+      type: "START_CAPTURE",
+      tabId: activeTab.id,
+      streamId,
+      pageUrl: activeTab.url
+    });
+    if (!response?.ok) throw new Error(response?.error || "无法启动实时字幕。");
+    currentState = response.state || { status: "live" };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    elements.engineStatus.textContent = "启动失败";
+    elements.hint.textContent = message;
+  } finally {
+    setButtonBusy(false);
+    await refreshState();
+  }
+}
+
+async function stopForTab() {
+  if (!activeTab?.id) return;
+  setButtonBusy(true);
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "STOP_CAPTURE", tabId: activeTab.id });
+    currentState = response?.state || { status: "idle" };
+  } catch (error) {
+    elements.hint.textContent = error instanceof Error ? error.message : String(error);
+  } finally {
+    setButtonBusy(false);
+    await refreshState();
+  }
+}
+
+function setButtonBusy(busy) {
+  elements.startButton.disabled = Boolean(busy);
+}
+
 function renderState() {
   const status = currentState.status || "idle";
-  const analyzing = status === "analyzing";
-  const percent = Math.round(Number(currentState.progress || 0) * 100);
-  elements.toggle.textContent = analyzing ? "分析中…" : "分析字幕";
-  elements.toggle.classList.toggle("running", analyzing);
-  elements.engineStatus.textContent = analyzing
-    ? `分析中 ${percent}%`
-    : status === "ready"
-      ? (currentState.fromCache ? "字幕已就绪（缓存）" : "字幕已就绪")
-      : status === "error"
-        ? "视频分析失败"
-        : "准备就绪";
-  elements.engineDetail.textContent = analyzing
-    ? (currentState.stageDetail || "实时识别中")
-    : healthDetail;
+  const live = status === "live";
+  const gesture = Boolean(currentState.captureNeedsGesture);
+  const error = status === "error";
+  const starting = !live && !error && !gesture && status !== "idle";
+
+  elements.engineStatus.textContent = live
+    ? "字幕开启中"
+    : error
+      ? "已断开"
+      : gesture
+        ? "点击开启"
+        : starting
+          ? "准备中"
+          : "未开启";
+  elements.engineDetail.textContent = live
+    ? "切换视频自动继续"
+    : error
+      ? (currentState.stageDetail || "点一下图标或按 Alt+K 重试")
+      : gesture
+        ? "点一下图标或按 Alt+K，立即开始"
+      : healthOk
+        ? "打开此弹窗或按 Alt+K 开启"
+        : "本地助手未连接";
+  elements.statusDot.className = `dot ${error ? "bad" : live ? "ok" : gesture || starting ? "busy" : ""}`;
+  elements.startButton.textContent = live ? "停止实时字幕" : "开始实时字幕";
+  elements.startButton.classList.toggle("active", live);
 }

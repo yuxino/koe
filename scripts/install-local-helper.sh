@@ -7,9 +7,8 @@ log_root="${runtime_root}/logs"
 wrapper_path="${runtime_root}/run-helper.sh"
 agent_path="${HOME}/Library/LaunchAgents/cn.yuxino.koe-helper.plist"
 agent_label="cn.yuxino.koe-helper"
-keychain_service="cn.yuxino.koe.remote-token"
 keychain_service_dashscope="cn.yuxino.koe.dashscope-key"
-remote_url="${KOE_REMOTE_URL:-https://koe-api.yuxino.cn}"
+
 proxy_url=""
 
 proxy_settings="$(/usr/sbin/scutil --proxy)"
@@ -21,40 +20,13 @@ if [[ "${proxy_enabled}" == "1" && -n "${proxy_host}" && -n "${proxy_port}" ]]; 
 fi
 
 node_bin="$(command -v node || true)"
-ffmpeg_bin="$(command -v ffmpeg || true)"
-ytdlp_bin="$(command -v yt-dlp || true)"
-
-if [[ -z "${ffmpeg_bin}" ]]; then
-  ffmpeg_bin="$(find "${runtime_root}/venv" -type f -path '*/imageio_ffmpeg/binaries/ffmpeg-*' -perm -u+x 2>/dev/null | head -n 1 || true)"
-fi
-if [[ -z "${ytdlp_bin}" && -x "${runtime_root}/bin/yt-dlp" ]]; then
-  ytdlp_bin="${runtime_root}/bin/yt-dlp"
-fi
-
 [[ -n "${node_bin}" ]] || { print -u2 "Node.js 20+ 未安装。"; exit 1; }
-[[ -n "${ffmpeg_bin}" ]] || { print -u2 "ffmpeg 未安装。"; exit 1; }
 node_bin="${node_bin:A}"
-ffmpeg_bin="${ffmpeg_bin:A}"
-if [[ -n "${ytdlp_bin}" ]]; then
-  ytdlp_bin="${ytdlp_bin:A}"
-else
-  print -u2 "提示：未检测到 yt-dlp（可选）。它只在页面不暴露视频直链时用作兜底，大多数视频用不到。"
-fi
-
-if [[ -n "${KOE_REMOTE_TOKEN:-}" ]]; then
-  /usr/bin/security add-generic-password -U -a "${USER}" -s "${keychain_service}" -w "${KOE_REMOTE_TOKEN}" >/dev/null
-elif ! /usr/bin/security find-generic-password -a "${USER}" -s "${keychain_service}" -w >/dev/null 2>&1; then
-  read -r -s "remote_token?请输入服务器 KOE_API_TOKEN："
-  print
-  [[ -n "${remote_token}" ]] || { print -u2 "Token 不能为空。"; exit 1; }
-  /usr/bin/security add-generic-password -U -a "${USER}" -s "${keychain_service}" -w "${remote_token}" >/dev/null
-  unset remote_token
-fi
 
 if [[ -n "${KOE_DASHSCOPE_API_KEY:-}" ]]; then
   /usr/bin/security add-generic-password -U -a "${USER}" -s "${keychain_service_dashscope}" -w "${KOE_DASHSCOPE_API_KEY}" >/dev/null
 elif ! /usr/bin/security find-generic-password -a "${USER}" -s "${keychain_service_dashscope}" -w >/dev/null 2>&1; then
-  read -r -s "dashscope_key?请输入 DashScope API Key（本地识别 + 翻译用）："
+  read -r -s "dashscope_key?请输入 DashScope API Key（实时识别 + 翻译用）："
   print
   [[ -n "${dashscope_key}" ]] || { print -u2 "DashScope API Key 不能为空。"; exit 1; }
   /usr/bin/security add-generic-password -U -a "${USER}" -s "${keychain_service_dashscope}" -w "${dashscope_key}" >/dev/null
@@ -66,14 +38,9 @@ mkdir -p "${runtime_root}" "${log_root}" "${HOME}/Library/LaunchAgents"
 cat > "${wrapper_path}" <<EOF
 #!/bin/zsh
 set -euo pipefail
-remote_token=\$(/usr/bin/security find-generic-password -a "${USER}" -s "${keychain_service}" -w)
 dashscope_key=\$(/usr/bin/security find-generic-password -a "${USER}" -s "${keychain_service_dashscope}" -w)
 export PORT=8787
-export KOE_REMOTE_URL="${remote_url}"
-export KOE_REMOTE_TOKEN="\${remote_token}"
 export DASHSCOPE_API_KEY="\${dashscope_key}"
-export KOE_LOCAL_ASR=1
-export FFMPEG_BIN="${ffmpeg_bin}"
 export HTTP_PROXY="${proxy_url}"
 export HTTPS_PROXY="${proxy_url}"
 export ALL_PROXY="${proxy_url}"

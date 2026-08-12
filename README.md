@@ -1,113 +1,46 @@
 <div align="center">
-  <img src="./assets/koe-avatar.png" alt="Koe avatar" width="180">
+  <img src="./assets/koe-avatar.png" alt="Koe" width="140">
   <h1>Koe</h1>
-  <p><strong>先分析，再加字幕。</strong></p>
-  <p>Batch video analysis for accurate, timestamped captions.</p>
+  <p><strong>边看边出字幕的本地实时识别 + 中文翻译</strong></p>
 </div>
 
-<p align="center">
-  <img src="https://img.shields.io/badge/mode-batch-586b4f" alt="Batch mode">
-  <img src="https://img.shields.io/badge/chrome-MV3-4285F4" alt="Chrome MV3">
-  <img src="https://img.shields.io/badge/node-20%2B-5FA04E" alt="Node.js 20 or later">
-</p>
+Koe（こえ / 声）是一个 Chrome 扩展 + 本地助手的实时字幕工具：捕获当前标签页正在播放的声音，识别出一句立刻显示原文，翻译好后原地变成中文。
 
-Koe（こえ / 声）是一个本地媒体优先的 Chrome 视频字幕项目。视频下载、音频提取、识别和双语翻译全部在你的电脑上完成（识别/翻译直接调用云端模型），再把 WebVTT 实时加载回原视频。线上 Koe API 服务器不是主路径，仅作可选兜底。
-
-Koe 通过 WebSocket 实时识别：说话的同时字幕就跟着出，句子说完立即替换为带词级时间戳的完整行（含翻译）。识别/翻译失败会自动回退到分段识别，不会卡死。字幕按标点、停顿和句长整理。
-
-字幕是渐进式出现的：已识别部分立即显示（含翻译）；你把视频拖到某个位置，Koe 只补算没看过的那一段，已看过的直接从缓存秒出。同一视频再次打开或刷新时自动走缓存，重复播放也是秒出。全部完成后仍是完整、对齐的双语字幕。
-
-## 工作方式
-
-```text
-浏览器真实媒体地址 → 本地 FFmpeg 实时提取音频 ─┐
-拿不到媒体地址时 → 明确提示无法分析 ────────┤
-                                              ↓
-                     WebSocket 实时识别 → 说完即出字幕
-                     （失败自动回退分段识别）
-                     → 双语翻译 → 生成 WebVTT → 视频加载字幕
-```
+- **实时字幕**：不下载视频、不做任何文件处理，声音直接进识别
+- **全自动**：打开、播放、切换视频都会自动继续出字幕
+- **中文翻译**：识别结果逐句翻译成中文，弹窗可随时开关
+- **本地优先**：只调用 DashScope 的流式识别与翻译接口
 
 ## 快速开始
 
-### 1. 安装本地助手
-
-需要 Node.js 20+ 和 `ffmpeg`。分析完全基于浏览器拿到的视频直链，不依赖 yt-dlp；拿不到直链的页面会明确提示无法分析。
+需要 Node.js 20+。
 
 ```bash
-./scripts/install-local-helper.sh
+./scripts/install-local-helper.sh   # 安装并启动本地助手（127.0.0.1:8787）
 ```
 
-安装程序会把 DashScope API Key 保存到 macOS 钥匙串（用于本地识别和翻译），继承当前 macOS 系统代理，创建用户级 LaunchAgent，并启动 `http://127.0.0.1:8787`。完整视频和识别过程都不再经过线上 Koe 服务器。
+Chrome 打开 `chrome://extensions` → 开启「开发者模式」→「加载已解压的扩展程序」→ 选择本项目目录。
 
-### 2. 加载 Chrome 插件
+Chrome 要求采集标签页声音必须有一次用户手势：**点一下扩展图标**或按 **Alt+K（Mac 是 Option+K）**。授权一次后，当前页面里切换视频都会自动继续出字幕。
 
-在 Chrome 打开 `chrome://extensions`：
+## 使用
 
-1. 打开「开发者模式」
-2. 点击「加载已解压的扩展程序」
-3. 选择本项目目录
-4. 打开视频页面，点击 Koe
-5. 点击 `Analyze video`
-
-插件固定连接本机 `http://127.0.0.1:8787`，无需填写服务地址或 Token。如果页面里有多个视频，先在面板的下拉框里选中要分析的那一个，再点击 `Analyze video`；不选就自动挑选，自动选择会避开广告域名，优先正在播放、时长更长的视频。识别只看声音，不依赖画面清晰度；HLS 流会优先只拉音频轨，下载更少、更快。
-
-弹窗里的「双语字幕」开关默认开启：识别完成后会把字幕翻译成中文，原文和译文两行对照显示；不需要翻译时关掉即可。
-
-## 配置
-
-线上识别服务配置写在 `.env` 中：
-
-```env
-PORT=8787
-ASR_PROVIDER=dashscope
-ASR_MODEL=fun-asr-flash-2026-06-15
-ASR_SEGMENT_SECONDS=60
-DASHSCOPE_API_KEY=...
-KOE_API_TOKEN=...
-FFMPEG_BIN=ffmpeg
-YTDLP_BIN=
-```
-
-真实 ASR Key 只保留在线上服务端。本地助手从 macOS 钥匙串读取远端 Koe Token；扩展面板不再保存或显示任何 Token。
+- 点扩展图标打开弹窗：同时就是一次授权，视频在播就直接开字幕
+- 弹窗里的「显示中文翻译」开关控制是否翻译成中文
+- 字幕显示 6 秒后自动隐藏，有新句子时立即刷新
 
 ## API
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/health` | 查看服务状态、模式和工具路径 |
-| `POST` | `/api/jobs` | 创建当前网页视频分析任务 |
-| `GET` | `/api/jobs/:id` | 查询任务进度 |
-| `GET` | `/api/jobs/:id/vtt` | 任务完成后获取完整 WebVTT |
-
-## 部署
-
-服务器部署说明见 [DEPLOY.md](DEPLOY.md)。当前线上 API 地址为 `https://koe-api.yuxino.cn`。
+| `GET` | `/health` | 服务状态 |
+| `POST` | `/api/trace` | 追踪日志 |
+| `WS` | `/api/capture/ws` | 实时字幕音频通道 |
 
 ## 开发
 
-运行检查：
-
 ```bash
-npm run check
+npm run check   # 静态检查 + 测试
 ```
 
-主要目录：
-
-```text
-manifest.json       Chrome MV3 配置
-background.js       分析任务创建、轮询和字幕发布
-content.js          视频源发现与 VTT 时间轴覆盖层
-popup.*             批处理控制面板
-src/server/media.js 视频来源与 FFmpeg 适配
-src/server/jobs.js  异步分析任务
-src/server/relay.js 本地音频上传与远端任务中继
-src/server/asr.js   Fun-ASR 与完整音频分段
-src/server/transcript.js
-                    字幕聚合与 WebVTT
-test/               Node 测试
-```
-
-## 项目状态
-
-Koe 目前是一个持续迭代中的实验项目。字幕准确度会受到音频质量、说话人、语言混合、背景音乐以及 ASR 模型版本影响。
+主要文件：`background.js`（实时字幕调度）、`offscreen.js`（标签页声音采集）、`content.js`（页面字幕）、`popup.*`（控制面板）、`src/server/`（本地助手）。

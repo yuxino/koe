@@ -1,17 +1,19 @@
 {
   "manifest_version": 3,
   "name": "Koe",
-  "version": "0.3.89",
-  "description": "Batch-analyze videos first, then load accurate timestamped captions.",
+  "version": "1.0.37",
+  "description": "实时字幕：捕获当前标签页声音，本地识别 + 中文翻译。",
   "icons": {
     "16": "assets/koe-avatar-16.png",
     "48": "assets/koe-avatar-48.png",
     "128": "assets/koe-avatar-128.png"
   },
   "permissions": [
-    "activeTab",
     "scripting",
-    "storage"
+    "storage",
+    "alarms",
+    "tabCapture",
+    "offscreen"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -24,11 +26,19 @@
     "default_title": "Koe",
     "default_popup": "popup.html"
   },
+  "commands": {
+    "capture-tab": {
+      "suggested_key": {
+        "default": "Alt+K"
+      },
+      "description": "捕获当前标签页声音并显示实时字幕"
+    }
+  },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
       "js": ["content.js"],
-      "all_frames": true,
+      "all_frames": false,
       "run_at": "document_idle"
     }
   ],

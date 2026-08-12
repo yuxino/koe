@@ -16,13 +16,23 @@ export async function translateLines({
     .map((line, index) => ({ index, text: String(line.text || "").trim() }))
     .filter((entry) => entry.text);
   if (!entries.length) return lines;
-  const texts = entries.map((entry) => entry.text);
+
+  const translated = new Array(lines.length).fill(null);
+  const pending = [];
+  for (const entry of entries) {
+    if (target === "zh" && isAlreadyChinese(entry.text)) {
+      translated[entry.index] = entry.text;
+    } else {
+      pending.push(entry);
+    }
+  }
+
+  const texts = pending.map((entry) => entry.text);
 
   const chunks = [];
   for (let offset = 0; offset < texts.length; offset += batchSize) {
     chunks.push(texts.slice(offset, offset + batchSize));
   }
-  const translated = new Array(lines.length).fill(null);
   let cursor = 0;
 
   async function worker() {
@@ -33,16 +43,20 @@ export async function translateLines({
       const offset = chunkIndex * batchSize;
       const result = await translateChunk({ texts: chunk, apiKey, model, target, timeoutMs, fetchImpl });
       for (let index = 0; index < chunk.length; index += 1) {
-        if (result[index]) translated[entries[offset + index].index] = result[index];
+        if (result[index]) translated[pending[offset + index].index] = result[index];
       }
     }
   }
 
-  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), chunks.length) }, () => worker()));
+  if (chunks.length) {
+    await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), chunks.length) }, () => worker()));
+  }
   return lines.map((line, index) => {
     const text = String(line.text || "").trim();
     const translatedText = translated[index];
-    if (!text || !translatedText || translatedText === text) return line;
+    // 翻译结果和原文相同（如“哦”“好”这类感叹词）也算“已翻译”，
+    // 否则只显示中文模式下这些句子会被过滤掉，造成字幕空缺
+    if (!text || !translatedText) return line;
     return { ...line, translated: translatedText };
   });
 }
@@ -79,6 +93,16 @@ async function translateChunk({ texts, apiKey, model, target, timeoutMs, fetchIm
 async function requestChunk({ texts, apiKey, model, target, timeoutMs, fetchImpl }) {
   const numbered = texts.map((text, index) => `${index + 1}. ${text}`).join("\n");
   const language = target === "zh" ? "简体中文" : String(target);
+  const messages = [
+    {
+      role: "system",
+      content: "你是一名专业字幕翻译。把字幕翻译成自然、口语化的目标语言，保留人名、地名、品牌名，不添加解释或括号；如果原文已经是目标语言，就原样保留。"
+    },
+    {
+      role: "user",
+      content: `请把下面每一行字幕翻译成${language}。自动识别源语言，保持编号顺序，一行对应一行，只输出翻译结果：\n${numbered}`
+    }
+  ];
   const response = await fetchImpl(ENDPOINT, {
     method: "POST",
     headers: {
@@ -88,12 +112,7 @@ async function requestChunk({ texts, apiKey, model, target, timeoutMs, fetchImpl
     },
     body: JSON.stringify({
       model,
-      input: {
-        messages: [{
-          role: "user",
-          content: `把下面每一行分别翻译成${language}。保留编号，一行对应一行，只输出翻译结果：\n${numbered}`
-        }]
-      },
+      input: { messages },
       parameters: { result_format: "message" }
     }),
     signal: AbortSignal.timeout(timeoutMs)
@@ -131,4 +150,11 @@ function parseNumbered(content, count) {
     }
   }
   return results;
+}
+
+function isAlreadyChinese(value) {
+  const text = String(value || "");
+  const cjk = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+  const latin = (text.match(/[A-Za-z]/g) || []).length;
+  return cjk > 0 && cjk >= latin;
 }

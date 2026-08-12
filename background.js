@@ -1,103 +1,84 @@
-const LOCAL_SERVER_URL = "http://127.0.0.1:8787";
+// Koe 实时字幕：只做一件事——捕获当前标签页正在播放的声音，
+// 交给本地助手实时识别 + 中文翻译，再显示成字幕。
+// 不再下载视频、不再 ffmpeg、不再有“分析中 x%”的进度任务。
+
+const SERVER_URL = "http://127.0.0.1:8787";
 const tabStates = new Map();
-const pollers = new Map();
-const recoveryAttempts = new Map();
-const lastVideoChangeAt = new Map();
+const captureStreamIds = new Map();
+let captureTabId = null;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  handleMessage(message, sender)
+  handle(message, sender)
     .then(sendResponse)
     .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
   return true;
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => {
-  const state = tabStates.get(tabId);
-  if (state) void cancelJob(state);
-  tabStates.delete(tabId);
-  recoveryAttempts.delete(tabId);
-  lastVideoChangeAt.delete(tabId);
-  stopPolling(tabId);
+chrome.runtime.onStartup.addListener(() => void boot());
+chrome.runtime.onInstalled.addListener(() => void boot());
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "koe-restore") void restoreStates();
 });
 
-async function handleMessage(message, sender) {
-  if (message.type === "ANALYZE_VIDEO") return analyzeVideo({ ...message, tabId: message.tabId ?? sender?.tab?.id });
-  if (message.type === "WATCH_JOB") return watchJob(message);
-  if (message.type === "STOP_ANALYSIS") return stopAnalysis(Number(message.tabId));
-  if (message.type === "LIST_VIDEOS") return listVideos(Number(message.tabId));
-  if (message.type === "SEEK_PRIORITIZE") return seekPrioritize(Number(message.tabId), Number(message.timeMs));
-  if (message.type === "VIDEO_CHANGED") return handleVideoChanged(sender);
-  if (message.type === "PAGE_READY") return handlePageReady(message, sender);
-  if (message.type === "PLAY_ANALYZE") return handlePlayAnalyze(message, sender);
-  if (message.type === "POSITION_UPDATE") return handlePositionUpdate(message, sender);
-  if (message.type === "GET_STATE") {
-    const state = tabStates.get(Number(message.tabId));
-    return { ok: true, state: state ? publicState(state) : { status: "idle" } };
-  }
-  return { ok: true };
-}
+// 快捷键 = 一次用户手势：授权后自动捕获当前标签页声音，本页内切视频继续出字幕
+chrome.commands.onCommand.addListener(async (command) => {
+  if (command !== "capture-tab") return;
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tab?.id) await ensureLiveCaptions({ tabId: tab.id, pageUrl: tab.url, forceReset: true });
+});
 
-async function handleVideoChanged(sender) {
-  const tabId = sender?.tab?.id;
-  if (!tabId) return { ok: true, skipped: true };
-  const now = Date.now();
-  if (now - (lastVideoChangeAt.get(tabId) || 0) < 1_500) return { ok: true, skipped: true };
-  lastVideoChangeAt.set(tabId, now);
-  const pageUrl = String(sender.tab?.url || "");
-  if (!/^https?:/i.test(pageUrl)) return { ok: true, skipped: true };
-  const state = tabStates.get(tabId);
-  const source = await discoverVideoSource(tabId, pageUrl, undefined).catch(() => null);
-  if (source?.sourceUrl && state?.sourceUrl && normalizeSourceKey(source.sourceUrl) === normalizeSourceKey(state.sourceUrl)) {
-    return { ok: true, skipped: true };
-  }
-  if (tabStates.has(tabId)) await stopAnalysis(tabId);
-  return handlePageReady({}, sender);
-}
+chrome.tabs.onRemoved.addListener((tabId) => cleanupTab(tabId));
 
-async function handlePlayAnalyze(message, sender) {
-  return handlePageReady(message, sender);
-}
-
-async function handlePageReady(message, sender) {
-  const tabId = sender?.tab?.id;
-  if (!tabId) return { ok: true, skipped: true };
-  const state = tabStates.get(tabId);
-  if (state && ["analyzing", "downloading", "uploading_audio", "queued"].includes(state.jobStatus)) {
-    return { ok: true, skipped: true };
-  }
-  const pageUrl = String(sender.tab?.url || "");
-  if (!/^https?:/i.test(pageUrl)) return { ok: true, skipped: true };
+async function boot() {
   try {
-    return await analyzeVideo({ tabId, serverUrl: LOCAL_SERVER_URL, apiToken: "", pageUrl });
-  } catch (error) {
-    // 页面没有可用视频时静默跳过
-    return { ok: true, skipped: true };
-  }
-}
-
-async function handlePositionUpdate(message, sender) {
-  const tabId = sender?.tab?.id;
-  if (!tabId) return { ok: true, ignored: true };
-  const state = tabStates.get(tabId);
-  if (!state?.jobId || !Number.isFinite(Number(message.timeMs))) return { ok: true, ignored: true };
-  const timeMs = Math.max(0, Number(message.timeMs));
-  if (Math.abs(timeMs - (state.lastPositionMs || 0)) < 1_000) return { ok: true, ignored: true };
-  state.lastPositionMs = timeMs;
-  try {
-    await fetch(`${state.serverUrl}/api/jobs/${state.jobId}/position`, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...authHeaders(state.apiToken) },
-      body: JSON.stringify({ timeMs, playing: Boolean(message.playing) })
-    });
+    await chrome.alarms.create("koe-restore", { periodInMinutes: 0.5 });
   } catch {
-    // 本地助手旧版本没有 position 接口时静默跳过
+    // 个别环境不支持 alarms 时仅保留内存状态
+  }
+  await restoreStates();
+}
+
+async function handle(message, sender) {
+  if (!message || typeof message.type !== "string") return { ok: true };
+  const tabId = Number(message.tabId ?? sender?.tab?.id);
+  if (message.type === "PAGE_READY") return pageReady(sender);
+  if (message.type === "VIDEO_CHANGED") return videoChanged(sender);
+  if (message.type === "GET_STATE") return { ok: true, state: publicState(tabStates.get(tabId)) };
+  if (message.type === "CAPTURE_LINES") return forwardCaptureLines(message, "LIVE_SUBTITLES");
+  if (message.type === "CAPTURE_PARTIAL") return forwardCaptureLines(message, "LIVE_PARTIAL");
+  if (message.type === "CAPTURE_ERROR") return handleCaptureError(message);
+  if (message.type === "START_CAPTURE") return startCaptureForTab(message);
+  if (message.type === "STOP_CAPTURE") return stopCaptureForTab(Number(message.tabId));
+  if (message.type === "SET_TRANSLATE") return setTranslate(tabId, Boolean(message.translate));
+  if (message.type === "CONTENT_ACK") {
+    trace(tabId, "content-ack", `${String(message.stage || "")} frame=${sender?.frameId ?? ""}`);
+    return { ok: true };
   }
   return { ok: true };
 }
 
-async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl, selection, translate, startMs }) {
+async function pageReady(sender) {
+  const tabId = sender?.tab?.id;
+  if (!tabId) return { ok: true, skipped: true };
+  const pageUrl = String(sender.tab?.url || "");
+  if (!/^https?:/i.test(pageUrl)) return { ok: true, skipped: true };
+  return ensureLiveCaptions({ tabId, pageUrl });
+}
+
+async function videoChanged(sender) {
+  const tabId = sender?.tab?.id;
+  if (!tabId) return { ok: true, skipped: true };
+  const pageUrl = String(sender.tab?.url || "");
+  if (!/^https?:/i.test(pageUrl)) return { ok: true, skipped: true };
+  // 页内切视频：让“视频源是否真的变了”来判断要不要重连识别会话，
+  // 避免 CDN 换签名、同一视频重载这类情况把字幕打断
+  return ensureLiveCaptions({ tabId, pageUrl });
+}
+
+// ===== 实时字幕核心：找到正在播放的主视频 → 开启/保持标签页声音捕获 =====
+async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset = false }) {
   tabId = Number(tabId);
-  if (!Number.isInteger(tabId)) throw new Error("没有找到当前标签页。");
+  if (!Number.isInteger(tabId)) return { ok: true, skipped: true };
   if (translate === undefined) {
     try {
       ({ koeTranslate: translate } = await chrome.storage.local.get("koeTranslate"));
@@ -105,332 +86,327 @@ async function analyzeVideo({ tabId, serverUrl, apiToken, pageUrl, selection, tr
       translate = undefined;
     }
   }
-  const source = await discoverVideoSource(tabId, pageUrl, selection);
-  if (!source?.hasVideo) throw new Error("当前页面没有找到视频，请先打开包含视频的页面。");
-  await ensureContentScript(tabId, source.frameId);
+  const source = await discoverVideoSource(tabId, pageUrl).catch(() => null);
+  const sourceKey = source?.sourceUrl ? normalizeSourceKey(source.sourceUrl) : "";
+  let state = tabStates.get(tabId);
 
-  const jobPageUrl = pageUrl || source.pageUrl;
-  const sourceUrl = source.sourceUrl || "";
-  const job = await createJob({
-    serverUrl,
-    apiToken,
-    pageUrl: jobPageUrl,
-    sourceUrl,
-    filename: source.filename || "video",
-    durationMs: source.durationMs || null,
-    translate,
-    startMs: Number(startMs) || 0
-  });
-  return beginWatching({ tabId, frameId: source.frameId, serverUrl, apiToken, job, pageUrl: jobPageUrl, selection, translate, sourceUrl: source.sourceUrl });
-}
-
-async function watchJob({ tabId, frameId, serverUrl, apiToken, jobId }) {
-  const job = await getJob(serverUrl, apiToken, jobId);
-  return beginWatching({ tabId: Number(tabId), frameId: Number(frameId) || 0, serverUrl, apiToken, job });
-}
-
-async function beginWatching({ tabId, frameId = 0, serverUrl, apiToken, job, pageUrl = "", selection = null, translate, sourceUrl = "" }) {
-  stopPolling(tabId);
-  const previous = tabStates.get(tabId);
-  if (previous?.jobId && previous.jobId !== job.id) void cancelJob(previous);
-  const state = {
-    tabId,
-    frameId,
-    status: job.status === "ready" ? "ready" : "analyzing",
-    jobId: job.id,
-    serverUrl: String(serverUrl || "").replace(/\/+$/, ""),
-    apiToken: String(apiToken || ""),
-    startedAt: Date.now(),
-    progress: Number(job.progress || 0),
-    jobStatus: job.status || "analyzing",
-    stageDetail: job.stageDetail || "",
-    hasDuration: Boolean(job.hasDuration),
-    fromCache: Boolean(job.fromCache),
-    lastPartialVtt: "",
-    pageUrl,
-    selection,
-    translate,
-    sourceUrl: String(sourceUrl || ""),
-    retried: false
-  };
-  tabStates.set(tabId, state);
-  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: state.jobStatus, stageDetail: state.stageDetail, hasDuration: state.hasDuration, startedAt: state.startedAt }, frameId);
-  if (job.status === "ready") await publishReady(state);
-  else pollers.set(tabId, setInterval(() => pollJob(tabId).catch((error) => failJob(tabId, error)), 500));
-  return { ok: true, state: publicState(state) };
-}
-
-async function pollJob(tabId) {
-  const state = tabStates.get(tabId);
-  if (!state) return stopPolling(tabId);
-  const job = await getJob(state.serverUrl, state.apiToken, state.jobId);
-  state.progress = Number(job.progress || 0);
-  state.jobStatus = job.status || state.jobStatus;
-  state.stageDetail = job.stageDetail || "";
-  state.hasDuration = Boolean(job.hasDuration);
-  if (job.status === "ready") {
-    stopPolling(tabId);
-    recoveryAttempts.delete(tabId);
-    state.status = "ready";
-    await publishReady(state);
-    return;
+  if (!source?.hasVideo || !isLiveAllowed(source, pageUrl)) {
+    // 没有正在播放的主视频，或只是静音/广告/背景视频：不打扰，也不清掉已有会话
+    return { ok: true, skipped: true };
   }
-  if (job.status === "error") {
-    stopPolling(tabId);
-    if (!state.retried && /过期|被拦截|没有可提取的音轨|does not contain any stream|403/i.test(job.error || "")) {
-      state.retried = true;
+  await ensureContentScript(tabId, source.frameId || 0);
+
+  const startedHere = !state || state.liveOnly !== true;
+  if (startedHere) {
+    if (state?.captureStarted) await stopCapture(state);
+    state = {
+      tabId,
+      frameId: source.frameId || 0,
+      status: "starting",
+      jobId: `live-${tabId}-${Date.now()}`,
+      translate: translate !== undefined ? Boolean(translate) : true,
+      sourceUrl: source.sourceUrl || "",
+      pageUrl: pageUrl || source.pageUrl,
+      liveOnly: true,
+      captureStarted: false,
+      captureNeedsGesture: false,
+      stageDetail: "准备实时字幕…",
+      startedAt: Date.now()
+    };
+    tabStates.set(tabId, state);
+    await persistStates();
+    await pushState(state);
+  } else if (forceReset || (sourceKey && sourceKey !== normalizeSourceKey(state.sourceUrl || ""))) {
+    state.frameId = source.frameId || state.frameId;
+    state.pageUrl = pageUrl || source.pageUrl;
+    state.sourceUrl = source.sourceUrl || "";
+    state.translate = translate !== undefined ? Boolean(translate) : state.translate;
+    // 换了视频：保持已授权的音频流不断，只重连识别会话
+    if (state.captureStarted) await resetCaptureSession(state);
+    else await pushState(state);
+  }
+
+  state = tabStates.get(tabId);
+  if (!state || state.captureStarted) return { ok: true };
+  await ensureCaptureAuthorized(state);
+  return { ok: true };
+}
+
+function isLiveAllowed(source, pageUrl) {
+  if (!source?.playing) return false;
+  if (isAdSource(source.sourceUrl || "")) return false;
+  // 静音播放器没有声音可采，等用户取消静音后再开始
+  if (source.muted) return false;
+  return true;
+}
+
+async function ensureCaptureAuthorized(state) {
+  let streamId = captureStreamIds.get(state.tabId) || "";
+  if (!streamId) {
+    try {
+      streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: state.tabId });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/gesture|invocation|permission|user gesture/i.test(message)) {
+        state.captureNeedsGesture = true;
+        state.stageDetail = "点一下 Koe 图标，立即开始实时字幕";
+        await pushState(state);
+        return;
+      }
+      throw error;
+    }
+  }
+  try {
+    await startCapture(state, streamId);
+  } catch (error) {
+    // 流 ID 失效或采集失败：清掉，提示用户再点一次图标重新授权
+    captureStreamIds.delete(state.tabId);
+    state.captureNeedsGesture = true;
+    state.stageDetail = "点一下 Koe 图标，立即开始实时字幕";
+    await pushState(state);
+  }
+}
+
+async function startCapture(state, streamId) {
+  // 扩展重载后已打开的页面可能没有内容脚本，先把字幕显示脚本注入进去，
+  // 否则识别通道通了、字幕却没地方显示
+  await ensureContentScript(state.tabId, state.frameId || 0);
+  await ensureOffscreen();
+  const response = await chrome.runtime.sendMessage({
+    type: "CAPTURE_START",
+    streamId,
+    serverUrl: SERVER_URL,
+    translate: state.translate
+  });
+  if (!response?.ok) throw new Error(response?.error || "无法开始采集标签页声音。");
+  state.captureStarted = true;
+  state.captureNeedsGesture = false;
+  state.status = "live";
+  state.stageDetail = "";
+  captureTabId = state.tabId;
+  await pushState(state);
+  await persistStates();
+  trace(state.tabId, "capture-started", `${response.mode || "pcm"} frame=${state.frameId || 0} src=${String(state.sourceUrl || "").slice(0, 60)}`);
+}
+
+async function resetCaptureSession(state) {
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "CAPTURE_RESET",
+      serverUrl: SERVER_URL,
+      translate: state.translate
+    });
+    if (!response?.ok) throw new Error(response?.error || "capture_reset_failed");
+  } catch {
+    // 离屏页丢失：用现有流 ID 完整重启采集
+    const streamId = captureStreamIds.get(state.tabId);
+    if (streamId) {
       try {
-        return await analyzeVideo({
-          tabId,
-          serverUrl: state.serverUrl,
-          apiToken: state.apiToken,
-          pageUrl: state.pageUrl,
-          selection: state.selection,
-          translate: state.translate
-        });
+        await startCapture(state, streamId);
       } catch {
-        // 页面可能已关闭，保留原始错误
+        // 保留旧状态，用户可再点一次图标
       }
     }
-    return failJob(tabId, new Error(job.error || "视频分析失败。"));
   }
-  state.status = "analyzing";
-  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: state.status, progress: state.progress, jobStatus: job.status, stageDetail: state.stageDetail, hasDuration: state.hasDuration, startedAt: state.startedAt }, state.frameId);
-  void pollPartial(state);
 }
 
-async function pollPartial(state) {
+async function stopCapture(state) {
+  if (!state?.captureStarted) return;
+  state.captureStarted = false;
+  state.status = "starting";
+  if (captureTabId === state.tabId) captureTabId = null;
   try {
-    const response = await fetch(`${state.serverUrl}/api/jobs/${state.jobId}/partial`, { headers: authHeaders(state.apiToken) });
-    if (!response.ok) return;
-    const partial = await response.json();
-    if (partial?.vtt && partial.vtt !== state.lastPartialVtt) {
-      state.lastPartialVtt = partial.vtt;
-      await forwardToTab(state.tabId, { type: "PARTIAL_SUBTITLES", vtt: partial.vtt, lineCount: Number(partial.lineCount || 0) }, state.frameId);
-    }
+    await chrome.runtime.sendMessage({ type: "CAPTURE_STOP" });
   } catch {
-    // 本地助手旧版本没有 /partial 接口时静默跳过
+    // 后台可能刚唤醒，离屏采集页尚未就绪
   }
+  await forwardToTab(state.tabId, { type: "LIVE_STOP", jobId: state.jobId }, state.frameId);
+  await pushState(state);
 }
 
-async function seekPrioritize(tabId, timeMs) {
-  const state = tabStates.get(tabId);
-  if (!state?.jobId) return { ok: true, ignored: true };
-  stopPolling(tabId);
-  try {
-    void cancelJob(state);
-    const source = await discoverVideoSource(tabId, state.pageUrl, undefined);
-    if (!source?.hasVideo) return { ok: true, ignored: true };
-    const job = await createJob({
-      serverUrl: state.serverUrl,
-      apiToken: state.apiToken,
-      pageUrl: state.pageUrl || source.pageUrl,
-      sourceUrl: source.sourceUrl || "",
-      filename: source.filename || "video",
-      durationMs: source.durationMs || null,
-      translate: state.translate,
-      startMs: Math.max(0, Number(timeMs) || 0)
-    });
-    return beginWatching({
-      tabId,
-      frameId: source.frameId,
-      serverUrl: state.serverUrl,
-      apiToken: state.apiToken,
-      job,
-      pageUrl: state.pageUrl || source.pageUrl,
-      selection: state.selection,
-      translate: state.translate,
-      sourceUrl: source.sourceUrl
-    });
-  } catch {
-    // 重新发现失败时保留原任务
-    return { ok: true, ignored: true };
+async function startCaptureForTab({ tabId, streamId, pageUrl = "" }) {
+  const id = Number(tabId);
+  if (!Number.isInteger(id)) return { ok: false, error: "没有找到当前标签页。" };
+  if (streamId) captureStreamIds.set(id, streamId);
+  await ensureLiveCaptions({ tabId: id, pageUrl });
+  const state = tabStates.get(id);
+  if (state?.captureStarted) return { ok: true, state: publicState(state) };
+  if (state?.captureNeedsGesture) return { ok: false, error: state.stageDetail || "需要再点击一次以授权声音采集。" };
+  if (state?.status === "error") return { ok: false, error: state.stageDetail || "实时字幕已断开。" };
+  return { ok: false, error: "当前标签页没有正在播放、未静音的视频。" };
+}
+
+async function stopCaptureForTab(tabId) {
+  const state = tabStates.get(Number(tabId));
+  if (state?.captureStarted) {
+    await stopCapture(state);
+    state.status = "idle";
+    state.stageDetail = "";
+    state.captureNeedsGesture = false;
+    await pushState(state);
   }
+  return { ok: true, state: publicState(tabStates.get(Number(tabId))) };
 }
 
-async function publishReady(state) {
-  const response = await fetch(`${state.serverUrl}/api/jobs/${state.jobId}/vtt`, { headers: authHeaders(state.apiToken) });
-  const vtt = await response.text();
-  if (!response.ok) throw new Error(vtt || `字幕下载失败（${response.status}）`);
-  await forwardToTab(state.tabId, { type: "SUBTITLE_READY", tabId: state.tabId, vtt }, state.frameId);
-  await forwardToTab(state.tabId, { type: "JOB_STATUS", tabId: state.tabId, status: "ready", progress: 1 }, state.frameId);
-}
-
-async function createJob({ serverUrl, apiToken, pageUrl, sourceUrl, filename, durationMs, translate, startMs }) {
-  let response;
-  try {
-    response = await fetch(`${serverUrl}/api/jobs`, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...authHeaders(apiToken) },
-      body: JSON.stringify({ pageUrl, sourceUrl, filename, durationMs, translate, startMs })
-    });
-  } catch {
-    throw new Error("Koe 本地助手未启动。请先运行本地安装程序。");
+async function forwardCaptureLines(message, type) {
+  const tabId = captureTabId;
+  const state = tabId ? tabStates.get(tabId) : null;
+  if (!state?.captureStarted || !state.jobId) return { ok: true, ignored: true };
+  const lines = Array.isArray(message.lines) ? message.lines : [];
+  const sent = await forwardToTab(tabId, {
+    type,
+    jobId: state.jobId,
+    lines
+  }, state.frameId);
+  if (sent?.ignored && !state.contentScriptPinged) {
+    // 页面里还没有字幕脚本（比如扩展重载后没刷新页面）：
+    // 现补注入一次，并把状态推过去
+    state.contentScriptPinged = true;
+    await ensureContentScript(state.tabId, state.frameId || 0);
+    trace(state.tabId, "content-inject", `frame=${state.frameId || 0}`);
+    await pushState(state);
   }
-  return parseResponse(response, "创建分析任务失败");
+  trace(tabId, type === "LIVE_SUBTITLES" ? "capture-lines" : "capture-partial", `n=${lines.length} ignored=${Boolean(sent?.ignored)}`);
+  return { ok: true };
 }
 
-async function getJob(serverUrl, apiToken, jobId) {
-  const response = await fetch(`${String(serverUrl).replace(/\/+$/, "")}/api/jobs/${jobId}`, { headers: authHeaders(apiToken) });
-  return parseResponse(response, "读取分析任务失败");
-}
-
-async function failJob(tabId, error) {
-  const state = tabStates.get(tabId);
-  if (!state) return;
-  stopPolling(tabId);
+async function handleCaptureError({ error }) {
+  const tabId = captureTabId;
+  const state = tabId ? tabStates.get(tabId) : null;
+  captureTabId = null;
+  if (!state) return { ok: true, ignored: true };
+  state.captureStarted = false;
   state.status = "error";
-  const message = error instanceof Error ? error.message : String(error);
-  await forwardToTab(tabId, { type: "CAPTURE_ERROR", tabId, error: message }, state.frameId);
-  const transient = /job_not_found|fetch failed|未启动|ECONNREFUSED|EAI_AGAIN|network/i.test(message);
-  const attempts = (recoveryAttempts.get(tabId) || 0) + 1;
-  recoveryAttempts.set(tabId, attempts);
-  if (transient && attempts <= 2 && !state.recoveryScheduled) {
-    state.recoveryScheduled = true;
-    setTimeout(() => {
-      const current = tabStates.get(tabId);
-      if (!current || current.status !== "error") return;
-      analyzeVideo({
-        tabId,
-        serverUrl: current.serverUrl,
-        apiToken: current.apiToken,
-        pageUrl: current.pageUrl,
-        selection: current.selection,
-        translate: current.translate
-      }).catch(() => undefined);
-    }, 2_000);
-  }
+  state.captureNeedsGesture = true;
+  state.stageDetail = "实时字幕已断开 · 点一下图标或按 Alt+K 重试";
+  captureStreamIds.delete(tabId);
+  trace(tabId, "capture-error", String(error || ""));
+  await forwardToTab(tabId, { type: "LIVE_STOP", jobId: state.jobId }, state.frameId);
+  await pushState(state);
+  return { ok: true };
 }
 
-async function stopAnalysis(tabId) {
+async function setTranslate(tabId, translate) {
   const state = tabStates.get(tabId);
-  stopPolling(tabId);
-  tabStates.delete(tabId);
-  if (state) void cancelJob(state);
-  await forwardToTab(tabId, { type: "JOB_STATUS", tabId, status: "idle", progress: 0 }, state?.frameId);
-  return { ok: true, state: { status: "idle" } };
+  if (!state) return { ok: true, ignored: true };
+  state.translate = Boolean(translate);
+  // 重连识别会话，让之后推送的字幕带/不带翻译
+  if (state.captureStarted) await resetCaptureSession(state);
+  await pushState(state);
+  return { ok: true };
 }
 
-async function cancelJob(state) {
-  if (!state?.serverUrl || !state?.jobId) return;
+async function ensureOffscreen() {
+  const url = chrome.runtime.getURL("offscreen.html");
   try {
-    await fetch(`${state.serverUrl}/api/jobs/${state.jobId}/cancel`, {
-      method: "POST",
-      headers: authHeaders(state.apiToken)
-    });
+    const contexts = await chrome.runtime.getContexts?.({ contextTypes: ["OFFSCREEN_DOCUMENT"] }).catch(() => []);
+    if (contexts?.some((context) => context.documentUrl === url)) return;
   } catch {
-    // 本地助手旧版本没有 cancel 接口时静默跳过
+    // 环境不支持 getContexts 时直接尝试创建
+  }
+  await chrome.offscreen.createDocument({
+    url: "offscreen.html",
+    reasons: ["USER_MEDIA", "AUDIO_PLAYBACK"],
+    justification: "捕获当前标签页正在播放的声音，用于实时字幕与翻译"
+  });
+}
+
+function cleanupTab(tabId) {
+  const state = tabStates.get(tabId);
+  if (state?.captureStarted) void stopCapture(state);
+  tabStates.delete(tabId);
+  if (captureTabId === tabId) captureTabId = null;
+  captureStreamIds.delete(tabId);
+  void persistStates();
+}
+
+async function persistStates() {
+  try {
+    const entries = [...tabStates.entries()].map(([tabId, state]) => ({
+      tabId,
+      jobId: state.jobId,
+      frameId: state.frameId,
+      pageUrl: state.pageUrl,
+      sourceUrl: state.sourceUrl,
+      translate: state.translate,
+      liveOnly: true
+    }));
+    await chrome.storage.session.set({ koeTabs: entries });
+  } catch {
+    // 会话存储不可用时仅保留内存状态
   }
 }
 
-function stopPolling(tabId) {
-  const timer = pollers.get(tabId);
-  if (timer) clearInterval(timer);
-  pollers.delete(tabId);
+async function restoreStates() {
+  let entries = [];
+  try {
+    ({ koeTabs: entries } = await chrome.storage.session.get("koeTabs"));
+  } catch {
+    return;
+  }
+  for (const entry of entries || []) {
+    // 只恢复新版实时字幕状态；旧版残留的下载任务状态直接丢弃
+    if (!String(entry.jobId || "").startsWith("live-") || entry.liveOnly !== true) continue;
+    if (tabStates.has(entry.tabId)) continue;
+    tabStates.set(entry.tabId, {
+      tabId: entry.tabId,
+      frameId: entry.frameId || 0,
+      jobId: entry.jobId || `live-${entry.tabId}-${Date.now()}`,
+      status: "starting",
+      translate: entry.translate !== false,
+      sourceUrl: entry.sourceUrl || "",
+      pageUrl: entry.pageUrl || "",
+      liveOnly: true,
+      captureStarted: false,
+      captureNeedsGesture: true,
+      stageDetail: "点一下 Koe 图标，立即开始实时字幕",
+      startedAt: Date.now()
+    });
+  }
 }
 
+// ===== 找正在播放的主视频（只用来判断该不该开、有没有切视频） =====
 async function listVideos(tabId) {
   const frames = await chrome.scripting.executeScript({
     target: { tabId, allFrames: true },
-    func: () => [...document.querySelectorAll("video")].map((video, index) => {
-      const current = video.currentSrc || video.src || video.querySelector("source")?.src || "";
-      let sourceUrl = /^https?:/i.test(current) ? current : "";
-      if (!sourceUrl || sourceUrl === location.href) {
-        sourceUrl = findPageMediaUrl();
-      }
-      return {
-        index,
-        pageUrl: location.href,
-        hasVideo: true,
-        sourceUrl,
-        filename: document.title || "video",
-        durationMs: Number.isFinite(video.duration) ? Math.round(video.duration * 1_000) : null,
-        width: Number(video.videoWidth || 0),
-        height: Number(video.videoHeight || 0),
-        playing: Boolean(!video.paused && video.readyState >= 2),
-        currentTimeMs: Number.isFinite(video.currentTime) ? Math.round(video.currentTime * 1_000) : 0,
-        muted: Boolean(video.muted)
-      };
-
-      function findPageMediaUrl() {
-        try {
-          const text = [...document.scripts].map((script) => script.textContent || "").join("\n");
-          const unescapeUrl = (value) => String(value || "")
-            .replace(/\\\//g, "/")
-            .replace(/&amp;/g, "&")
-            .replace(/\\u0026/g, "&")
-            .replace(/\\u0022/g, '"');
-          const masters = text.match(/https?:\\?\/\\?\/[^"'\s<>]+?master\.m3u8[^"'\s<>]*/g) || [];
-          if (masters.length) {
-            const picked = [...masters].sort((left, right) => (
-              (bitrateOf(left) - bitrateOf(right)) || (resolutionOf(left) - resolutionOf(right))
-            ))[0];
-            return unescapeUrl(picked);
-          }
-          const hls = text.match(/https?:\\?\/\\?\/[^"'\s<>]+?\.m3u8[^"'\s<>]*/);
-          if (hls) return unescapeUrl(hls[0]);
-          const mp4s = text.match(/https?:\\?\/\\?\/[^"'\s<>]+?\.mp4[^"'\s<>]*/g) || [];
-          const video = mp4s.find((url) => !/thumb|poster|preview|sprite/i.test(url));
-          if (video) return unescapeUrl(video);
-        } catch {
-          return "";
-        }
-        return "";
-      }
-
-      function bitrateOf(url) {
-        const match = String(url).match(/(\d+)K/i);
-        return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
-      }
-
-      function resolutionOf(url) {
-        const match = String(url).match(/(\d+)P/i);
-        return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
-      }
-    })
+    func: () => [...document.querySelectorAll("video")].map((video, index) => ({
+      index,
+      pageUrl: location.href,
+      hasVideo: true,
+      sourceUrl: video.currentSrc || video.src || video.querySelector("source")?.src || "",
+      durationMs: Number.isFinite(video.duration) ? Math.round(video.duration * 1_000) : null,
+      width: Number(video.videoWidth || 0),
+      height: Number(video.videoHeight || 0),
+      playing: Boolean(!video.paused && video.readyState >= 2),
+      muted: Boolean(video.muted)
+    }))
   });
   const videos = [];
   for (const frame of frames) {
-    for (const video of frame.result || []) {
-      videos.push({ ...video, frameId: frame.frameId });
-    }
+    for (const video of frame.result || []) videos.push({ ...video, frameId: frame.frameId });
   }
-  return { ok: true, videos };
+  return videos;
 }
 
-async function discoverVideoSource(tabId, pageUrl, selection) {
-  const { videos } = await listVideos(tabId);
-  let source = null;
-  if (selection) {
-    source = videos.find((video) => `${video.frameId}:${video.index}` === selection);
-  } else {
-    const scored = [...videos].sort((left, right) => videoScore(right) - videoScore(left));
-    source = scored.find((video) => isUsableMediaSource(video)) || scored[0];
-  }
+async function discoverVideoSource(tabId, pageUrl) {
+  const videos = await listVideos(tabId);
+  const candidates = videos.filter((video) => !isAdSource(video.sourceUrl || ""));
+  const scored = [...candidates].sort((left, right) => videoScore(right) - videoScore(left));
+  const source = scored.find((video) => video.playing) || null;
   return source ? { ...source, pageUrl: pageUrl || source.pageUrl } : { hasVideo: false };
-}
-
-function isUsableMediaSource(video) {
-  if (!video.sourceUrl) return false;
-  try {
-    const source = new URL(video.sourceUrl);
-    const page = new URL(video.pageUrl || "");
-    return !(source.hostname === page.hostname && source.pathname === page.pathname);
-  } catch {
-    return true;
-  }
 }
 
 function videoScore(video) {
   if (isAdSource(video.sourceUrl || "")) return -1_000_000_000_000;
-  let score = video.sourceUrl ? 1_000_000_000 : 0;
+  // 大画面、正在播放、未静音的主播放器优先；
+  // 之前评分太平均，可能选中小广告/隐藏预览，字幕被送到看不见的 frame
+  let score = Number(video.width || 0) * Number(video.height || 0);
   if (Number(video.width) > 0 && (Number(video.width) < 320 || Number(video.height) < 180)) {
     score -= 500_000_000;
   }
+  if (video.playing) score += 100_000_000;
+  if (video.muted) score -= 100_000;
   score += Math.min(Number(video.durationMs || 0) / 1_000, 600) * 100;
-  if (video.playing) score += 100_000;
-  if (Number(video.currentTimeMs || 0) > 0) score += 10_000;
-  if (video.muted) score -= 10_000;
   return score;
 }
 
@@ -444,64 +420,15 @@ function isAdSource(sourceUrl) {
 }
 
 const AD_HOSTS = [
-  "doubleclick.net",
-  "googlesyndication.com",
-  "googleadservices.com",
-  "google-analytics.com",
-  "outbrain.com",
-  "taboola.com",
-  "adnxs.com",
-  "adsrvr.org",
-  "criteo.com",
-  "amazon-adsystem.com",
-  "rubiconproject.com",
-  "appnexus.com",
-  "pubmatic.com",
-  "openx.net",
-  "casalemedia.com",
-  "smartadserver.com",
-  "mopub.com",
-  "adcolony.com",
-  "yieldmo.com",
-  "sharethrough.com",
-  "districtm.io",
-  "adform.net",
-  "indexww.com",
-  "sovrn.com",
-  "spotx.tv",
-  "instreamatic.com",
-  "adroll.com",
-  "quantserve.com",
-  "scorecardresearch.com",
-  "krxd.net",
-  "moatads.com",
-  "serving-sys.com",
-  "contextweb.com",
-  "lijit.com",
-  "tribalfusion.com",
-  "media.net",
-  "adtech.com",
-  "advertising.com",
-  "z5x.net",
-  "ad-srv.net",
-  "adserver.com"
+  "doubleclick.net", "googlesyndication.com", "googleadservices.com", "google-analytics.com",
+  "outbrain.com", "taboola.com", "adnxs.com", "adsrvr.org", "criteo.com", "amazon-adsystem.com",
+  "rubiconproject.com", "appnexus.com", "pubmatic.com", "openx.net", "casalemedia.com",
+  "smartadserver.com", "mopub.com", "adcolony.com", "yieldmo.com", "sharethrough.com",
+  "districtm.io", "adform.net", "indexww.com", "sovrn.com", "spotx.tv", "instreamatic.com",
+  "adroll.com", "quantserve.com", "scorecardresearch.com", "krxd.net", "moatads.com",
+  "serving-sys.com", "contextweb.com", "lijit.com", "tribalfusion.com", "media.net",
+  "adtech.com", "advertising.com", "z5x.net", "ad-srv.net", "adserver.com", "sinaimg.cn"
 ];
-
-async function ensureContentScript(tabId, frameId = 0) {
-  try {
-    await chrome.tabs.sendMessage(tabId, { type: "PING" }, { frameId });
-  } catch {
-    await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, files: ["content.js"] });
-  }
-}
-
-async function forwardToTab(tabId, message, frameId = 0) {
-  try { return await chrome.tabs.sendMessage(tabId, message, { frameId: Number(frameId) || 0 }); } catch { return { ok: false, ignored: true }; }
-}
-
-function publicState(state) {
-  return { status: state.status, jobId: state.jobId, startedAt: state.startedAt, progress: state.progress, jobStatus: state.jobStatus, stageDetail: state.stageDetail, hasDuration: Boolean(state.hasDuration), fromCache: Boolean(state.fromCache) };
-}
 
 function normalizeSourceKey(value) {
   try {
@@ -522,15 +449,54 @@ function normalizeSourceKey(value) {
   }
 }
 
-async function parseResponse(response, fallback) {
-  const body = await response.json().catch(() => ({}));
-  if (response.status === 401) {
-    throw new Error("Koe API Token 不正确。请填写服务器的 KOE_API_TOKEN，不要填写 DashScope API Key。");
+async function ensureContentScript(tabId, frameId = 0) {
+  try {
+    await chrome.tabs.sendMessage(tabId, { type: "PING" }, { frameId });
+  } catch {
+    await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, files: ["content.js"] });
   }
-  if (!response.ok) throw new Error(body.error || `${fallback}（${response.status}）`);
-  return body;
 }
 
-function authHeaders(apiToken) {
-  return apiToken ? { Authorization: `Bearer ${apiToken}` } : {};
+async function forwardToTab(tabId, message, frameId = 0) {
+  try {
+    return await chrome.tabs.sendMessage(tabId, message, { frameId: Number(frameId) || 0 });
+  } catch {
+    return { ok: false, ignored: true };
+  }
+}
+
+async function pushState(state) {
+  await forwardToTab(state.tabId, {
+    type: "LIVE_STATE",
+    jobId: state.jobId,
+    translate: state.translate,
+    status: state.status,
+    captureActive: Boolean(state.captureStarted),
+    captureNeedsGesture: Boolean(state.captureNeedsGesture),
+    stageDetail: state.stageDetail
+  }, state.frameId);
+}
+
+function publicState(state) {
+  if (!state) return { status: "idle" };
+  return {
+    status: state.status,
+    jobId: state.jobId,
+    translate: state.translate,
+    captureActive: Boolean(state.captureStarted),
+    captureNeedsGesture: Boolean(state.captureNeedsGesture),
+    stageDetail: state.stageDetail
+  };
+}
+
+function trace(tabId, event, extra = "") {
+  try {
+    void fetch(`${SERVER_URL}/api/trace`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tabId, event, extra })
+    });
+  } catch {
+    // 追踪日志失败不影响主流程
+  }
 }

@@ -30,7 +30,6 @@ export function createRealtimeAsr({
   });
   taskStarted.catch(() => undefined);
   taskFinished.catch(() => undefined);
-  let closeReason = "";
   let open = false;
   let closed = false;
   let socketError = null;
@@ -82,6 +81,7 @@ export function createRealtimeAsr({
         }
       });
       socket.on("error", (error) => {
+        clearTimeout(timer);
         socketError = error;
         const message = error?.message || "websocket_error";
         startedReject?.(new Error(message));
@@ -90,7 +90,6 @@ export function createRealtimeAsr({
         finishedReject = null;
       });
       const timer = setTimeout(() => {
-        closeReason = "connect_timeout";
         reject(new Error("realtime_connect_timeout"));
         try { socket.terminate(); } catch { /* ignore */ }
       }, timeoutMs);
@@ -103,7 +102,6 @@ export function createRealtimeAsr({
         clearTimeout(timer);
         closed = true;
         open = false;
-        closeReason = `closed:${code}:${String(reason || "")}`;
         console.log(`[koe] realtime ws closed code=${code} reason=${String(reason || "")}`);
         const detail = socketError?.message || reason || code;
         startedReject?.(new Error(`realtime_closed_before_start:${detail}`));
@@ -186,7 +184,6 @@ export function createRealtimeAsr({
       open = false;
       closed = true;
     },
-    get closeReason() { return closeReason; },
     get closed() { return closed; }
   };
 }

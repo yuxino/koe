@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createLineFilter, groupWordsToSubtitles, toWebVtt } from "../src/server/transcript.js";
+import { createLineFilter, groupWordsToSubtitles } from "../src/server/transcript.js";
 
 test("groups words at terminal punctuation", () => {
   const result = groupWordsToSubtitles([
@@ -48,38 +48,6 @@ test("breaks overlong lines at the last comma", () => {
   assert.deepEqual(result.map((line) => line.text), ["第一部分，", "第二部分第三"]);
 });
 
-test("formats the complete transcript as WebVTT", () => {
-  assert.equal(toWebVtt([{ startMs: 1_000, endMs: 2_500, text: "你好" }]), [
-    "WEBVTT",
-    "",
-    "1",
-    "00:00:01.000 --> 00:00:02.500",
-    "你好",
-    ""
-  ].join("\n"));
-});
-
-test("formats bilingual cues with original and translated lines", () => {
-  assert.equal(toWebVtt([{ startMs: 1_000, endMs: 2_500, text: "Hello world", translated: "你好世界" }]), [
-    "WEBVTT",
-    "",
-    "1",
-    "00:00:01.000 --> 00:00:03.750",
-    "Hello world",
-    "你好世界",
-    ""
-  ].join("\n"));
-});
-
-test("enforces a minimum display duration without overlapping the next cue", () => {
-  const vtt = toWebVtt([
-    { startMs: 1_000, endMs: 1_300, text: "嗯" },
-    { startMs: 1_500, endMs: 2_000, text: "好的" }
-  ]);
-  assert.match(vtt, /00:00:01\.000 --> 00:00:01\.420/);
-  assert.match(vtt, /00:00:01\.500 --> 00:00:02\.500/);
-});
-
 test("drops long cross-language hallucinated lines", () => {
   const filter = createLineFilter();
   const kept = filter([
@@ -90,4 +58,15 @@ test("drops long cross-language hallucinated lines", () => {
   const dropped = filter([{ startMs: 3_000, endMs: 5_000, text: "2016年1月19日，被告人李建平被公安机关抓获。" }]);
   assert.equal(kept.length, 3);
   assert.equal(dropped.length, 0);
+});
+
+test("drops single-letter and symbol-only noise lines", () => {
+  const filter = createLineFilter();
+  const kept = filter([
+    { startMs: 0, endMs: 1_000, text: "T" },
+    { startMs: 1_000, endMs: 2_000, text: "..." },
+    { startMs: 2_000, endMs: 3_000, text: "嗯" },
+    { startMs: 3_000, endMs: 4_000, text: "Давай" }
+  ]);
+  assert.deepEqual(kept.map((line) => line.text), ["嗯", "Давай"]);
 });

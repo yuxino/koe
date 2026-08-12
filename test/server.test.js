@@ -1,498 +1,65 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
 import { createServer } from "../src/server/index.js";
 
-test("mock server creates a complete batch caption job", async (t) => {
-  const app = createServer({ port: 0, provider: "mock" });
+test("health reports capture state and api configuration", async (t) => {
+  const app = createServer({ port: 0, apiKey: "test-key" });
   await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
   t.after(() => app.server.close());
-  const address = app.server.address();
-  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const port = app.server.address().port;
 
-  const health = await fetch(`${baseUrl}/health`).then((response) => response.json());
-  assert.equal(health.mode, "batch");
-  assert.equal(health.provider, "mock");
-
-  const created = await fetch(`${baseUrl}/api/jobs`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ pageUrl: "https://www.pornhub.com/view_video.php?viewkey=test", filename: "sample.mp4" })
-  }).then((response) => response.json());
-  assert.ok(["queued", "downloading", "analyzing", "ready"].includes(created.status));
-
-  const ready = await waitForJob(baseUrl, created.id);
-  assert.equal(ready.status, "ready");
-  assert.equal(ready.lineCount, 1);
-  assert.equal(ready.stageDetail, "模拟识别");
-
-  const vtt = await fetch(`${baseUrl}/api/jobs/${created.id}/vtt`).then((response) => response.text());
-  assert.match(vtt, /^WEBVTT/);
-  assert.match(vtt, /演示字幕/);
-});
-
-test("reuses cached subtitles for the same source url", async (t) => {
-  const cacheDir = await mkdtemp(join(tmpdir(), "koe-cache-test-"));
-  t.after(() => rm(cacheDir, { recursive: true, force: true }));
-  let runs = 0;
-  const app = createServer({
-    port: 0,
-    provider: "mock",
-    cacheRoot: cacheDir,
-    processJob: async () => {
-      runs += 1;
-      const lines = [{ startMs: 0, endMs: 1_000, text: "缓存测试", translated: "缓存测试" }];
-      return { lines, vtt: `WEBVTT\n\n1\n00:00:00.000 --> 00:00:01.000\n缓存测试\n缓存测试\n` };
-    }
-  });
-  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
-  t.after(() => app.server.close());
-  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
-  const sourceUrl = "https://cdn.example.com/video.mp4";
-
-  const first = await createJob({ sourceUrl });
-  assert.equal((await waitForJob(baseUrl, first.id)).status, "ready");
-  assert.equal(runs, 1);
-
-  const second = await createJob({ sourceUrl });
-  assert.equal(second.status, "ready");
-  assert.equal(second.fromCache, true);
-  assert.equal(runs, 1);
-
-  const seek = await createJob({ sourceUrl, startMs: 500 });
-  assert.equal(seek.status, "ready");
-  assert.equal(seek.fromCache, true);
-  assert.equal(runs, 1);
-  const seekVtt = await fetch(`${baseUrl}/api/jobs/${seek.id}/vtt`).then((response) => response.text());
-  const firstCue = seekVtt.split(/\n\s*\n/).find((cue) => cue.includes("-->")) || "";
-  assert.match(firstCue, /00:00:00\.000 -->/);
-  assert.match(firstCue, /缓存测试/);
-
-  async function createJob(body) {
-    return fetch(`${baseUrl}/api/jobs`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ pageUrl: "https://www.pornhub.com/view_video.php?viewkey=test", filename: "cached.mp4", ...body })
-    }).then((response) => response.json());
-  }
-});
-
-test("cache hits across expiring CDN signatures in the source url", async (t) => {
-  const cacheDir = await mkdtemp(join(tmpdir(), "koe-cache-token-"));
-  t.after(() => rm(cacheDir, { recursive: true, force: true }));
-  let runs = 0;
-  const app = createServer({
-    port: 0,
-    provider: "mock",
-    cacheRoot: cacheDir,
-    processJob: async () => {
-      runs += 1;
-      const lines = [{ startMs: 0, endMs: 1_000, text: "签名缓存", translated: "签名缓存" }];
-      return { lines, vtt: `WEBVTT\n\n1\n00:00:00.000 --> 00:00:01.000\n签名缓存\n签名缓存\n` };
-    }
-  });
-  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
-  t.after(() => app.server.close());
-  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
-
-  const first = await createJob({ sourceUrl: "https://cdn.example.com/v.mp4?secure=token-a&x=1" });
-  assert.equal((await waitForJob(baseUrl, first.id)).status, "ready");
-  assert.equal(runs, 1);
-
-  const second = await createJob({ sourceUrl: "https://cdn.example.com/v.mp4?secure=token-b&x=1" });
-  assert.equal(second.status, "ready");
-  assert.equal(second.fromCache, true);
-  assert.equal(runs, 1);
-
-  const third = await createJob({ sourceUrl: "https://cdn.example.com/v.mp4?secure=token-c&x=2" });
-  assert.equal(third.status, "queued");
-  assert.equal((await waitForJob(baseUrl, third.id)).status, "ready");
-  assert.equal(runs, 2);
-
-  async function createJob(body) {
-    return fetch(`${baseUrl}/api/jobs`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ pageUrl: "https://www.pornhub.com/view_video.php?viewkey=test", filename: "signed.mp4", ...body })
-    }).then((response) => response.json());
-  }
-});
-
-test("seeds cached subtitles and continues analysis from the covered region", async (t) => {
-  const cacheDir = await mkdtemp(join(tmpdir(), "koe-cache-seed-"));
-  t.after(() => rm(cacheDir, { recursive: true, force: true }));
-  const runs = [];
-  const app = createServer({
-    port: 0,
-    provider: "mock",
-    cacheRoot: cacheDir,
-    processJob: async (job) => {
-      runs.push({ streamStartMs: job.streamStartMs, seededLines: job.lines.length });
-      const startMs = Number(job.streamStartMs) || 0;
-      const lines = [{ startMs, endMs: startMs + 2_000, text: `line@${startMs}` }];
-      return { lines, vtt: `WEBVTT\n\n1\n00:00:00.000 --> 00:00:02.000\nline@${startMs}\n` };
-    }
-  });
-  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
-  t.after(() => app.server.close());
-  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
-  const sourceUrl = "https://cdn.example.com/progressive.mp4";
-
-  const first = await createJob({ sourceUrl, startMs: 120_000 });
-  assert.equal((await waitForJob(baseUrl, first.id)).status, "ready");
-  assert.deepEqual(runs[0], { streamStartMs: 120_000, seededLines: 0 });
-
-  const second = await createJob({ sourceUrl, startMs: 0 });
-  assert.notEqual(second.status, "ready");
-  assert.equal((await waitForJob(baseUrl, second.id)).status, "ready");
-  assert.deepEqual(runs[1], { streamStartMs: 0, seededLines: 1 });
-
-  const third = await createJob({ sourceUrl, startMs: 90_000 });
-  assert.equal((await waitForJob(baseUrl, third.id)).status, "ready");
-  assert.deepEqual(runs[2], { streamStartMs: 122_000, seededLines: 1 });
-
-  async function createJob(body) {
-    return fetch(`${baseUrl}/api/jobs`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ pageUrl: "https://www.pornhub.com/view_video.php?viewkey=test", filename: "progressive.mp4", ...body })
-    }).then((response) => response.json());
-  }
-});
-
-test("accepts a local video upload as a batch job", async (t) => {
-  const app = createServer({ port: 0, provider: "mock" });
-  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
-  t.after(() => app.server.close());
-  const address = app.server.address();
-  const baseUrl = `http://127.0.0.1:${address.port}`;
-
-  const created = await fetch(`${baseUrl}/api/jobs`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ upload: true, filename: "local.mp4" })
-  }).then((response) => response.json());
-  assert.equal(created.status, "queued");
-
-  const upload = await fetch(`${baseUrl}/api/jobs/${created.id}/source`, {
-    method: "POST",
-    headers: { "content-type": "video/mp4", "x-filename": "local.mp4" },
-    body: Buffer.from("fake-video")
-  });
-  assert.equal(upload.status, 202);
-  assert.equal((await waitForJob(baseUrl, created.id)).status, "ready");
-});
-
-test("rejects unsupported page sources", async (t) => {
-  const app = createServer({ port: 0, provider: "mock" });
-  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
-  t.after(() => app.server.close());
-  const address = app.server.address();
-  const response = await fetch(`http://127.0.0.1:${address.port}/api/jobs`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ pageUrl: "https://example.com/video" })
-  });
-  assert.equal(response.status, 400);
-  assert.equal((await response.json()).error, "unsupported_page_source");
-});
-
-test("protects batch jobs when an API token is configured", async (t) => {
-  const app = createServer({ port: 0, provider: "mock", apiToken: "secret-token" });
-  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
-  t.after(() => app.server.close());
-  const address = app.server.address();
-  const baseUrl = `http://127.0.0.1:${address.port}`;
-
-  const unauthorized = await fetch(`${baseUrl}/api/jobs`, { method: "POST" });
-  assert.equal(unauthorized.status, 401);
-
-  const authorized = await fetch(`${baseUrl}/api/jobs`, {
-    method: "POST",
-    headers: { Authorization: "Bearer secret-token", "content-type": "application/json" },
-    body: JSON.stringify({ pageUrl: "https://xvideos.com/video-test" })
-  });
-  assert.equal(authorized.status, 202);
-});
-
-test("reports in-flight job count in health", async (t) => {
-  let release;
-  const gate = new Promise((resolve) => { release = resolve; });
-  const app = createServer({
-    port: 0,
-    provider: "mock",
-    processJob: async () => {
-      await gate;
-      return { vtt: "WEBVTT\n\n", lines: [] };
-    }
-  });
-  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
-  t.after(() => app.server.close());
-  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
-
-  const created = await fetch(`${baseUrl}/api/jobs`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ upload: true, filename: "busy.wav" })
-  }).then((response) => response.json());
-  await fetch(`${baseUrl}/api/jobs/${created.id}/source`, {
-    method: "POST",
-    headers: { "content-type": "audio/wav" },
-    body: Buffer.from("x")
-  });
-  await new Promise((resolve) => setTimeout(resolve, 20));
-
-  const busy = await fetch(`${baseUrl}/health`).then((response) => response.json());
-  assert.equal(busy.activeJobs, 1);
-
-  release();
-  assert.equal((await waitForJob(baseUrl, created.id)).status, "ready");
-  const idle = await fetch(`${baseUrl}/health`).then((response) => response.json());
-  assert.equal(idle.activeJobs, 0);
-});
-
-test("cancels a running job and marks it cancelled", async (t) => {
-  let release;
-  const gate = new Promise((resolve) => { release = resolve; });
-  const app = createServer({
-    port: 0,
-    provider: "mock",
-    processJob: async (job, context) => {
-      await gate;
-      if (context.signal?.aborted) {
-        const error = new Error("job_cancelled");
-        error.name = "AbortError";
-        throw error;
-      }
-      return { lines: [], vtt: "WEBVTT\n\n" };
-    }
-  });
-  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
-  t.after(() => app.server.close());
-  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
-
-  const created = await fetch(`${baseUrl}/api/jobs`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ upload: true, filename: "cancel.wav" })
-  }).then((response) => response.json());
-  await fetch(`${baseUrl}/api/jobs/${created.id}/source`, {
-    method: "POST",
-    headers: { "content-type": "audio/wav" },
-    body: Buffer.from("x")
-  });
-  await new Promise((resolve) => setTimeout(resolve, 20));
-
-  const cancelled = await fetch(`${baseUrl}/api/jobs/${created.id}/cancel`, { method: "POST" });
-  assert.equal(cancelled.status, 202);
-  release();
-
-  const job = await waitForJob(baseUrl, created.id);
-  assert.equal(job.status, "cancelled");
-});
-
-test("saves recognized lines into the cache when a job is cancelled", async (t) => {
-  const cacheDir = await mkdtemp(join(tmpdir(), "koe-cache-cancel-"));
-  t.after(() => rm(cacheDir, { recursive: true, force: true }));
-  let release;
-  const gate = new Promise((resolve) => { release = resolve; });
-  let runs = 0;
-  const app = createServer({
-    port: 0,
-    provider: "mock",
-    cacheRoot: cacheDir,
-    processJob: async (job) => {
-      runs += 1;
-      if (runs === 1) {
-        job.lines.push({ startMs: 5_000, endMs: 7_000, text: "被取消前的字幕" });
-        await gate;
-        throw new Error("cancelled-by-test");
-      }
-      const startMs = Number(job.streamStartMs) || 0;
-      return {
-        lines: [{ startMs, endMs: startMs + 1_000, text: `新字幕@${startMs}` }],
-        vtt: `WEBVTT\n\n1\n00:00:00.000 --> 00:00:01.000\n新字幕\n`
-      };
-    }
-  });
-  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
-  t.after(() => app.server.close());
-  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
-  const sourceUrl = "https://cdn.example.com/cancelled.mp4";
-
-  const first = await createJob({ sourceUrl, startMs: 0 });
-  await new Promise((resolve) => setTimeout(resolve, 30));
-  await fetch(`${baseUrl}/api/jobs/${first.id}/cancel`, { method: "POST" });
-  release();
-  assert.equal((await waitForJob(baseUrl, first.id)).status, "cancelled");
-
-  const second = await createJob({ sourceUrl, startMs: 0 });
-  assert.notEqual(second.status, "ready");
-  assert.equal((await waitForJob(baseUrl, second.id)).status, "ready");
-  const vtt = await fetch(`${baseUrl}/api/jobs/${second.id}/vtt`).then((response) => response.text());
-  assert.match(vtt, /被取消前的字幕/);
-
-  async function createJob(body) {
-    return fetch(`${baseUrl}/api/jobs`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ pageUrl: "https://www.pornhub.com/view_video.php?viewkey=test", filename: "cancelled.mp4", ...body })
-    }).then((response) => response.json());
-  }
-});
-
-test("streams partial subtitles and accepts seek prioritization", async (t) => {
-  const app = createServer({
-    port: 0,
-    provider: "mock",
-    processJob: async (job) => {
-      await new Promise((resolve) => setTimeout(resolve, 40));
-      job.lines.push({ startMs: 0, endMs: 1_000, text: "你好" });
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      return { lines: job.lines, vtt: "WEBVTT\n\n1\n00:00:00.000 --> 00:00:01.000\n你好\n" };
-    }
-  });
-  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
-  t.after(() => app.server.close());
-  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
-
-  const created = await fetch(`${baseUrl}/api/jobs`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ upload: true, filename: "progressive.wav" })
-  }).then((response) => response.json());
-  await fetch(`${baseUrl}/api/jobs/${created.id}/source`, {
-    method: "POST",
-    headers: { "content-type": "audio/wav" },
-    body: Buffer.from("x")
-  });
-  await new Promise((resolve) => setTimeout(resolve, 50));
-
-  const partial = await fetch(`${baseUrl}/api/jobs/${created.id}/partial`).then((response) => response.json());
-  assert.equal(partial.lineCount, 1);
-  assert.match(partial.vtt, /你好/);
-
-  const prioritize = await fetch(`${baseUrl}/api/jobs/${created.id}/prioritize`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ timeMs: 12_000 })
-  });
-  assert.equal(prioritize.status, 202);
-});
-
-test("local relay mode accepts a generic public video page", async (t) => {
-  const app = createServer({
-    port: 0,
-    remoteUrl: "https://koe-api.example.test",
-    remoteToken: "remote-secret",
-    processJob: async () => ({ vtt: "WEBVTT\n\n", lines: [] })
-  });
-  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
-  t.after(() => app.server.close());
-  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
-
-  const health = await fetch(`${baseUrl}/health`).then((response) => response.json());
-  assert.equal(health.mode, "local-relay");
+  const health = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
+  assert.equal(health.ok, true);
+  assert.equal(health.service, "koe");
+  assert.equal(health.apiConfigured, true);
   assert.equal(health.localProcessing, true);
-  assert.equal(health.provider, "relay");
+  assert.equal(typeof health.activeCaptures, "number");
+});
 
-  const response = await fetch(`${baseUrl}/api/jobs`, {
+test("root lists only the realtime endpoints", async (t) => {
+  const app = createServer({ port: 0, apiKey: "test-key" });
+  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
+  t.after(() => app.server.close());
+  const port = app.server.address().port;
+
+  const body = await fetch(`http://127.0.0.1:${port}/`).then((response) => response.json());
+  assert.equal(body.mode, "realtime");
+  assert.equal(body.capture, "/api/capture/ws");
+  assert.equal(body.jobs, undefined);
+});
+
+test("unknown routes return 404", async (t) => {
+  const app = createServer({ port: 0, apiKey: "test-key" });
+  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
+  t.after(() => app.server.close());
+  const port = app.server.address().port;
+
+  const response = await fetch(`http://127.0.0.1:${port}/api/jobs`);
+  assert.equal(response.status, 404);
+});
+
+test("rejects requests from unknown web origins", async (t) => {
+  const app = createServer({ port: 0, apiKey: "test-key" });
+  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
+  t.after(() => app.server.close());
+  const port = app.server.address().port;
+
+  const response = await fetch(`http://127.0.0.1:${port}/health`, {
+    headers: { origin: "https://evil.example" }
+  });
+  assert.equal(response.status, 403);
+});
+
+test("accepts trace messages", async (t) => {
+  const app = createServer({ port: 0, apiKey: "test-key" });
+  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
+  t.after(() => app.server.close());
+  const port = app.server.address().port;
+
+  const response = await fetch(`http://127.0.0.1:${port}/api/trace`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ pageUrl: "https://unknown.example/watch/1", filename: "generic-video" })
+    body: JSON.stringify({ tabId: 1, event: "test" })
   });
   assert.equal(response.status, 202);
-  const created = await response.json();
-  assert.equal((await waitForJob(baseUrl, created.id)).status, "ready");
 });
-
-const ffmpegBin = resolveFfmpeg();
-
-test("local dashscope mode reports fully local processing", async (t) => {
-  const app = createServer({ port: 0, provider: "dashscope", apiKey: "test-key", localAsr: true });
-  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
-  t.after(() => app.server.close());
-  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
-
-  const health = await fetch(`${baseUrl}/health`).then((response) => response.json());
-  assert.equal(health.provider, "dashscope");
-  assert.equal(health.mode, "local");
-  assert.equal(health.localProcessing, true);
-});
-
-test("local relay mode relays an uploaded audio file", { skip: !ffmpegBin && "ffmpeg not available" }, async (t) => {
-  const remote = createServer({ port: 0, provider: "mock" });
-  await new Promise((resolve) => remote.server.listen(0, "127.0.0.1", resolve));
-  t.after(() => remote.server.close());
-  const app = createServer({
-    port: 0,
-    ffmpegBin,
-    remoteUrl: `http://127.0.0.1:${remote.server.address().port}`,
-    remoteToken: ""
-  });
-  await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
-  t.after(() => app.server.close());
-  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
-
-  const created = await fetch(`${baseUrl}/api/jobs`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ upload: true, filename: "capture.wav" })
-  }).then((response) => response.json());
-  assert.equal(created.status, "queued");
-
-  const upload = await fetch(`${baseUrl}/api/jobs/${created.id}/source`, {
-    method: "POST",
-    headers: { "content-type": "audio/wav", "x-filename": "capture.wav" },
-    body: createSilentWav(1_600)
-  });
-  assert.equal(upload.status, 202);
-  assert.equal((await waitForJob(baseUrl, created.id)).status, "ready");
-});
-
-async function waitForJob(baseUrl, id) {
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    const job = await fetch(`${baseUrl}/api/jobs/${id}`).then((response) => response.json());
-    if (job.status === "ready" || job.status === "error" || job.status === "cancelled") return job;
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  throw new Error("job did not finish in time");
-}
-
-function createSilentWav(sampleCount) {
-  const data = Buffer.alloc(sampleCount * 2);
-  const wav = Buffer.alloc(44 + data.length);
-  wav.write("RIFF", 0, "ascii");
-  wav.writeUInt32LE(36 + data.length, 4);
-  wav.write("WAVE", 8, "ascii");
-  wav.write("fmt ", 12, "ascii");
-  wav.writeUInt32LE(16, 16);
-  wav.writeUInt16LE(1, 20);
-  wav.writeUInt16LE(1, 22);
-  wav.writeUInt32LE(16_000, 24);
-  wav.writeUInt32LE(32_000, 28);
-  wav.writeUInt16LE(2, 32);
-  wav.writeUInt16LE(16, 34);
-  wav.write("data", 36, "ascii");
-  wav.writeUInt32LE(data.length, 40);
-  data.copy(wav, 44);
-  return wav;
-}
-
-function resolveFfmpeg() {
-  const candidates = [
-    process.env.FFMPEG_BIN,
-    "ffmpeg",
-    "/opt/homebrew/bin/ffmpeg",
-    "/usr/local/bin/ffmpeg",
-    join(homedir(), ".local/share/koe/venv/lib/python3.9/site-packages/imageio_ffmpeg/binaries/ffmpeg-macos-aarch64-v7.1")
-  ].filter(Boolean);
-  for (const candidate of candidates) {
-    if (existsSync(candidate) || spawnSync("which", [candidate]).status === 0) return candidate;
-  }
-  return null;
-}
