@@ -3,10 +3,12 @@ import { join } from "node:path";
 import { transcribeWav } from "./asr.js";
 import { createRealtimeAsr } from "./realtime.js";
 import { groupWordsToSubtitles } from "./transcript.js";
+import { createSemaphore } from "./semaphore.js";
 
 const FIRST_CHUNK_MS = 5_000;
 const CHUNK_MS = Math.max(10_000, Number(process.env.KOE_STREAM_CHUNK_SECONDS || 30) * 1_000);
 const REALTIME_FRAME_BYTES = Math.max(3_200, 16_000 * 2 * (Number(process.env.KOE_REALTIME_FRAME_MS || 250) / 1_000));
+const realtimeSessionSlots = createSemaphore(Math.max(1, Number(process.env.KOE_REALTIME_MAX_SESSIONS || 4)));
 
 export async function streamExtractAndTranscribe({
   pageUrl,
@@ -234,6 +236,22 @@ async function runRealtimeAttempt({
     spawned.kill();
   };
   signal?.addEventListener("abort", onAbort, { once: true });
+  const slotTimeoutMs = Math.max(5_000, Number(process.env.KOE_REALTIME_SLOT_TIMEOUT_MS || 60_000));
+  let slotTimedOut = false;
+  const acquired = realtimeSessionSlots.acquire().then((release) => {
+    if (slotTimedOut) {
+      release();
+      return () => undefined;
+    }
+    return release;
+  });
+  const releaseSlot = await Promise.race([
+    acquired,
+    delay(slotTimeoutMs).then(() => {
+      slotTimedOut = true;
+      throw new Error("realtime_session_slot_timeout");
+    })
+  ]);
 
   try {
     await asr.connect({
@@ -340,6 +358,7 @@ async function runRealtimeAttempt({
     log(`attempt dropped at ${formatPosition(shared.totalAudioMs)}: ${error?.message || String(error)}`);
     return { ok: false, error };
   } finally {
+    releaseSlot();
     signal?.removeEventListener("abort", onAbort);
     clearInterval(connectTicker);
     if (stallWatchdog) clearInterval(stallWatchdog);
