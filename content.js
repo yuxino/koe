@@ -185,7 +185,13 @@
 
   // 页面有视频即自动分析；按下播放也会触发（静音预览缩略图不触发，已有任务时不重复）
   chrome.runtime.sendMessage({ type: "PAGE_READY" }).catch(() => undefined);
-  window.setTimeout(() => {
+  let pageReadyAttempts = 0;
+  const pageReadyTimer = window.setInterval(() => {
+    if (processing || subtitleReady || errorShown || pageReadyAttempts >= 10) {
+      clearInterval(pageReadyTimer);
+      return;
+    }
+    pageReadyAttempts += 1;
     chrome.runtime.sendMessage({ type: "PAGE_READY" }).catch(() => undefined);
   }, 3_000);
   let lastPlayTriggerAt = 0;
