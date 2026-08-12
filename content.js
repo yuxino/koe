@@ -70,6 +70,8 @@
 
     if (message.type === "LIVE_PARTIAL") {
       try {
+        // 翻译模式下不显示中间原文，避免和即将补上的中文来回闪烁
+        if (translateOn) return false;
         const lines = Array.isArray(message.lines) ? message.lines : [];
         const line = lines[lines.length - 1];
         const text = line?.text;

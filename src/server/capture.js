@@ -137,10 +137,13 @@ export function createCaptureManager({
   }
 
   async function translateAfterFinal(session, seq, lines) {
+    // 还没开始翻译就被更新的整句取代，直接跳过，省一次接口调用
+    if (session.disposed || seq !== session.latestFinalSeq) return;
     let translated;
     try {
       const release = await translateSemaphore.acquire();
       try {
+        if (session.disposed || seq !== session.latestFinalSeq) return;
         translated = await translate({ lines, apiKey });
       } finally {
         release();
