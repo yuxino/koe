@@ -268,7 +268,12 @@ async function forwardCaptureLines(message, type) {
     trace(state.tabId, "content-inject", `frame=${state.frameId || 0}`);
     await pushState(state);
   }
-  trace(tabId, type === "LIVE_SUBTITLES" ? "capture-lines" : "capture-partial", `n=${lines.length} ignored=${Boolean(sent?.ignored)}`);
+  const eventName = type === "LIVE_SUBTITLES"
+    ? "capture-lines"
+    : type === "LIVE_TRANSLATED"
+      ? "capture-translated"
+      : "capture-partial";
+  trace(tabId, eventName, `n=${lines.length} ignored=${Boolean(sent?.ignored)}`);
   return { ok: true };
 }
 
