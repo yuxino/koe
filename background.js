@@ -43,7 +43,7 @@ async function handleVideoChanged(sender) {
   if (now - (lastVideoChangeAt.get(tabId) || 0) < 1_500) return { ok: true, skipped: true };
   lastVideoChangeAt.set(tabId, now);
   if (tabStates.has(tabId)) await stopAnalysis(tabId);
-  return { ok: true, skipped: true };
+  return handlePageReady({}, sender);
 }
 
 async function handlePlayAnalyze(message, sender) {

@@ -219,6 +219,7 @@
   // 悬浮球可拖动；拖动的位移超过阈值才算拖，否则视为点击
   let orbDragging = false;
   let orbMoved = false;
+  let suppressClick = false;
   let orbStartX = 0;
   let orbStartY = 0;
   let orbBaseLeft = 0;
@@ -226,6 +227,7 @@
   orb.addEventListener("pointerdown", (event) => {
     orbDragging = true;
     orbMoved = false;
+    suppressClick = false;
     orbStartX = event.clientX;
     orbStartY = event.clientY;
     const rect = orb.getBoundingClientRect();
@@ -237,8 +239,8 @@
     if (!orbDragging) return;
     const dx = event.clientX - orbStartX;
     const dy = event.clientY - orbStartY;
-    if (Math.abs(dx) + Math.abs(dy) > 6) orbMoved = true;
-    if (orbMoved) {
+    if (Math.abs(dx) + Math.abs(dy) > 10) {
+      orbMoved = true;
       orb.style.left = `${orbBaseLeft + dx}px`;
       orb.style.top = `${orbBaseTop + dy}px`;
       orb.style.right = "auto";
@@ -247,13 +249,23 @@
   });
   orb.addEventListener("pointerup", () => {
     orbDragging = false;
-    if (orbMoved) return;
-    if (!findVideo()) return;
-    chrome.runtime.sendMessage({ type: "ANALYZE_VIDEO", pageUrl: location.href, serverUrl: "http://127.0.0.1:8787", apiToken: "" })
-      .catch(() => undefined);
+    if (orbMoved) suppressClick = true;
   });
   orb.addEventListener("pointercancel", () => {
     orbDragging = false;
+    suppressClick = true;
+  });
+  orb.addEventListener("click", () => {
+    if (suppressClick) return;
+    if (processing) return; // 分析中点击不打断
+    chrome.runtime.sendMessage({ type: "ANALYZE_VIDEO", pageUrl: location.href, serverUrl: "http://127.0.0.1:8787", apiToken: "" })
+      .then((response) => {
+        if (response && response.ok === false) {
+          errorShown = true;
+          showStatus("无法分析", String(response.error || "未找到视频"), "ERROR");
+        }
+      })
+      .catch(() => undefined);
   });
 
   function tryAutoPlay() {
