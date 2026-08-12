@@ -83,7 +83,7 @@ export async function streamRealtimeTranscribe({
 }) {
   const startedAt = Date.now();
   const log = (message) => console.log(`[koe] realtime +${((Date.now() - startedAt) / 1_000).toFixed(1)}s ${message}`);
-  const aheadMs = Number(process.env.KOE_DOWNLOAD_AHEAD_MS || 30_000);
+  const aheadMs = Number(process.env.KOE_DOWNLOAD_AHEAD_MS || 90_000);
   const segmentCount = Math.max(1, Number(process.env.KOE_REALTIME_SEGMENTS || 2));
   const baseMs = Number(startMs) || 0;
   const totalMs = Number(durationMs) || 0;
