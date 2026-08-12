@@ -291,7 +291,9 @@ async function runRealtimeAttempt({
         await asr.sendFrame(frame.subarray(0, REALTIME_FRAME_BYTES));
         frame = frame.subarray(REALTIME_FRAME_BYTES);
       }
-      if (getPositionMs && isPlaying?.() && getPositionMs() >= videoOffsetMs && shared.totalAudioMs - getPositionMs() > aheadMs) {
+      if (getPositionMs && isPlaying?.()
+        && (!segmentEndMs || getPositionMs() < segmentEndMs)
+        && shared.totalAudioMs - getPositionMs() > aheadMs) {
         paced = true;
         spawned.pause();
         const silence = Buffer.alloc(REALTIME_FRAME_BYTES);
@@ -388,11 +390,13 @@ async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, on
   const stallTimer = setInterval(() => {
     if (Date.now() - lastAudioAt > streamStallMs) spawned.kill();
   }, 10_000);
+  stallTimer.unref?.();
   const connectTicker = setInterval(() => {
     if (gotAudio || !onProgress) return;
     const waited = Math.floor((Date.now() - startedAt) / 1_000);
     onProgress(0.08, `正在连接视频源 · ${waited}s`);
   }, 1_000);
+  connectTicker.unref?.();
   const queue = [];
   const failures = [];
   const processed = new Set();

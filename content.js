@@ -248,6 +248,9 @@
     chrome.runtime.sendMessage({ type: "ANALYZE_VIDEO", pageUrl: location.href, serverUrl: "http://127.0.0.1:8787", apiToken: "" })
       .catch(() => undefined);
   });
+  orb.addEventListener("pointercancel", () => {
+    orbDragging = false;
+  });
 
   function tryAutoPlay() {
     const now = Date.now();
