@@ -32,10 +32,11 @@ export function createRealtimeAsr({
   taskFinished.catch(() => undefined);
   let closeReason = "";
   let open = false;
+  let closed = false;
   let socketError = null;
 
   function sendFrame(chunk) {
-    if (!open) throw new Error("realtime_connection_not_open");
+    if (!open || closed) throw new Error("realtime_connection_closed");
     return new Promise((resolve, reject) => {
       socket.send(chunk, (error) => {
         if (error) reject(error);
@@ -100,7 +101,10 @@ export function createRealtimeAsr({
       });
       socket.on("close", (code, reason) => {
         clearTimeout(timer);
+        closed = true;
+        open = false;
         closeReason = `closed:${code}:${String(reason || "")}`;
+        console.log(`[koe] realtime ws closed code=${code} reason=${String(reason || "")}`);
         const detail = socketError?.message || reason || code;
         startedReject?.(new Error(`realtime_closed_before_start:${detail}`));
         finishedReject?.(new Error(`realtime_closed_before_finish:${detail}`));
@@ -165,6 +169,7 @@ export function createRealtimeAsr({
     },
     sendFrame,
     finish() {
+      if (!open || closed) return Promise.reject(new Error("realtime_connection_closed"));
       finishTask();
       return taskFinished;
     },
@@ -179,11 +184,16 @@ export function createRealtimeAsr({
         try { socket.terminate(); } catch { /* ignore */ }
       }
       open = false;
+      closed = true;
     },
-    get closeReason() { return closeReason; }
+    get closeReason() { return closeReason; },
+    get closed() { return closed; }
   };
 }
 
 function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 }

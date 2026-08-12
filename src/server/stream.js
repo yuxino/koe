@@ -65,7 +65,7 @@ export async function streamExtractAndTranscribe({
   });
 }
 
-async function streamRealtimeTranscribe({
+export async function streamRealtimeTranscribe({
   pageUrl,
   sourceUrl,
   ffmpegBin,
@@ -81,16 +81,138 @@ async function streamRealtimeTranscribe({
 }) {
   const startedAt = Date.now();
   const log = (message) => console.log(`[koe] realtime +${((Date.now() - startedAt) / 1_000).toFixed(1)}s ${message}`);
+  const aheadMs = Number(process.env.KOE_DOWNLOAD_AHEAD_MS || 30_000);
+  const segmentCount = Math.max(1, Number(process.env.KOE_REALTIME_SEGMENTS || 2));
+  const baseMs = Number(startMs) || 0;
+  const totalMs = Number(durationMs) || 0;
+  const options = {
+    pageUrl,
+    sourceUrl,
+    ffmpegBin,
+    apiKey,
+    onLines,
+    onPartial,
+    onProgress,
+    durationMs,
+    getPositionMs,
+    isPlaying,
+    signal,
+    aheadMs,
+    startedAt,
+    log
+  };
+
+  if (segmentCount <= 1 || !(totalMs > 0) || baseMs >= totalMs) {
+    const single = await runRealtimeWithRetries({ ...options, segmentStartMs: baseMs, segmentEndMs: null });
+    return { chunks: single.lines, realtime: true, partial: Boolean(single.partial) };
+  }
+
+  const segmentMs = Math.max(30_000, (totalMs - baseMs) / segmentCount);
+  const segments = [];
+  for (let index = 0; index < segmentCount; index += 1) {
+    const segmentStart = Math.round(baseMs + index * segmentMs);
+    const segmentEnd = Math.min(totalMs, Math.round(baseMs + (index + 1) * segmentMs));
+    if (segmentEnd - segmentStart < 5_000) continue;
+    segments.push({ start: segmentStart, end: segmentEnd });
+  }
+  if (!segments.length) {
+    const single = await runRealtimeWithRetries({ ...options, segmentStartMs: baseMs, segmentEndMs: null });
+    return { chunks: single.lines, realtime: true, partial: Boolean(single.partial) };
+  }
+  log(`parallel realtime: ${segments.length} segments`);
+  const results = await Promise.allSettled(segments.map((segment) => runRealtimeWithRetries({
+    ...options,
+    segmentStartMs: segment.start,
+    segmentEndMs: segment.end
+  })));
+  const rejected = results.find((result) => result.status === "rejected");
+  if (rejected) throw rejected.reason;
+  const totalLines = results.reduce((sum, result) => sum + (result.value?.lines || 0), 0);
+  const anyPartial = results.some((result) => result.value?.partial);
+  return { chunks: totalLines, realtime: true, partial: Boolean(anyPartial) };
+}
+
+async function runRealtimeWithRetries({
+  pageUrl,
+  sourceUrl,
+  ffmpegBin,
+  apiKey,
+  onLines,
+  onPartial,
+  onProgress,
+  durationMs,
+  getPositionMs,
+  isPlaying,
+  signal,
+  aheadMs,
+  startedAt,
+  log,
+  segmentStartMs,
+  segmentEndMs
+}) {
+  const maxAttempts = Math.max(1, Number(process.env.KOE_REALTIME_RETRIES || 3));
+  const shared = { totalAudioMs: segmentStartMs, sentenceCount: 0 };
+  let lastError = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const outcome = await runRealtimeAttempt({
+      pageUrl,
+      sourceUrl,
+      ffmpegBin,
+      apiKey,
+      onLines,
+      onPartial,
+      onProgress,
+      durationMs,
+      getPositionMs,
+      isPlaying,
+      signal,
+      aheadMs,
+      startedAt,
+      log,
+      segmentStartMs: shared.totalAudioMs,
+      segmentEndMs,
+      shared
+    });
+    if (outcome.ok) return { lines: shared.sentenceCount, partial: Boolean(outcome.partial) };
+    lastError = outcome.error;
+    if (lastError?.name === "AbortError") throw lastError;
+    log(`segment ${formatPosition(segmentStartMs)} attempt ${attempt + 1}/${maxAttempts} failed after ${shared.sentenceCount} lines: ${lastError?.message || String(lastError)}`);
+    if (attempt + 1 >= maxAttempts) break;
+    await delay(1_000);
+  }
+  throw lastError || new Error("realtime_unreachable");
+}
+
+async function runRealtimeAttempt({
+  pageUrl,
+  sourceUrl,
+  ffmpegBin,
+  apiKey,
+  onLines,
+  onPartial,
+  onProgress,
+  durationMs,
+  getPositionMs,
+  isPlaying,
+  signal,
+  aheadMs,
+  startedAt,
+  log,
+  segmentEndMs,
+  shared
+}) {
+  const videoOffsetMs = shared.totalAudioMs;
   const headers = pageUrl
     ? ["-headers", `Referer: ${pageUrl}\r\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/136 Safari/537.36\r\n`]
     : [];
-  const seekArgs = Number(startMs) > 0 ? ["-ss", String(Number(startMs) / 1_000)] : [];
+  const seekArgs = videoOffsetMs > 0 ? ["-ss", String(videoOffsetMs / 1_000)] : [];
+  const durationArgs = segmentEndMs ? ["-t", String(Math.max(0.1, (Number(segmentEndMs) - videoOffsetMs) / 1_000))] : [];
   const hlsArgs = /\.m3u8(\?|$)/i.test(String(sourceUrl || "")) ? ["-http_multiple", "1"] : [];
-  const spawned = spawnFfmpeg(ffmpegBin, [...headers, ...seekArgs, ...hlsArgs, "-i", sourceUrl]);
-  const offsetMs = Number(startMs) || 0;
+  const spawned = spawnFfmpeg(ffmpegBin, [...headers, ...seekArgs, ...hlsArgs, "-i", sourceUrl, ...durationArgs]);
   const asr = createRealtimeAsr({
     apiKey,
     model: process.env.KOE_REALTIME_MODEL || undefined,
+    wsUrl: process.env.KOE_REALTIME_WS_URL || undefined,
     parameters: {
       semantic_punctuation_enabled: false,
       max_sentence_silence: Math.max(200, Number(process.env.KOE_REALTIME_SILENCE_MS || 800)),
@@ -98,16 +220,15 @@ async function streamRealtimeTranscribe({
       heartbeat: true
     }
   });
-  let sentenceCount = 0;
-  let totalAudioMs = 0;
+  let attemptAudioMs = 0;
   let firstAudioAt = 0;
   const connectTicker = setInterval(() => {
     if (firstAudioAt || !onProgress) return;
     const waited = Math.floor((Date.now() - startedAt) / 1_000);
     onProgress(0.08, `正在连接视频源 · ${waited}s`);
   }, 1_000);
-  const aheadMs = Number(process.env.KOE_DOWNLOAD_AHEAD_MS || 30_000);
   let paced = false;
+  let stallWatchdog = null;
   const onAbort = () => {
     asr.terminate();
     spawned.kill();
@@ -120,15 +241,15 @@ async function streamRealtimeTranscribe({
         if (final) {
           const lines = sentenceToLines(sentence);
           if (lines.length) {
-            sentenceCount += lines.length;
+            shared.sentenceCount += lines.length;
             onLines(lines.map((line) => ({
               ...line,
-              startMs: line.startMs + offsetMs,
-              endMs: line.endMs + offsetMs
+              startMs: line.startMs + videoOffsetMs,
+              endMs: line.endMs + videoOffsetMs
             })));
-            const position = Number(durationMs) > 0 ? Math.min(0.8, totalAudioMs / Number(durationMs)) : Math.min(0.8, sentenceCount * 0.012);
-            const positionText = Number(durationMs) > 0 ? ` · 已到 ${formatPosition(totalAudioMs)}` : "";
-            onProgress(Math.min(0.95, 0.06 + position), `实时识别中 · 已出 ${sentenceCount} 句${positionText}`);
+            const position = Number(durationMs) > 0 ? Math.min(0.8, shared.totalAudioMs / Number(durationMs)) : Math.min(0.8, shared.sentenceCount * 0.012);
+            const positionText = Number(durationMs) > 0 ? ` · 已到 ${formatPosition(shared.totalAudioMs)}` : "";
+            onProgress(Math.min(0.95, 0.06 + position), `实时识别中 · 已出 ${shared.sentenceCount} 句${positionText}`);
           }
           return;
         }
@@ -137,7 +258,7 @@ async function streamRealtimeTranscribe({
         const begin = Number(sentence.begin_time) || 0;
         const estimatedEnd = begin + Math.max(2_000, Math.min(12_000, text.length * 400));
         const end = Math.max(estimatedEnd, Number(sentence.end_time) || estimatedEnd);
-        onPartial([{ startMs: begin + offsetMs, endMs: end + offsetMs, text }]);
+        onPartial([{ startMs: begin + videoOffsetMs, endMs: end + videoOffsetMs, text }]);
       }
     });
 
@@ -146,18 +267,20 @@ async function streamRealtimeTranscribe({
     let sentFirst = false;
     let lastAudioAt = Date.now();
     const stallMs = Number(process.env.KOE_REALTIME_STALL_MS || 60_000);
-    const stallWatchdog = setInterval(() => {
+    stallWatchdog = setInterval(() => {
       if (!paced && Date.now() - lastAudioAt > stallMs) {
         asr.terminate();
         spawned.kill();
       }
     }, 10_000);
+    stallWatchdog.unref?.();
     for await (const chunk of spawned.stream) {
       if (signal?.aborted) throw abortError();
       if (!chunk.length) continue;
       firstAudioAt ||= Date.now();
       lastAudioAt = Date.now();
-      totalAudioMs += Math.round(chunk.length / 32);
+      attemptAudioMs += Math.round(chunk.length / 32);
+      shared.totalAudioMs = videoOffsetMs + attemptAudioMs;
       if (!sentFirst) {
         await asr.sendFrame(chunk);
         sentFirst = true;
@@ -168,11 +291,11 @@ async function streamRealtimeTranscribe({
         await asr.sendFrame(frame.subarray(0, REALTIME_FRAME_BYTES));
         frame = frame.subarray(REALTIME_FRAME_BYTES);
       }
-      if (getPositionMs && isPlaying?.() && totalAudioMs - getPositionMs() > aheadMs) {
+      if (getPositionMs && isPlaying?.() && getPositionMs() >= videoOffsetMs && shared.totalAudioMs - getPositionMs() > aheadMs) {
         paced = true;
         spawned.pause();
         const silence = Buffer.alloc(REALTIME_FRAME_BYTES);
-        while (getPositionMs && isPlaying?.() && totalAudioMs - getPositionMs() > aheadMs) {
+        while (getPositionMs && isPlaying?.() && shared.totalAudioMs - getPositionMs() > aheadMs) {
           if (signal?.aborted) throw abortError();
           await asr.sendFrame(silence).catch(() => undefined);
           await delay(500);
@@ -187,12 +310,13 @@ async function streamRealtimeTranscribe({
     if (signal?.aborted) throw abortError();
     const failed = spawned.diagnostics.filter((entry) => entry.code !== 0);
     if (failed.length) {
-      throw new Error(`realtime pipeline failed (${failed.map((entry) => `${entry.command} exit ${entry.code}`).join(", ")})`);
+      const stderrTail = spawned.stderrText ? `; stderr: ${spawned.stderrText.slice(-400)}` : "";
+      throw new Error(`realtime pipeline failed (${failed.map((entry) => `${entry.command} exit ${entry.code}`).join(", ")})${stderrTail}`);
     }
     log(`audio pumped, finishing`);
     const finishTimeoutMs = Math.min(
       Number(process.env.KOE_REALTIME_FINISH_TIMEOUT_MS || 600_000),
-      Math.max(90_000, Math.round(totalAudioMs * 0.3) + 30_000)
+      Math.max(90_000, Math.round(shared.totalAudioMs * 0.3) + 30_000)
     );
     const finished = await Promise.race([
       asr.finish().then(() => true).catch(() => false),
@@ -200,20 +324,23 @@ async function streamRealtimeTranscribe({
     ]);
     if (signal?.aborted) throw abortError();
     if (!finished) {
-      log(`finish timeout after ${(finishTimeoutMs / 1_000).toFixed(0)}s, keeping ${sentenceCount} lines`);
+      if (asr.closed) throw new Error("realtime_socket_closed_during_finish");
+      log(`finish timeout after ${(finishTimeoutMs / 1_000).toFixed(0)}s, keeping ${shared.sentenceCount} lines`);
       asr.terminate();
-      return { chunks: sentenceCount, realtime: true, partial: true };
+      return { ok: true, partial: true };
     }
     asr.close();
-    log(`finished with ${sentenceCount} lines`);
-    return { chunks: sentenceCount, realtime: true };
+    log(`finished with ${shared.sentenceCount} lines`);
+    return { ok: true };
   } catch (error) {
     asr.terminate();
     spawned.kill();
-    throw error;
+    log(`attempt dropped at ${formatPosition(shared.totalAudioMs)}: ${error?.message || String(error)}`);
+    return { ok: false, error };
   } finally {
     signal?.removeEventListener("abort", onAbort);
     clearInterval(connectTicker);
+    if (stallWatchdog) clearInterval(stallWatchdog);
   }
 }
 
@@ -382,6 +509,7 @@ async function runPipeline(factory, { ffmpegBin, apiKey, asrAcquire, onLines, on
 function spawnFfmpeg(ffmpegBin, args) {
   const children = [];
   const diagnostics = [];
+  let stderrText = "";
   const ff = spawn(ffmpegBin, [
     "-nostdin",
     "-hide_banner",
@@ -398,8 +526,12 @@ function spawnFfmpeg(ffmpegBin, args) {
     "-f",
     "wav",
     "pipe:1"
-  ], { stdio: ["ignore", "pipe", "ignore"] });
+  ], { stdio: ["ignore", "pipe", "pipe"] });
   children.push(ff);
+  ff.stderr.on("data", (chunk) => {
+    stderrText += String(chunk || "");
+    if (stderrText.length > 8_000) stderrText = stderrText.slice(-8_000);
+  });
   const kill = () => {
     for (const child of children) {
       try { child.kill("SIGTERM"); } catch { /* ignore */ }
@@ -421,7 +553,15 @@ function spawnFfmpeg(ffmpegBin, args) {
       resolve();
     });
   })));
-  return { stream: ff.stdout, closePromise, diagnostics, kill, pause, resume };
+  return {
+    stream: ff.stdout,
+    closePromise,
+    diagnostics,
+    kill,
+    pause,
+    resume,
+    get stderrText() { return stderrText; }
+  };
 }
 
 function sentenceToLines(sentence) {
@@ -475,7 +615,10 @@ function wrapWav(pcm, header) {
 }
 
 function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 }
 
 function abortError() {
