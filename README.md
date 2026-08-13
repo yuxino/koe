@@ -1,48 +1,50 @@
 <div align="center">
-  <img src="./assets/koe-avatar.png" alt="Koe" width="140">
+  <img src="./assets/koe-avatar.png" alt="Koe" width="128">
   <h1>Koe</h1>
-  <p><strong>边看边出字幕的本地实时识别 + 中文翻译</strong></p>
+  <p>Live subtitles and translation for audio playing in your Chrome tab.</p>
+  <p><a href="README_ZH.md">简体中文</a></p>
 </div>
 
-Koe（こえ / 声）是一个 Chrome 扩展 + 本地助手的实时字幕工具：捕获当前标签页正在播放的声音，识别出一句立刻显示原文，翻译好后原地变成中文。
+Koe（こえ / 声）captures the audio from the current Chrome tab, turns it into live subtitles, and can translate completed lines into Chinese.
 
-- **实时字幕**：不下载视频、不做任何文件处理，声音直接进识别
-- **全自动**：打开、播放、切换视频都会自动继续出字幕
-- **中文翻译**：识别结果逐句翻译成中文，弹窗可随时开关
-- **本地优先**：只调用 DashScope 的流式识别与翻译接口
+No video download. No ffmpeg. Audio is streamed directly from the tab to Koe's local helper.
 
-## 快速开始
+## Features
 
-需要 Node.js 20+。
+- **Live subtitles** — captions appear while the video is playing.
+- **Chinese translation** — completed lines can be translated without blocking recognition.
+- **Automatic recovery** — reconnects after short recognition or WebSocket interruptions.
+- **Video switching** — keeps working when the source changes inside the same page.
+- **In-page overlay** — subtitles stay above the player, including fullscreen mode.
+- **Shortcut** — press **Alt+K** on Windows/Linux or **Option+K** on macOS.
 
-```bash
-./scripts/install-local-helper.sh   # 安装并启动本地助手（127.0.0.1:8787）
-```
+## Setup
 
-Chrome 打开 `chrome://extensions` → 开启「开发者模式」→「加载已解压的扩展程序」→ 选择本项目目录。
-
-Chrome 要求采集标签页声音必须有一次用户手势：打开扩展弹窗点「开始实时字幕」，或按 **Alt+K（Mac 是 Option+K）**。授权一次后，当前页面里切换视频都会自动继续出字幕。
-
-## 使用
-
-- 打开弹窗点「开始实时字幕」启动当前标签页；按钮会变成「停止实时字幕」
-- 弹窗里的「显示中文翻译」开关控制是否翻译成中文
-- 开启翻译时：整句原文先出现，中文翻译完成后原地替换，不会阻塞实时字幕
-- 识别连接瞬时断开时会自动重连，无需再次点击授权
-- 字幕显示 6 秒后自动隐藏，有新句子时立即刷新
-
-## API
-
-| 方法 | 路径 | 用途 |
-| --- | --- | --- |
-| `GET` | `/health` | 服务状态 |
-| `POST` | `/api/trace` | 追踪日志 |
-| `WS` | `/api/capture/ws` | 实时字幕音频通道 |
-
-## 开发
+Koe currently uses a small local helper for realtime recognition and translation. It requires **Node.js 20+** and a DashScope API key.
 
 ```bash
-npm run check   # 静态检查 + 测试
+./scripts/install-local-helper.sh
 ```
 
-主要文件：`background.js`（实时字幕调度）、`offscreen.js`（标签页声音采集）、`content.js`（页面字幕）、`popup.*`（控制面板）、`src/server/`（本地助手）。
+Then open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select this repository.
+
+The installer stores your DashScope API key in macOS Keychain and runs the helper at `127.0.0.1:8787` with LaunchAgent.
+
+## Usage
+
+1. Play a video in Chrome.
+2. Open Koe and select **Start Live Subtitles**, or press **Option+K** on macOS.
+3. Toggle Chinese translation from the popup when needed.
+
+Koe captures tab audio only. It does not download the video or process media files.
+
+## Development
+
+```bash
+npm install
+npm run check
+```
+
+Main pieces: `background.js` for session coordination, `offscreen.js` for tab audio capture, `content.js` for subtitle UI, and `src/server/` for the local helper.
+
+[MIT](LICENSE) © 2026 yuxino
