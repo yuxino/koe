@@ -40,23 +40,41 @@ body {
 .status-line strong { font-size: 14px; }
 .status-line span { color: var(--muted); font-size: 12px; }
 
-.start-button {
+.field-row { display: flex; flex-direction: column; gap: 6px; }
+.field-row span { font-size: 12px; color: var(--muted); }
+.field-row input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 9px 10px;
+  background: var(--card);
+  color: var(--text);
+  outline: none;
+}
+.field-row input:focus { border-color: rgba(203, 220, 119, .65); }
+
+.start-button,
+.secondary-button {
   width: 100%;
   padding: 11px 12px;
-  border: 1px solid var(--accent);
   border-radius: 10px;
-  background: var(--accent);
-  color: #141a16;
   font-weight: 600;
   cursor: pointer;
+}
+.start-button {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #141a16;
   transition: background .16s ease, color .16s ease;
 }
 .start-button:hover { filter: brightness(1.05); }
-.start-button.active {
-  background: transparent;
-  color: var(--accent);
-}
+.start-button.active { background: transparent; color: var(--accent); }
 .start-button:disabled { opacity: .55; cursor: wait; }
+.secondary-button {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+}
 
 .toggle-row {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
