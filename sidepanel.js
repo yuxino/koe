@@ -1,0 +1,500 @@
+// Koe 侧边栏：控制 + 滚动字幕流。
+// 参考 Mimi 的字幕模型：已确认的短句一行行累积成历史（可回看），
+// 正在识别的草稿作为最后一行实时刷新——字幕只增不减，不再被新内容冲掉。
+// UI 精简版：状态卡已移除，状态用圆点 + 按钮 + 底部提示表达；复杂设置收起为单一下拉。
+
+let activeTab;
+let currentState = { status: "idle" };
+let hasApiKey = false;
+let activeJobId = "";
+let captureEnded = false;
+let lastUnitSeq = 0;
+let lastDraftSeq = 0;
+let draftEl = null;
+let lastStatusHint = "";
+const MAX_ROWS = 120;
+
+// 字幕模式：一个下拉 = 声音来源 × 识别引擎，收起复杂的双选项设置
+const CAPTURE_MODES = {
+  "tab-dashscope": { source: "tab", engine: "dashscope" },
+  "mic-dashscope": { source: "mic", engine: "dashscope" },
+  "mic-vosk-zh": { source: "mic", engine: "vosk-zh" },
+  "mic-vosk-en": { source: "mic", engine: "vosk-en" },
+  "mic-webspeech": { source: "mic", engine: "webspeech" }
+};
+
+const AUTH_RULE_ID = 9001;
+const elements = {
+  version: document.querySelector("#version"),
+  statusDot: document.querySelector("#status-dot"),
+  startButton: document.querySelector("#start-button"),
+  translateToggle: document.querySelector("#translate-toggle"),
+  captureMode: document.querySelector("#capture-mode"),
+  apiKey: document.querySelector("#api-key"),
+  saveKey: document.querySelector("#save-key"),
+  hint: document.querySelector("#hint"),
+  settings: document.querySelector("#settings"),
+  settingsSummary: document.querySelector("#settings-summary"),
+  feed: document.querySelector("#feed")
+};
+
+// 兜底：任何未捕获的脚本/异步错误都显示在底部提示里，杜绝“点了没反应”
+window.addEventListener("error", (event) => {
+  if (elements.hint) elements.hint.textContent = `脚本错误：${event.message || "未知"}`;
+});
+window.addEventListener("unhandledrejection", (event) => {
+  const reason = event.reason instanceof Error ? event.reason.message : String(event.reason);
+  if (elements.hint) elements.hint.textContent = `异步错误：${reason}`;
+});
+
+document.addEventListener("DOMContentLoaded", init);
+elements.startButton.addEventListener("click", () => {
+  if (currentState.captureActive) void stopForTab();
+  else void startForTab();
+});
+elements.saveKey.addEventListener("click", () => void saveApiKey());
+elements.translateToggle.addEventListener("change", async () => {
+  const translate = elements.translateToggle.checked;
+  await chrome.storage.local.set({ koeTranslate: translate });
+  if (activeTab?.id) {
+    await chrome.runtime.sendMessage({ type: "SET_TRANSLATE", tabId: activeTab.id, translate }).catch(() => undefined);
+  }
+  elements.hint.textContent = translate ? "中文翻译已开启 · 正在重连识别…" : "中文翻译已关闭 · 只显示原文";
+});
+elements.captureMode.addEventListener("change", () => void saveCaptureMode());
+chrome.tabs.onActivated.addListener(async () => {
+  // 切换标签页时刷新状态与字幕流归属；不在切换时自动开启
+  await refreshActiveTab();
+});
+
+// 后台转发的字幕消息（LIVE_PARTIAL / LIVE_SUBTITLES / LIVE_TRANSLATED / LIVE_STOP）
+chrome.runtime.onMessage.addListener((message) => {
+  if (!message || typeof message.type !== "string") return false;
+  if (message.type === "LIVE_STATE") return false; // 状态以 GET_STATE 轮询为准
+  if (message.type === "LIVE_STOP") {
+    clearDraft();
+    return false;
+  }
+  // 自愈：还没接管任何会话时，直接从消息携带的 jobId 接管（后台只在捕获中转发，
+  // 消息里的 jobId 一定是当前会话的），不依赖 GET_STATE 轮询的时机
+  if (!activeJobId && !captureEnded && message.jobId) {
+    activeJobId = String(message.jobId);
+    resetFeed();
+  }
+  if (!belongsToSession(message)) return false;
+  try {
+    if (message.type === "LIVE_PARTIAL") {
+      if (translateOn()) return false;
+      if (!acceptDraftSeq(message.seq)) return false;
+      const text = lastLine(message.lines)?.text;
+      if (text) setDraft(text);
+    } else if (message.type === "LIVE_SUBTITLES") {
+      if (translateOn()) return false;
+      if (!acceptUnitSeq(message.seq)) return false;
+      const text = lastLine(message.lines)?.text;
+      if (text) {
+        appendRow(text);
+        clearDraft();
+      }
+    } else if (message.type === "LIVE_TRANSLATED") {
+      if (!translateOn()) return false;
+      const text = lastLine(message.lines)?.translated;
+      if (!text) return false;
+      if (message.unit) {
+        if (!acceptUnitSeq(message.seq)) return false;
+        appendRow(text);
+        clearDraft();
+      } else {
+        if (!acceptDraftSeq(message.seq)) return false;
+        setDraft(text);
+      }
+    }
+  } catch {
+    // 显示失败不影响主流程
+  }
+  return false;
+});
+
+async function init() {
+  if (elements.version) elements.version.textContent = `v${chrome.runtime.getManifest().version}`;
+  await initPrefs();
+  await refreshActiveTab();
+  await refreshState();
+  window.setInterval(() => { void refreshState(); }, 1_000);
+}
+
+async function initPrefs() {
+  const { koeTranslate, koeApiKey, koeCaptureSource, koeAsrEngine } = await chrome.storage.local.get(["koeTranslate", "koeApiKey", "koeCaptureSource", "koeAsrEngine"]);
+  elements.translateToggle.checked = koeTranslate !== undefined ? Boolean(koeTranslate) : true;
+  const sourceValue = koeCaptureSource === "mic" ? "mic" : "tab";
+  const engineValue = ["webspeech", "vosk-zh", "vosk-en"].includes(koeAsrEngine) ? koeAsrEngine : "dashscope";
+  const modeKey = Object.keys(CAPTURE_MODES)
+    .find((key) => CAPTURE_MODES[key].source === sourceValue && CAPTURE_MODES[key].engine === engineValue)
+    || "tab-dashscope";
+  elements.captureMode.value = modeKey;
+  hasApiKey = Boolean(String(koeApiKey || "").trim());
+  elements.settings.open = !hasApiKey;
+  updateSettingsSummary();
+  if (hasApiKey) elements.apiKey.placeholder = "已保存 · 输入新 Key 可替换";
+  await syncAuthRule(String(koeApiKey || "").trim());
+}
+
+function currentMode() {
+  return CAPTURE_MODES[elements.captureMode.value] || CAPTURE_MODES["tab-dashscope"];
+}
+
+async function saveCaptureMode() {
+  const mode = currentMode();
+  await chrome.storage.local.set({ koeCaptureSource: mode.source, koeAsrEngine: mode.engine });
+  if (activeTab?.id) {
+    await chrome.runtime.sendMessage({ type: "SET_CAPTURE", tabId: activeTab.id }).catch(() => undefined);
+  }
+  elements.hint.textContent = `已切换模式：${elements.captureMode.options[elements.captureMode.selectedIndex].textContent}`;
+}
+
+function updateSettingsSummary() {
+  elements.settingsSummary.textContent = hasApiKey ? "字幕模式与设置 · 已保存 API Key" : "字幕模式与设置";
+}
+
+async function syncAuthRule(apiKey) {
+  const removeRuleIds = [AUTH_RULE_ID];
+  if (!apiKey) {
+    await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds, addRules: [] });
+    return;
+  }
+  await chrome.declarativeNetRequest.updateSessionRules({
+    removeRuleIds,
+    addRules: [{
+      id: AUTH_RULE_ID,
+      priority: 10,
+      action: {
+        type: "modifyHeaders",
+        requestHeaders: [{
+          header: "Authorization",
+          operation: "set",
+          value: `Bearer ${apiKey}`
+        }]
+      },
+      condition: {
+        urlFilter: "||dashscope.aliyuncs.com/api-ws/",
+        resourceTypes: ["websocket"]
+      }
+    }]
+  });
+}
+
+async function saveApiKey() {
+  const apiKey = String(elements.apiKey.value || "").trim();
+  if (!apiKey) {
+    elements.hint.textContent = "请输入 DashScope API Key。";
+    elements.apiKey.focus();
+    return;
+  }
+  await chrome.storage.local.set({ koeApiKey: apiKey });
+  await syncAuthRule(apiKey);
+  hasApiKey = true;
+  elements.apiKey.value = "";
+  elements.apiKey.placeholder = "已保存 · 输入新 Key 可替换";
+  elements.settings.open = false;
+  updateSettingsSummary();
+  elements.hint.textContent = "API Key 已保存，正在开启字幕…";
+  renderState();
+  // 保存动作本身是一次用户手势：直接为当前标签页开启字幕
+  void startForTab();
+}
+
+async function refreshActiveTab() {
+  // 侧边栏页面不属于任何标签页：tabs.query({currentWindow:true}) 可能返回空。
+  // 先用 getLastFocused 拿到最近聚焦的窗口，再查它的激活标签页。
+  try {
+    const [window] = await chrome.windows.getLastFocused().catch(() => []);
+    if (window?.id) {
+      [activeTab] = await chrome.tabs.query({ active: true, windowId: window.id });
+    } else {
+      [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    }
+  } catch {
+    [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+  }
+  await refreshState();
+}
+
+async function refreshState() {
+  const [tabStateResponse, captureStateResponse] = await Promise.all([
+    activeTab?.id
+      ? chrome.runtime.sendMessage({ type: "GET_STATE", tabId: activeTab.id }).catch(() => null)
+      : Promise.resolve(null),
+    chrome.runtime.sendMessage({ type: "GET_STATE" }).catch(() => null)
+  ]);
+  // 状态走“圆点 + 按钮 + 底部提示”，字幕流跟随“正在捕获的会话”（可能在其他标签页）
+  currentState = tabStateResponse?.state || { status: "idle" };
+  const captureState = captureStateResponse?.state || { status: "idle" };
+  const jobId = String(captureState.jobId || "");
+  if (captureState.captureActive && jobId && jobId !== activeJobId) {
+    activeJobId = jobId;
+    captureEnded = false;
+    resetFeed();
+  } else if (!captureState.captureActive && activeJobId) {
+    // 捕获已结束：停止接收该会话的字幕，保留已有历史
+    captureEnded = true;
+    activeJobId = "";
+    clearDraft();
+  }
+  renderState();
+  updateStatusHint();
+  // 空字幕流时的统一占位：未开启提示点按钮；捕获中提示等待识别结果
+  if (elements.feed.children.length === 0 && !draftEl) {
+    appendRow(
+      captureState.captureActive
+        ? "正在等待识别结果…视频有声音时，字幕会出现在这里"
+        : "点击「开启实时字幕」，字幕会持续滚动显示在这里",
+      "placeholder"
+    );
+  }
+}
+
+// 状态变化时把一句话写进底部提示；空闲时恢复默认提示（不覆盖按钮启动的分步提示）
+function updateStatusHint() {
+  const status = currentState.status || "idle";
+  let next = "";
+  if (status === "live") next = "live";
+  else if (status === "error") next = "error";
+  else if (status === "idle") next = "idle";
+  if (!next || next === lastStatusHint) return;
+  lastStatusHint = next;
+  if (next === "live") {
+    elements.hint.textContent = "字幕已开启 · 内容持续滚动在下方";
+  } else if (next === "error") {
+    elements.hint.textContent = currentState.stageDetail || "已断开 · 点击「开启实时字幕」重试";
+  } else if (next === "idle" && !String(elements.hint.textContent).startsWith("①")) {
+    elements.hint.textContent = "Alt+K：开启并跟随正在发声的标签页";
+  }
+}
+
+// 侧边栏里的点击不被 Chrome 认可为 tabCapture 授权手势（此版本已实测），
+// 所以不再自动尝试开启；标签页模式需走工具栏图标点击或 Alt+K。
+
+async function startForTab() {
+  // 全程可见进度：每一步都把状态写进 hint，任何失败都能被看到并定位
+  if (!activeTab?.id) {
+    elements.hint.textContent = "① 没有定位到当前标签页，请切到视频标签页后再试。";
+    await refreshActiveTab();
+    return;
+  }
+  let busyTimer = 0;
+  try {
+    elements.hint.textContent = "① 正在读取设置…";
+    const { koeApiKey } = await chrome.storage.local.get("koeApiKey");
+    const apiKey = String(koeApiKey || "").trim();
+    const mode = currentMode();
+    const micMode = mode.source === "mic";
+    const keyless = mode.engine !== "dashscope";
+    if (!keyless && !apiKey) {
+      elements.settings.open = true;
+      elements.hint.textContent = "② DashScope 模式需要 API Key；或把字幕模式切换为「本地离线」/「Chrome 内置」。";
+      elements.apiKey.focus();
+      return;
+    }
+    elements.hint.textContent = "② 正在同步请求头规则…";
+    await syncAuthRule(apiKey);
+    setButtonBusy(true);
+    // 兜底：15 秒后强制恢复按钮，避免卡死成“点了没反应”
+    busyTimer = window.setTimeout(() => {
+      setButtonBusy(false);
+      elements.hint.textContent = "操作超时，请再点一次「开启实时字幕」。";
+    }, 15_000);
+    let streamId = "";
+    if (!micMode) {
+      elements.hint.textContent = `③ 正在为标签页 ${activeTab.id} 获取音频流授权…`;
+      streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: activeTab.id });
+    } else {
+      elements.hint.textContent = "③ 麦克风模式：无需手势授权（首次使用浏览器会询问麦克风权限）…";
+    }
+    elements.hint.textContent = "④ 正在启动识别会话…";
+    const response = await chrome.runtime.sendMessage({
+      type: "START_CAPTURE",
+      tabId: activeTab.id,
+      streamId,
+      pageUrl: activeTab.url
+    });
+    if (!response?.ok) throw new Error(response?.error || "无法启动实时字幕。");
+    currentState = response.state || { status: "live" };
+    lastStatusHint = "";
+    elements.hint.textContent = "⑤ 字幕已开启 · 识别内容会持续滚动在下方";
+    renderState();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/gesture|invocation|permission|user gesture/i.test(message)) {
+      elements.hint.textContent = "还没有暂存的音频授权：先点一次工具栏 Koe 图标（或按 Alt+K）。或把字幕模式切成麦克风，完全不需要手势。";
+    } else {
+      elements.hint.textContent = `启动失败：${message}`;
+    }
+  } finally {
+    if (busyTimer) window.clearTimeout(busyTimer);
+    setButtonBusy(false);
+    await refreshState();
+  }
+}
+
+async function stopForTab() {
+  if (!activeTab?.id) return;
+  setButtonBusy(true);
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "STOP_CAPTURE", tabId: activeTab.id });
+    currentState = response?.state || { status: "idle" };
+    lastStatusHint = "";
+    elements.hint.textContent = "已停止 · 字幕流保留";
+  } catch (error) {
+    elements.hint.textContent = error instanceof Error ? error.message : String(error);
+  } finally {
+    setButtonBusy(false);
+    await refreshState();
+  }
+}
+
+function setButtonBusy(busy) {
+  elements.startButton.disabled = Boolean(busy);
+}
+
+function renderState() {
+  const status = currentState.status || "idle";
+  const live = status === "live";
+  const gesture = Boolean(currentState.captureNeedsGesture);
+  const error = status === "error";
+  const starting = !live && !error && !gesture && status !== "idle";
+  elements.statusDot.className = `dot ${error ? "bad" : live ? "ok" : gesture || starting ? "busy" : ""}`;
+  elements.startButton.textContent = live ? "停止实时字幕" : "开启实时字幕";
+  elements.startButton.classList.toggle("active", live);
+}
+
+// ===== 字幕流：历史行累积 + 草稿行实时刷新（Mimi 模型）=====
+// 显示端切段（移植 Mimi 的 segmenter）：长字幕按句末标点 / 逗号等自然停顿 / 最大长度
+// 切成短行，中文 28 字、英文 64 字符一行，避免一整坨糊在侧边栏里。
+const SENTENCE_ENDINGS = new Set(["。", "！", "？", "!", "?", "；", ";", "\n"]);
+const PREFERRED_BREAKS = new Set(["，", "、", ",", "：", ":", "—", "–", "-", " "]);
+
+function isCjkText(text) {
+  return /[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(text);
+}
+
+function subtitleMaxChars(text) {
+  return isCjkText(text) ? 28 : 64;
+}
+
+function segments(text, maximumCharacters) {
+  const max = Math.max(4, maximumCharacters);
+  const remaining = Array.from(String(text).trim());
+  const result = [];
+  while (remaining.length > 0) {
+    while (remaining.length > 0 && /\s/.test(remaining[0])) remaining.shift();
+    if (remaining.length === 0) break;
+    const searchCount = Math.min(max, remaining.length);
+    const sentenceEndIndex = remaining
+      .slice(0, searchCount)
+      .findIndex((ch) => SENTENCE_ENDINGS.has(ch));
+    if (sentenceEndIndex >= 0) {
+      appendSegment(remaining, sentenceEndIndex + 1, result);
+      continue;
+    }
+    if (remaining.length <= max) {
+      appendSegment(remaining, remaining.length, result);
+      continue;
+    }
+    const minimumPreferredBreak = Math.max(1, Math.floor(max / 2));
+    let preferredBreak = -1;
+    for (let index = max - 1; index >= minimumPreferredBreak; index -= 1) {
+      if (PREFERRED_BREAKS.has(remaining[index])) {
+        preferredBreak = index;
+        break;
+      }
+    }
+    const end = preferredBreak >= 0
+      ? (/\s/.test(remaining[preferredBreak]) ? preferredBreak : preferredBreak + 1)
+      : max;
+    appendSegment(remaining, Math.max(1, end), result);
+  }
+  return result;
+}
+
+function appendSegment(remaining, end, result) {
+  const safeEnd = Math.min(Math.max(1, end), remaining.length);
+  const segment = remaining.slice(0, safeEnd).join("").trim();
+  remaining.splice(0, safeEnd);
+  if (segment.length > 0) result.push(segment);
+}
+
+function translateOn() {
+  return Boolean(elements.translateToggle.checked);
+}
+
+function belongsToSession(message) {
+  // 会话已结束或尚未接管的字幕一律丢弃
+  if (captureEnded) return false;
+  const jobId = String(message.jobId || "");
+  if (!jobId) return false;
+  return jobId === activeJobId;
+}
+
+function lastLine(lines) {
+  return Array.isArray(lines) ? lines[lines.length - 1] : null;
+}
+
+function acceptUnitSeq(seq) {
+  const value = Number(seq);
+  if (!Number.isFinite(value)) return true;
+  if (value <= lastUnitSeq) return false;
+  lastUnitSeq = value;
+  return true;
+}
+
+function acceptDraftSeq(seq) {
+  const value = Number(seq);
+  if (!Number.isFinite(value)) return true;
+  if (value <= lastDraftSeq) return false;
+  lastDraftSeq = value;
+  return true;
+}
+
+function resetFeed() {
+  elements.feed.textContent = "";
+  draftEl = null;
+  lastUnitSeq = 0;
+  lastDraftSeq = 0;
+}
+
+function appendRow(text, className = "") {
+  elements.feed.querySelectorAll(".placeholder").forEach((node) => node.remove());
+  const parts = segments(String(text), subtitleMaxChars(String(text)));
+  for (const part of parts) {
+    const row = document.createElement("div");
+    row.className = `row ${className}`.trim();
+    row.textContent = part;
+    elements.feed.appendChild(row);
+    while (elements.feed.children.length > MAX_ROWS) {
+      elements.feed.firstElementChild.remove();
+    }
+  }
+  elements.feed.scrollTop = elements.feed.scrollHeight;
+}
+
+function setDraft(text) {
+  elements.feed.querySelectorAll(".placeholder").forEach((node) => node.remove());
+  // 草稿只显示最新两段，避免草稿行越长越高
+  const value = String(text);
+  const parts = segments(value, subtitleMaxChars(value)).slice(-2);
+  const joined = parts.join(isCjkText(value) ? "" : " ");
+  if (!draftEl || !draftEl.isConnected) {
+    draftEl = document.createElement("div");
+    draftEl.className = "row draft";
+    elements.feed.appendChild(draftEl);
+  }
+  draftEl.textContent = joined;
+  elements.feed.scrollTop = elements.feed.scrollHeight;
+}
+
+function clearDraft() {
+  if (draftEl) {
+    draftEl.remove();
+    draftEl = null;
+  }
+}

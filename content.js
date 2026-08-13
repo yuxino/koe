@@ -1,5 +1,5 @@
 (() => {
-  const CONTENT_VERSION = "1.1.1";
+  const CONTENT_VERSION = "1.5.3";
   if (window.__koeLoaded === CONTENT_VERSION) return;
   window.__koeLoaded = CONTENT_VERSION;
 
@@ -28,50 +28,33 @@
       }
       .status.error { color: #ffd9d4; border-color: rgba(255,122,110,.35); }
       .status.visible { opacity: 1; }
-      .subtitle {
-        position: fixed; left: 50%; bottom: 5vh; transform: translate(-50%, 10px); opacity: 0;
-        transition: opacity .22s ease, transform .22s ease; max-width: min(860px, 84vw); text-align: center;
-        font: 400 20px/1.45 Georgia, "Songti SC", serif; color: #fbf4df;
-        letter-spacing: .02em; padding: 10px 20px; border-radius: 14px;
-        background: linear-gradient(135deg, rgba(20,29,25,.9), rgba(43,49,37,.82));
-        border: 1px solid rgba(255,248,224,.16);
-        box-shadow: 0 14px 44px rgba(0,0,0,.35);
-      }
-      .subtitle.visible { opacity: 1; transform: translate(-50%, 0); }
     </style>
     <div class="status" aria-live="polite"></div>
-    <div class="subtitle" aria-live="polite"></div>
   `;
 
   const statusEl = shadow.querySelector(".status");
-  const subtitleEl = shadow.querySelector(".subtitle");
 
-  let translateOn = false;
   let activeJobId = "";
   let lastSeenSource = "";
   let lastSeenUrl = location.href;
   let lastPageReadyAt = 0;
   let lastAckAt = 0;
-  let liveHideTimer = null;
-  let latestFinalSeq = 0;
 
   chrome.runtime.onMessage.addListener((message) => {
+    // 扩展重载后，页面里可能残留旧版本脚本的监听器和定时器：
+    // 旧副本检测到版本号已被新副本顶替后自行停用，避免重复发消息
+    if (window.__koeLoaded !== CONTENT_VERSION) return false;
     if (!message || typeof message.type !== "string") return false;
 
     if (message.type === "LIVE_STATE") {
       ack(`state:${message.status}`, true);
-      if (message.translate !== undefined) translateOn = Boolean(message.translate);
-
       const nextJobId = String(message.jobId || "");
-      if (nextJobId && nextJobId !== activeJobId) {
-        activeJobId = nextJobId;
-        resetSubtitleSession();
-      }
+      if (nextJobId && nextJobId !== activeJobId) activeJobId = nextJobId;
 
       if (message.status === "live") {
         hideStatus();
       } else if (message.captureNeedsGesture) {
-        showStatus(message.stageDetail || "点一下 Koe 图标，立即开始实时字幕");
+        showStatus(message.stageDetail || "点击 Koe 图标打开侧边栏，开启实时字幕");
       } else if (message.status === "error") {
         showStatus(message.stageDetail || "实时字幕已断开", true);
       } else if (message.stageDetail) {
@@ -80,53 +63,8 @@
       return false;
     }
 
-    if (message.type === "LIVE_PARTIAL") {
-      if (!belongsToActiveSession(message)) return false;
-      try {
-        // 翻译模式下不显示中间原文，避免和即将补上的中文来回闪烁
-        if (translateOn) return false;
-        const lines = Array.isArray(message.lines) ? message.lines : [];
-        const line = lines[lines.length - 1];
-        const text = line?.text;
-        if (text) showSubtitle(text);
-      } catch (error) {
-        ack(`display-error:${String(error).slice(0, 60)}`, true);
-      }
-      return false;
-    }
-
-    if (message.type === "LIVE_SUBTITLES") {
-      if (!belongsToActiveSession(message)) return false;
-      try {
-        if (message.seq !== undefined && message.seq !== null) latestFinalSeq = Number(message.seq);
-        const lines = Array.isArray(message.lines) ? message.lines : [];
-        const line = lines[lines.length - 1];
-        const text = line?.text;
-        if (text) showSubtitle(text);
-      } catch (error) {
-        ack(`display-error:${String(error).slice(0, 60)}`, true);
-      }
-      return false;
-    }
-
-    if (message.type === "LIVE_TRANSLATED") {
-      if (!belongsToActiveSession(message)) return false;
-      try {
-        if (!translateOn) return false;
-        if (Number(message.seq) !== latestFinalSeq) return false;
-        const lines = Array.isArray(message.lines) ? message.lines : [];
-        const line = lines[lines.length - 1];
-        const text = line?.translated;
-        if (text) showSubtitle(text);
-      } catch (error) {
-        ack(`display-error:${String(error).slice(0, 60)}`, true);
-      }
-      return false;
-    }
-
     if (message.type === "LIVE_STOP") {
-      if (!belongsToActiveSession(message)) return false;
-      resetSubtitleSession();
+      hideStatus();
       return false;
     }
     return false;
@@ -137,12 +75,14 @@
   ack("ready", true);
   let pageReadyAttempts = 0;
   window.setInterval(() => {
+    if (window.__koeLoaded !== CONTENT_VERSION) return; // 旧副本：停止工作
     if (pageReadyAttempts >= 10) return;
     pageReadyAttempts += 1;
     chrome.runtime.sendMessage({ type: "PAGE_READY" }).catch(() => undefined);
   }, 3_000);
 
   document.addEventListener("play", (event) => {
+    if (window.__koeLoaded !== CONTENT_VERSION) return;
     const target = event.target;
     if (!(target instanceof HTMLVideoElement) || target.muted) return;
     const now = Date.now();
@@ -152,6 +92,7 @@
   }, true);
 
   document.addEventListener("emptied", (event) => {
+    if (window.__koeLoaded !== CONTENT_VERSION) return;
     const target = event.target;
     if (!(target instanceof HTMLVideoElement)) return;
     chrome.runtime.sendMessage({ type: "VIDEO_CHANGED" }).catch(() => undefined);
@@ -160,6 +101,7 @@
   // 周期检测：源/URL 变化 → 通知后台重连识别；正在播放且未静音 → 触发实时字幕
   window.setInterval(trackVideoSource, 1_000);
   function trackVideoSource() {
+    if (window.__koeLoaded !== CONTENT_VERSION) return; // 旧副本：停止工作
     handleUrlChange();
     const video = currentVideo();
     const source = video ? (video.currentSrc || video.src || "") : "";
@@ -179,6 +121,7 @@
 
   // URL 变化感知（SPA 切视频/页面跳转）：历史 API、popstate、每秒兜底比对
   function handleUrlChange() {
+    if (window.__koeLoaded !== CONTENT_VERSION) return; // 旧副本：停止工作
     if (location.href === lastSeenUrl) return;
     lastSeenUrl = location.href;
     chrome.runtime.sendMessage({ type: "VIDEO_CHANGED" }).catch(() => undefined);
@@ -199,6 +142,7 @@
   document.addEventListener("fullscreenchange", syncFullscreen, true);
   document.addEventListener("webkitfullscreenchange", syncFullscreen, true);
   function syncFullscreen() {
+    if (window.__koeLoaded !== CONTENT_VERSION) return; // 旧副本：不得把旧字幕层重新挂回页面
     const fs = document.fullscreenElement || document.webkitFullscreenElement || null;
     if (fs && fs !== host.parentElement) {
       fs.appendChild(host);
@@ -209,18 +153,6 @@
     }
   }
 
-  function belongsToActiveSession(message) {
-    const jobId = String(message.jobId || "");
-    return !jobId || !activeJobId || jobId === activeJobId;
-  }
-
-  function resetSubtitleSession() {
-    clearTimeout(liveHideTimer);
-    latestFinalSeq = 0;
-    subtitleEl.textContent = "";
-    subtitleEl.classList.remove("visible");
-  }
-
   function showStatus(text, isError = false) {
     statusEl.textContent = text || "";
     statusEl.classList.toggle("error", isError);
@@ -228,16 +160,6 @@
   }
   function hideStatus() {
     statusEl.classList.remove("visible");
-  }
-
-  function showSubtitle(text) {
-    subtitleEl.textContent = text;
-    subtitleEl.classList.add("visible");
-    ack(`shown:${String(text).slice(0, 20)}`);
-    clearTimeout(liveHideTimer);
-    liveHideTimer = setTimeout(() => {
-      subtitleEl.classList.remove("visible");
-    }, 6_000);
   }
 
   function ack(stage, force = false) {

@@ -1,6 +1,6 @@
 // Koe 实时字幕：只做一件事——捕获当前标签页正在播放的声音，
-// 交给本地助手实时识别 + 中文翻译，再显示成字幕。
-// 不再下载视频、不再 ffmpeg、不再有“分析中 x%”的进度任务。
+// 交给 DashScope 实时识别 + 翻译，再显示成字幕。
+// 不下载视频、不需要本地助手、没有“分析中 x%”的进度任务。
 
 const SERVER_URL = "http://127.0.0.1:8787";
 const AUTH_RULE_ID = 9001;
@@ -22,12 +22,85 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "koe-restore") void restoreStates();
 });
 
-// 快捷键 = 一次用户手势：授权后自动捕获当前标签页声音，本页内切视频继续出字幕
+// 点击工具栏图标 = Chrome 官方认可的授权手势（侧边栏里的点击不算）。
+// 一步完成：打开侧边栏 + 预取并暂存音频流授权 + 为当前标签页开启字幕。
+// 暂存的授权让之后面板里的「开启」按钮也能用，不再需要重复手势。
+chrome.action.onClicked.addListener(async (tab) => {
+  try {
+    await chrome.sidePanel.open({ windowId: tab.windowId });
+  } catch {
+    // 旧版 Chrome 不支持侧边栏时忽略
+  }
+  const state = tabStates.get(tab.id);
+  if (!state?.captureStarted) {
+    await stashStreamIdForTab(tab.id);
+    await ensureLiveCaptions({ tabId: tab.id, pageUrl: tab.url, forceReset: true });
+  }
+});
+
+// 右键菜单 = 另一个官方认可的授权手势，作为备用的点击式开启路径
+const CONTEXT_MENU_ID = "koe-capture-tab";
+try {
+  chrome.contextMenus.create({
+    id: CONTEXT_MENU_ID,
+    title: "Koe：开启本页实时字幕",
+    contexts: ["page", "video"]
+  });
+} catch {
+  // 环境不支持时忽略
+}
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId !== CONTEXT_MENU_ID) return;
+  if (!tab?.id) return;
+  try {
+    await chrome.sidePanel.open({ windowId: tab.windowId });
+  } catch {
+    // 忽略
+  }
+  await stashStreamIdForTab(tab.id);
+  await ensureLiveCaptions({ tabId: tab.id, pageUrl: tab.url, forceReset: true });
+});
+
+// 在合法手势的上下文里预取音频流 ID 并暂存（一次授权可用 15 分钟内多次启动）
+async function stashStreamIdForTab(tabId) {
+  try {
+    const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
+    captureStreamIds.set(tabId, streamId);
+  } catch {
+    // 手势不被认可时忽略；面板按钮稍后尝试时会给出明确指引
+  }
+}
+
+// 快捷键 = 一次用户手势：优先捕获“正在发声”的标签页（含后台播放的视频），
+// 没有发声标签页时退回当前激活页；同时自动打开侧边栏，免去手动打开。
 chrome.commands.onCommand.addListener(async (command) => {
   if (command !== "capture-tab") return;
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab?.id) await ensureLiveCaptions({ tabId: tab.id, pageUrl: tab.url, forceReset: true });
+  const [active] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+  if (active?.windowId) {
+    try {
+      await chrome.sidePanel.open({ windowId: active.windowId });
+    } catch {
+      // 无手势或版本不支持时忽略
+    }
+  }
+  const tab = await pickCaptureTarget();
+  if (tab?.id) {
+    await stashStreamIdForTab(tab.id);
+    await ensureLiveCaptions({ tabId: tab.id, pageUrl: tab.url, forceReset: true });
+  }
 });
+
+async function pickCaptureTarget() {
+  // 扩展无法捕获“整个 Chrome 的混音”（tabCapture 一次一个标签页、desktopCapture 无声音），
+  // 用“跟随发声标签页”作为近似：优先激活页（若在发声），否则第一个发声的标签页。
+  const audible = await chrome.tabs.query({ audible: true }).catch(() => []);
+  if (audible.length === 0) {
+    const [active] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+    return active || null;
+  }
+  const [active] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+  return audible.find((tab) => tab.id === active?.id) || audible[0] || null;
+}
 
 chrome.tabs.onRemoved.addListener((tabId) => cleanupTab(tabId));
 
@@ -45,7 +118,11 @@ async function handle(message, sender) {
   const tabId = Number(message.tabId ?? sender?.tab?.id);
   if (message.type === "PAGE_READY") return pageReady(sender);
   if (message.type === "VIDEO_CHANGED") return videoChanged(sender);
-  if (message.type === "GET_STATE") return { ok: true, state: publicState(tabStates.get(tabId)) };
+  if (message.type === "GET_STATE") {
+    // 不带 tabId 时返回“正在捕获的会话”状态（侧边栏字幕流跟随捕获目标，而不是激活页）
+    const state = tabStates.get(tabId) || (message.tabId === undefined ? tabStates.get(captureTabId) : null);
+    return { ok: true, state: publicState(state) };
+  }
   if (message.type === "CAPTURE_LINES") return forwardCaptureLines(message, "LIVE_SUBTITLES");
   if (message.type === "CAPTURE_PARTIAL") return forwardCaptureLines(message, "LIVE_PARTIAL");
   if (message.type === "CAPTURE_TRANSLATED") return forwardCaptureLines(message, "LIVE_TRANSLATED");
@@ -53,6 +130,7 @@ async function handle(message, sender) {
   if (message.type === "START_CAPTURE") return startCaptureForTab(message);
   if (message.type === "STOP_CAPTURE") return stopCaptureForTab(Number(message.tabId));
   if (message.type === "SET_TRANSLATE") return setTranslate(tabId, Boolean(message.translate));
+  if (message.type === "SET_CAPTURE") return setCaptureConfig(tabId);
   if (message.type === "CONTENT_ACK") {
     trace(tabId, "content-ack", `${String(message.stage || "")} frame=${sender?.frameId ?? ""}`);
     return { ok: true };
@@ -82,18 +160,36 @@ async function videoChanged(sender) {
 async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset = false }) {
   tabId = Number(tabId);
   if (!Number.isInteger(tabId)) return { ok: true, skipped: true };
+  let captureSource = "tab";
+  let captureEngine = "dashscope";
   if (translate === undefined) {
     try {
-      ({ koeTranslate: translate } = await chrome.storage.local.get("koeTranslate"));
+      ({ koeTranslate: translate, koeCaptureSource: captureSource, koeAsrEngine: captureEngine } = await chrome.storage.local.get(["koeTranslate", "koeCaptureSource", "koeAsrEngine"]));
     } catch {
       translate = undefined;
     }
   }
-  const source = await discoverVideoSource(tabId, pageUrl).catch(() => null);
+  const sourceMode = captureSource === "mic" ? "mic" : "tab";
+  const engineMode = ["webspeech", "vosk-zh", "vosk-en"].includes(captureEngine) ? captureEngine : "dashscope";
+
+  // 麦克风模式：不需要标签页授权手势，也不需要页面里有视频
+  let source;
+  if (sourceMode === "mic") {
+    source = {
+      hasVideo: true,
+      playing: true,
+      muted: false,
+      sourceUrl: "",
+      frameId: 0,
+      pageUrl: pageUrl || ""
+    };
+  } else {
+    source = await discoverVideoSource(tabId, pageUrl).catch(() => null);
+  }
   const sourceKey = source?.sourceUrl ? normalizeSourceKey(source.sourceUrl) : "";
   let state = tabStates.get(tabId);
 
-  if (!source?.hasVideo || !isLiveAllowed(source, pageUrl)) {
+  if (sourceMode !== "mic" && (!source?.hasVideo || !isLiveAllowed(source, pageUrl))) {
     // 没有正在播放的主视频，或只是静音/广告/背景视频：不打扰，也不清掉已有会话
     return { ok: true, skipped: true };
   }
@@ -108,6 +204,8 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
       status: "starting",
       jobId: `live-${tabId}-${Date.now()}`,
       translate: translate !== undefined ? Boolean(translate) : true,
+      source: sourceMode,
+      engine: engineMode,
       sourceUrl: source.sourceUrl || "",
       pageUrl: pageUrl || source.pageUrl,
       liveOnly: true,
@@ -119,12 +217,15 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
     tabStates.set(tabId, state);
     await persistStates();
     await pushState(state);
-  } else if (forceReset || (sourceKey && sourceKey !== normalizeSourceKey(state.sourceUrl || ""))) {
+  } else if (forceReset || (sourceKey && sourceKey !== normalizeSourceKey(state.sourceUrl || "")) || state.source !== sourceMode || state.engine !== engineMode) {
+    state.userStopped = false;
     state.frameId = source.frameId || state.frameId;
     state.pageUrl = pageUrl || source.pageUrl;
     state.sourceUrl = source.sourceUrl || "";
+    state.source = sourceMode;
+    state.engine = engineMode;
     state.translate = translate !== undefined ? Boolean(translate) : state.translate;
-    // 换了视频：保持已授权的音频流不断，只重连识别会话
+    // 换来源/换视频：保持已授权的音频流不断，只重连识别会话
     if (state.captureStarted) await resetCaptureSession(state);
     else await pushState(state);
   }
@@ -159,6 +260,11 @@ async function ensureCaptureAuthorized(state) {
 }
 
 async function runCaptureAuthorization(state) {
+  // 麦克风来源不需要 tabCapture 授权手势：直接启动
+  if (state.source === "mic") {
+    await startCapture(state, "");
+    return;
+  }
   let streamId = captureStreamIds.get(state.tabId) || "";
   if (!streamId) {
     try {
@@ -166,9 +272,11 @@ async function runCaptureAuthorization(state) {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (/gesture|invocation|permission|user gesture/i.test(message)) {
+        // 用户刚主动停止过：不再弹“点击开启”的提示，直到切换视频或手动再开
+        if (state.userStopped) return;
         state.captureNeedsGesture = true;
         state.status = "starting";
-        state.stageDetail = "点一下 Koe 图标，立即开始实时字幕";
+        state.stageDetail = "点击 Koe 图标打开侧边栏（自动开启）或按 Alt+K";
         await pushState(state);
         return;
       }
@@ -188,22 +296,27 @@ async function runCaptureAuthorization(state) {
     await pushState(state);
   }
 }
-
 async function startCapture(state, streamId) {
   // 扩展重载后已打开的页面可能没有内容脚本，先把字幕显示脚本注入进去，
   // 否则识别通道通了、字幕却没地方显示
   await ensureContentScript(state.tabId, state.frameId || 0);
   const { koeApiKey } = await chrome.storage.local.get("koeApiKey");
   const apiKey = String(koeApiKey || "").trim();
-  if (!apiKey) throw new Error("请先在 Koe 中保存 DashScope API Key。");
+  // 内置识别 / 本地离线模型不需要 DashScope Key；其余引擎需要
+  const keyless = state.engine === "webspeech" || String(state.engine || "").startsWith("vosk");
+  if (!keyless && !apiKey) {
+    throw new Error("请先在 Koe 中保存 DashScope API Key。");
+  }
   await syncAuthorizationRule(apiKey);
   await ensureOffscreen();
   const response = await chrome.runtime.sendMessage({
     type: "CAPTURE_START",
-    streamId,
+    streamId: streamId || "",
     apiKey,
     serverUrl: SERVER_URL,
-    translate: state.translate
+    translate: state.translate,
+    source: state.source || "tab",
+    engine: state.engine || "dashscope"
   });
   if (!response?.ok) throw new Error(response?.error || "无法开始采集标签页声音。");
   state.captureStarted = true;
@@ -211,6 +324,12 @@ async function startCapture(state, streamId) {
   state.status = "live";
   state.stageDetail = "";
   captureTabId = state.tabId;
+  // 捕获成功后尽量把侧边栏带开，用户不用手动打开也能看到滚动字幕
+  try {
+    await chrome.sidePanel.setOptions({ tabId: state.tabId, path: "sidepanel.html", enabled: true });
+  } catch {
+    // 无手势或版本不支持时忽略
+  }
   await pushState(state);
   await persistStates();
   trace(state.tabId, "capture-started", `${response.mode || "pcm"} frame=${state.frameId || 0} src=${String(state.sourceUrl || "").slice(0, 60)}`);
@@ -266,6 +385,11 @@ async function stopCapture(state) {
     // 后台可能刚唤醒，离屏采集页尚未就绪
   }
   await forwardToTab(state.tabId, { type: "LIVE_STOP", jobId: state.jobId }, state.frameId);
+  try {
+    await chrome.runtime.sendMessage({ type: "LIVE_STOP", jobId: state.jobId });
+  } catch {
+    // 侧边栏未打开时忽略
+  }
   await pushState(state);
 }
 
@@ -276,6 +400,7 @@ async function startCaptureForTab({ tabId, streamId, pageUrl = "" }) {
     captureStreamIds.set(id, streamId);
     const state = tabStates.get(id);
     if (state) {
+      state.userStopped = false;
       state.captureNeedsGesture = false;
       state.status = "starting";
       state.stageDetail = "正在连接 DashScope…";
@@ -286,18 +411,28 @@ async function startCaptureForTab({ tabId, streamId, pageUrl = "" }) {
   if (state?.captureStarted) return { ok: true, state: publicState(state) };
   if (state?.captureNeedsGesture) return { ok: false, error: state.stageDetail || "需要再点击一次以授权声音采集。" };
   if (state?.status === "error") return { ok: false, error: state.stageDetail || "实时字幕已断开。" };
-  return { ok: false, error: "当前标签页没有正在播放、未静音的视频。" };
+  // 其他标签页正在发声时给出“跟随”提示：按 Alt+K 即可把捕获目标切过去
+  const audibleElsewhere = await chrome.tabs.query({ audible: true })
+    .then((tabs) => tabs.some((tab) => tab.id !== id))
+    .catch(() => false);
+  if (audibleElsewhere) {
+    return { ok: false, error: "当前页面没有正在播放的视频；检测到其他标签页有声音，按 Alt+K 跟随它。" };
+  }
+  return { ok: false, error: "当前页面没有正在播放、未静音的视频（先播放视频再试）。" };
 }
 
 async function stopCaptureForTab(tabId) {
   const state = tabStates.get(Number(tabId));
-  if (state?.captureStarted) {
+  if (!state) return { ok: true, state: publicState(state) };
+  if (state.captureStarted) {
     await stopCapture(state);
     state.status = "idle";
     state.stageDetail = "";
     state.captureNeedsGesture = false;
     await pushState(state);
   }
+  // 主动停止 = 不再打扰：本页不再弹“点击开启”，直到切换视频或手动再开
+  state.userStopped = true;
   return { ok: true, state: publicState(tabStates.get(Number(tabId))) };
 }
 
@@ -306,26 +441,30 @@ async function forwardCaptureLines(message, type) {
   const state = tabId ? tabStates.get(tabId) : null;
   if (!state?.captureStarted || !state.jobId) return { ok: true, ignored: true };
   const lines = Array.isArray(message.lines) ? message.lines : [];
-  const sent = await forwardToTab(tabId, {
+  const payload = {
     type,
     jobId: state.jobId,
     lines,
-    seq: message.seq
-  }, state.frameId);
-  if (sent?.ignored && !state.contentScriptPinged) {
-    // 页面里还没有字幕脚本（比如扩展重载后没刷新页面）：
-    // 现补注入一次，并把状态推过去
-    state.contentScriptPinged = true;
-    await ensureContentScript(state.tabId, state.frameId || 0);
-    trace(state.tabId, "content-inject", `frame=${state.frameId || 0}`);
-    await pushState(state);
+    seq: message.seq,
+    unit: message.unit
+  };
+  // 字幕流同时发给侧边栏（历史滚动）与页面内容脚本（单行迷你字幕兜底）
+  try {
+    await chrome.runtime.sendMessage(payload);
+  } catch {
+    // 侧边栏未打开时忽略
+  }
+  try {
+    await forwardToTab(tabId, payload, state.frameId);
+  } catch {
+    // 页面内容脚本缺失时忽略
   }
   const eventName = type === "LIVE_SUBTITLES"
     ? "capture-lines"
     : type === "LIVE_TRANSLATED"
       ? "capture-translated"
       : "capture-partial";
-  trace(tabId, eventName, `n=${lines.length} ignored=${Boolean(sent?.ignored)}`);
+  trace(tabId, eventName, `n=${lines.length}`);
   return { ok: true };
 }
 
@@ -337,10 +476,15 @@ async function handleCaptureError({ error }) {
   state.captureStarted = false;
   state.status = "error";
   state.captureNeedsGesture = true;
-  state.stageDetail = "实时字幕已断开 · 点一下图标或按 Alt+K 重试";
+  state.stageDetail = "实时字幕已断开 · 点击 Koe 图标或按 Alt+K 重试";
   captureStreamIds.delete(tabId);
   trace(tabId, "capture-error", String(error || ""));
   await forwardToTab(tabId, { type: "LIVE_STOP", jobId: state.jobId }, state.frameId);
+  try {
+    await chrome.runtime.sendMessage({ type: "LIVE_STOP", jobId: state.jobId });
+  } catch {
+    // 侧边栏未打开时忽略
+  }
   await pushState(state);
   return { ok: true };
 }
@@ -350,6 +494,22 @@ async function setTranslate(tabId, translate) {
   if (!state) return { ok: true, ignored: true };
   state.translate = Boolean(translate);
   // 重连识别会话，让之后推送的字幕带/不带翻译
+  if (state.captureStarted) await resetCaptureSession(state);
+  await pushState(state);
+  return { ok: true };
+}
+
+// 声音来源 / 识别引擎切换：更新配置并重连（来源切换需要一次新的麦克风授权，无需手势）
+async function setCaptureConfig(tabId) {
+  const state = tabStates.get(tabId);
+  if (!state) return { ok: true, ignored: true };
+  try {
+    const { koeCaptureSource, koeAsrEngine } = await chrome.storage.local.get(["koeCaptureSource", "koeAsrEngine"]);
+    state.source = koeCaptureSource === "mic" ? "mic" : "tab";
+    state.engine = ["webspeech", "vosk-zh", "vosk-en"].includes(koeAsrEngine) ? koeAsrEngine : "dashscope";
+  } catch {
+    // 读取失败时保持原配置
+  }
   if (state.captureStarted) await resetCaptureSession(state);
   await pushState(state);
   return { ok: true };
@@ -419,7 +579,7 @@ async function restoreStates() {
       liveOnly: true,
       captureStarted: false,
       captureNeedsGesture: true,
-      stageDetail: "点一下 Koe 图标，立即开始实时字幕",
+      stageDetail: "点击 Koe 图标打开侧边栏（自动开启）或按 Alt+K",
       startedAt: Date.now()
     });
   }
