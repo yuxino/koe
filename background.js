@@ -3,8 +3,10 @@
 // 不再下载视频、不再 ffmpeg、不再有“分析中 x%”的进度任务。
 
 const SERVER_URL = "http://127.0.0.1:8787";
+const AUTH_RULE_ID = 9001;
 const tabStates = new Map();
 const captureStreamIds = new Map();
+const captureStartPromises = new Map();
 let captureTabId = null;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -142,6 +144,21 @@ function isLiveAllowed(source, pageUrl) {
 }
 
 async function ensureCaptureAuthorized(state) {
+  const pending = captureStartPromises.get(state.tabId);
+  if (pending) return pending;
+
+  const attempt = runCaptureAuthorization(state);
+  captureStartPromises.set(state.tabId, attempt);
+  try {
+    return await attempt;
+  } finally {
+    if (captureStartPromises.get(state.tabId) === attempt) {
+      captureStartPromises.delete(state.tabId);
+    }
+  }
+}
+
+async function runCaptureAuthorization(state) {
   let streamId = captureStreamIds.get(state.tabId) || "";
   if (!streamId) {
     try {
@@ -150,6 +167,7 @@ async function ensureCaptureAuthorized(state) {
       const message = error instanceof Error ? error.message : String(error);
       if (/gesture|invocation|permission|user gesture/i.test(message)) {
         state.captureNeedsGesture = true;
+        state.status = "starting";
         state.stageDetail = "点一下 Koe 图标，立即开始实时字幕";
         await pushState(state);
         return;
@@ -160,10 +178,13 @@ async function ensureCaptureAuthorized(state) {
   try {
     await startCapture(state, streamId);
   } catch (error) {
-    // 流 ID 失效或采集失败：清掉，提示用户再点一次图标重新授权
+    const message = error instanceof Error ? error.message : String(error);
     captureStreamIds.delete(state.tabId);
-    state.captureNeedsGesture = true;
-    state.stageDetail = "点一下 Koe 图标，立即开始实时字幕";
+    state.captureStarted = false;
+    state.captureNeedsGesture = false;
+    state.status = "error";
+    state.stageDetail = message || "无法开始采集标签页声音。";
+    trace(state.tabId, "capture-start-failed", state.stageDetail);
     await pushState(state);
   }
 }
@@ -172,10 +193,15 @@ async function startCapture(state, streamId) {
   // 扩展重载后已打开的页面可能没有内容脚本，先把字幕显示脚本注入进去，
   // 否则识别通道通了、字幕却没地方显示
   await ensureContentScript(state.tabId, state.frameId || 0);
+  const { koeApiKey } = await chrome.storage.local.get("koeApiKey");
+  const apiKey = String(koeApiKey || "").trim();
+  if (!apiKey) throw new Error("请先在 Koe 中保存 DashScope API Key。");
+  await syncAuthorizationRule(apiKey);
   await ensureOffscreen();
   const response = await chrome.runtime.sendMessage({
     type: "CAPTURE_START",
     streamId,
+    apiKey,
     serverUrl: SERVER_URL,
     translate: state.translate
   });
@@ -188,6 +214,24 @@ async function startCapture(state, streamId) {
   await pushState(state);
   await persistStates();
   trace(state.tabId, "capture-started", `${response.mode || "pcm"} frame=${state.frameId || 0} src=${String(state.sourceUrl || "").slice(0, 60)}`);
+}
+
+async function syncAuthorizationRule(apiKey) {
+  await chrome.declarativeNetRequest.updateSessionRules({
+    removeRuleIds: [AUTH_RULE_ID],
+    addRules: [{
+      id: AUTH_RULE_ID,
+      priority: 10,
+      action: {
+        type: "modifyHeaders",
+        requestHeaders: [{ header: "Authorization", operation: "set", value: `Bearer ${apiKey}` }]
+      },
+      condition: {
+        urlFilter: "||dashscope.aliyuncs.com/api-ws/",
+        resourceTypes: ["websocket"]
+      }
+    }]
+  });
 }
 
 async function resetCaptureSession(state) {
@@ -228,7 +272,15 @@ async function stopCapture(state) {
 async function startCaptureForTab({ tabId, streamId, pageUrl = "" }) {
   const id = Number(tabId);
   if (!Number.isInteger(id)) return { ok: false, error: "没有找到当前标签页。" };
-  if (streamId) captureStreamIds.set(id, streamId);
+  if (streamId) {
+    captureStreamIds.set(id, streamId);
+    const state = tabStates.get(id);
+    if (state) {
+      state.captureNeedsGesture = false;
+      state.status = "starting";
+      state.stageDetail = "正在连接 DashScope…";
+    }
+  }
   await ensureLiveCaptions({ tabId: id, pageUrl });
   const state = tabStates.get(id);
   if (state?.captureStarted) return { ok: true, state: publicState(state) };
@@ -324,6 +376,7 @@ function cleanupTab(tabId) {
   tabStates.delete(tabId);
   if (captureTabId === tabId) captureTabId = null;
   captureStreamIds.delete(tabId);
+  captureStartPromises.delete(tabId);
   void persistStates();
 }
 

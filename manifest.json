@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Koe",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Live subtitles and Chinese translation for audio playing in the current tab.",
   "icons": {
     "16": "assets/koe-avatar-16.png",

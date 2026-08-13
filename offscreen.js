@@ -5,7 +5,6 @@ const DASHSCOPE_WS = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/";
 const TRANSLATE_ENDPOINT = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation";
 const ASR_MODEL = "qwen-audio-3.0-asr-flash-streaming";
 const TRANSLATE_MODEL = "qwen-mt-turbo";
-const AUTH_RULE_ID = 9001;
 const PCM_FRAME_BYTES = 3_200; // 100 ms, 16 kHz mono int16
 const MAX_AUTO_RETRIES = 5;
 
@@ -17,6 +16,7 @@ let socket = null;
 let taskId = "";
 let taskReady = false;
 let captureTranslate = false;
+let captureApiKey = "";
 let retryCount = 0;
 let retryTimer = null;
 let frameTimer = null;
@@ -49,16 +49,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-async function startCapture({ streamId, translate }) {
+async function startCapture({ streamId, translate, apiKey }) {
   retryCount = 0;
   stopping = false;
   clearRetryTimer();
   await stopCapture();
   stopping = false;
   if (!streamId) throw new Error("缺少标签页音频流。");
+  captureApiKey = String(apiKey || "").trim();
+  if (!captureApiKey) throw new Error("请先在 Koe 中保存 DashScope API Key。");
   captureTranslate = Boolean(translate);
-  await ensureAuthorizationRule();
-
   stream = await navigator.mediaDevices.getUserMedia({
     audio: {
       mandatory: { chromeMediaSource: "tab", chromeMediaSourceId: streamId }
@@ -80,29 +80,7 @@ async function startCapture({ streamId, translate }) {
   }
 }
 
-async function ensureAuthorizationRule() {
-  const { koeApiKey } = await chrome.storage.local.get("koeApiKey");
-  const apiKey = String(koeApiKey || "").trim();
-  if (!apiKey) throw new Error("请先在 Koe 中保存 DashScope API Key。");
-  await chrome.declarativeNetRequest.updateSessionRules({
-    removeRuleIds: [AUTH_RULE_ID],
-    addRules: [{
-      id: AUTH_RULE_ID,
-      priority: 10,
-      action: {
-        type: "modifyHeaders",
-        requestHeaders: [{ header: "Authorization", operation: "set", value: `Bearer ${apiKey}` }]
-      },
-      condition: {
-        urlFilter: "||dashscope.aliyuncs.com/api-ws/",
-        resourceTypes: ["websocket"]
-      }
-    }]
-  });
-}
-
 async function connectRealtime() {
-  await ensureAuthorizationRule();
   taskReady = false;
   taskId = randomTaskId();
   socket = new WebSocket(DASHSCOPE_WS);
@@ -188,8 +166,7 @@ async function translateFinal(line, seq) {
       });
       return;
     }
-    const { koeApiKey } = await chrome.storage.local.get("koeApiKey");
-    const apiKey = String(koeApiKey || "").trim();
+    const apiKey = captureApiKey;
     if (!apiKey) return;
     const response = await fetch(TRANSLATE_ENDPOINT, {
       method: "POST",

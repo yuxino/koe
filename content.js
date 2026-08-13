@@ -1,6 +1,11 @@
 (() => {
-  if (window.__koeLoaded) return;
-  window.__koeLoaded = true;
+  const CONTENT_VERSION = "1.1.1";
+  if (window.__koeLoaded === CONTENT_VERSION) return;
+  window.__koeLoaded = CONTENT_VERSION;
+
+  // 扩展重新加载后，页面里的旧 DOM 仍可能存在，但它对应的消息监听器已经失效。
+  // 移除旧容器并完整重建，避免后台已开启、页面却停在旧错误提示。
+  document.querySelector("#koe-root")?.remove();
 
   const HOST_CSS = "position:fixed;inset:0;pointer-events:none;z-index:2147483647;";
   const host = document.createElement("div");
