@@ -1,16 +1,29 @@
-// 离屏采集页：把标签页声音转成 16kHz PCM，通过 WebSocket 送给本地助手。
-// 不做任何视频下载/格式转换，只负责“声音 → 字节流”。
+// Koe offscreen capture: tab audio -> 16 kHz PCM -> DashScope directly.
+// No localhost helper is required at runtime.
+
+const DASHSCOPE_WS = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/";
+const TRANSLATE_ENDPOINT = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation";
+const ASR_MODEL = "qwen-audio-3.0-asr-flash-streaming";
+const TRANSLATE_MODEL = "qwen-mt-turbo";
+const AUTH_RULE_ID = 9001;
+const PCM_FRAME_BYTES = 3_200; // 100 ms, 16 kHz mono int16
+const MAX_AUTO_RETRIES = 5;
 
 let stream = null;
 let monitorAudio = null;
 let audioContext = null;
 let processor = null;
 let socket = null;
-let captureServerUrl = "";
+let taskId = "";
+let taskReady = false;
 let captureTranslate = false;
 let retryCount = 0;
 let retryTimer = null;
-const MAX_AUTO_RETRIES = 5;
+let frameTimer = null;
+let pcmPending = new Uint8Array(0);
+let frameQueue = [];
+let sentenceSeq = 0;
+let stopping = false;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message.type !== "string") return false;
@@ -27,7 +40,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message.type === "CAPTURE_RESET") {
-    resetSocket(message).then(() => sendResponse({ ok: true })).catch((error) => {
+    captureTranslate = Boolean(message.translate);
+    resetSocket().then(() => sendResponse({ ok: true })).catch((error) => {
       sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
     });
     return true;
@@ -35,13 +49,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-async function startCapture({ streamId, serverUrl, translate }) {
+async function startCapture({ streamId, translate }) {
   retryCount = 0;
+  stopping = false;
   clearRetryTimer();
   await stopCapture();
-  if (!streamId || !serverUrl) throw new Error("缺少标签页音频流或服务地址。");
-  captureServerUrl = String(serverUrl || "").replace(/\/+$/, "");
+  stopping = false;
+  if (!streamId) throw new Error("缺少标签页音频流。");
   captureTranslate = Boolean(translate);
+  await ensureAuthorizationRule();
 
   stream = await navigator.mediaDevices.getUserMedia({
     audio: {
@@ -49,21 +65,166 @@ async function startCapture({ streamId, serverUrl, translate }) {
     }
   });
 
-  // tabCapture 会静音标签页，把采集到的声音播回去，保证用户仍能听到
   monitorAudio = new Audio();
   monitorAudio.srcObject = stream;
   monitorAudio.play().catch(() => undefined);
 
   try {
-    socket = await openSocket();
-    bindSocket(socket);
+    await connectRealtime();
     const started = await startPcmCapture();
     if (!started) throw new Error("浏览器不支持 16kHz 音频采集。");
-    socket.send(JSON.stringify({ type: "start", format: "pcm", translate: captureTranslate }));
-    return { ok: true, mode: "pcm" };
+    return { ok: true, mode: "direct" };
   } catch (error) {
     await stopCapture();
     throw error;
+  }
+}
+
+async function ensureAuthorizationRule() {
+  const { koeApiKey } = await chrome.storage.local.get("koeApiKey");
+  const apiKey = String(koeApiKey || "").trim();
+  if (!apiKey) throw new Error("请先在 Koe 中保存 DashScope API Key。");
+  await chrome.declarativeNetRequest.updateSessionRules({
+    removeRuleIds: [AUTH_RULE_ID],
+    addRules: [{
+      id: AUTH_RULE_ID,
+      priority: 10,
+      action: {
+        type: "modifyHeaders",
+        requestHeaders: [{ header: "Authorization", operation: "set", value: `Bearer ${apiKey}` }]
+      },
+      condition: {
+        urlFilter: "||dashscope.aliyuncs.com/api-ws/",
+        resourceTypes: ["websocket"]
+      }
+    }]
+  });
+}
+
+async function connectRealtime() {
+  await ensureAuthorizationRule();
+  taskReady = false;
+  taskId = randomTaskId();
+  socket = new WebSocket(DASHSCOPE_WS);
+  socket.binaryType = "arraybuffer";
+
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("DashScope 连接超时。")), 20_000);
+    socket.onopen = () => {
+      socket.send(JSON.stringify({
+        header: { action: "run-task", task_id: taskId, streaming: "duplex" },
+        payload: {
+          task_group: "audio",
+          task: "asr",
+          function: "recognition",
+          model: ASR_MODEL,
+          parameters: { format: "pcm", sample_rate: 16_000 },
+          input: {}
+        }
+      }));
+    };
+    socket.onmessage = (event) => {
+      const message = parseJson(event.data);
+      if (!message) return;
+      const type = message?.header?.event || "";
+      if (type === "task-started") {
+        clearTimeout(timer);
+        taskReady = true;
+        retryCount = 0;
+        clearRetryTimer();
+        resolve();
+        return;
+      }
+      handleDashScopeMessage(message);
+    };
+    socket.onerror = () => {
+      clearTimeout(timer);
+      reject(new Error("无法连接 DashScope 实时识别。"));
+    };
+    socket.onclose = () => {
+      clearTimeout(timer);
+      taskReady = false;
+      if (!stopping && stream) scheduleAutoReconnect();
+    };
+  });
+}
+
+function handleDashScopeMessage(message) {
+  const event = message?.header?.event || "";
+  if (event === "result-generated") {
+    const sentence = message?.payload?.output?.sentence;
+    if (!sentence || sentence.heartbeat) return;
+    const text = String(sentence.text || "").trim();
+    if (!text) return;
+    const final = Boolean(sentence.sentence_end);
+    const seq = final ? ++sentenceSeq : sentenceSeq + 1;
+    const line = {
+      text,
+      beginTime: Number(sentence.begin_time || 0),
+      endTime: Number(sentence.end_time || 0)
+    };
+    chrome.runtime.sendMessage({
+      type: final ? "CAPTURE_LINES" : "CAPTURE_PARTIAL",
+      lines: [line],
+      seq
+    }).catch(() => undefined);
+    if (final && captureTranslate) void translateFinal(line, seq);
+    return;
+  }
+  if (event === "task-failed") {
+    const error = message?.header?.error_message || "DashScope 实时识别失败";
+    chrome.runtime.sendMessage({ type: "CAPTURE_ERROR", error }).catch(() => undefined);
+    if (isRetryable(error)) scheduleAutoReconnect();
+  }
+}
+
+async function translateFinal(line, seq) {
+  try {
+    if (isAlreadyChinese(line.text)) {
+      await chrome.runtime.sendMessage({
+        type: "CAPTURE_TRANSLATED",
+        lines: [{ ...line, translated: line.text }],
+        seq
+      });
+      return;
+    }
+    const { koeApiKey } = await chrome.storage.local.get("koeApiKey");
+    const apiKey = String(koeApiKey || "").trim();
+    if (!apiKey) return;
+    const response = await fetch(TRANSLATE_ENDPOINT, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+        "X-DashScope-SSE": "disable"
+      },
+      body: JSON.stringify({
+        model: TRANSLATE_MODEL,
+        input: {
+          messages: [
+            {
+              role: "system",
+              content: "你是字幕翻译器。把输入翻译成自然、简洁、口语化的简体中文，只输出译文，不解释。保留人名、地名和品牌名。"
+            },
+            { role: "user", content: line.text }
+          ]
+        },
+        parameters: { result_format: "message" }
+      })
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body?.message || `translate_failed:${response.status}`);
+    const translated = String(
+      body?.output?.choices?.[0]?.message?.content || body?.output?.text || ""
+    ).trim();
+    if (!translated) return;
+    await chrome.runtime.sendMessage({
+      type: "CAPTURE_TRANSLATED",
+      lines: [{ ...line, translated }],
+      seq
+    });
+  } catch {
+    // Translation failure must not interrupt original subtitles.
   }
 }
 
@@ -81,22 +242,13 @@ async function startPcmCapture() {
     source.channelCountMode = "explicit";
     source.channelInterpretation = "speakers";
     processor = audioContext.createScriptProcessor(4_096, 1, 1);
-    processor.onaudioprocess = (event) => {
-      if (!socket || socket.readyState !== WebSocket.OPEN) return;
-      const samples = event.inputBuffer.getChannelData(0);
-      const pcm = new Int16Array(samples.length);
-      for (let index = 0; index < samples.length; index += 1) {
-        const sample = Math.max(-1, Math.min(1, samples[index]));
-        pcm[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
-      }
-      socket.send(pcm.buffer);
-    };
-    // 处理器连到 0 增益输出，只驱动 onaudioprocess，不产生第二份声音
+    processor.onaudioprocess = (event) => enqueueSamples(event.inputBuffer.getChannelData(0));
     const silent = audioContext.createGain();
     silent.gain.value = 0;
     source.connect(processor);
     processor.connect(silent);
     silent.connect(audioContext.destination);
+    frameTimer = setInterval(flushFrame, 100);
     return true;
   } catch {
     await stopPcmCapture();
@@ -104,119 +256,55 @@ async function startPcmCapture() {
   }
 }
 
-async function resetSocket({ serverUrl, translate }) {
-  // 同一标签页换了视频：保持已授权的音频流不断，只重连识别会话，
-  // 这样点一次图标，本页里切多少个视频都能继续出实时字幕
+function enqueueSamples(samples) {
+  const bytes = new Uint8Array(samples.length * 2);
+  const view = new DataView(bytes.buffer);
+  for (let i = 0; i < samples.length; i += 1) {
+    const sample = Math.max(-1, Math.min(1, samples[i]));
+    const value = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+    view.setInt16(i * 2, value, true);
+  }
+  const merged = new Uint8Array(pcmPending.length + bytes.length);
+  merged.set(pcmPending, 0);
+  merged.set(bytes, pcmPending.length);
+  pcmPending = merged;
+  while (pcmPending.length >= PCM_FRAME_BYTES) {
+    frameQueue.push(pcmPending.slice(0, PCM_FRAME_BYTES));
+    pcmPending = pcmPending.slice(PCM_FRAME_BYTES);
+  }
+  if (frameQueue.length > 50) frameQueue.splice(0, frameQueue.length - 50);
+}
+
+function flushFrame() {
+  if (!taskReady || !socket || socket.readyState !== WebSocket.OPEN) return;
+  const frame = frameQueue.shift();
+  if (!frame) return;
+  try { socket.send(frame.buffer); } catch { scheduleAutoReconnect(); }
+}
+
+async function resetSocket() {
   if (!stream) throw new Error("capture_not_running");
-  captureServerUrl = String(serverUrl || "").replace(/\/+$/, "");
-  captureTranslate = Boolean(translate);
-  const previousSocket = socket;
-  socket = null;
-  if (previousSocket) {
-    previousSocket.onmessage = null;
-    previousSocket.onerror = null;
-    previousSocket.onclose = null;
-    try {
-      if (previousSocket.readyState === WebSocket.OPEN) previousSocket.send(JSON.stringify({ type: "stop" }));
-    } catch { /* ignore */ }
-    try { previousSocket.close(); } catch { /* ignore */ }
-  }
-  // 等旧会话在服务端释放，避免新会话被“busy”拒绝
-  await new Promise((resolve) => setTimeout(resolve, 400));
-  const nextSocket = await openSocket();
-  socket = nextSocket;
-  bindSocket(nextSocket);
-  nextSocket.send(JSON.stringify({ type: "start", format: "pcm", translate: captureTranslate }));
-}
-
-function openSocket() {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`${captureServerUrl.replace(/^http/, "ws")}/api/capture/ws`);
-    ws.binaryType = "arraybuffer";
-    ws.onopen = () => resolve(ws);
-    ws.onerror = () => reject(new Error("无法连接本地助手采集接口。"));
-  });
-}
-
-function bindSocket(activeSocket) {
-  activeSocket.onmessage = (event) => handleServerMessage(event, activeSocket);
-  activeSocket.onclose = () => {
-    if (activeSocket !== socket || !stream) return;
-    scheduleAutoReconnect();
-  };
-  activeSocket.onerror = () => {
-    if (activeSocket !== socket || !stream) return;
-    scheduleAutoReconnect();
-  };
-}
-
-function handleServerMessage(event, sourceSocket) {
-  // reset 后旧 WebSocket 仍可能补发 done/error。忽略旧会话事件，
-  // 否则它会把刚建立的新识别会话一起停掉。
-  if (sourceSocket !== socket) return;
-  if (typeof event.data !== "string") return;
-  let message;
-  try {
-    message = JSON.parse(event.data);
-  } catch {
-    return;
-  }
-  if (message.type === "lines" || message.type === "partial") {
-    const lines = Array.isArray(message.lines) ? message.lines : [];
-    if (!lines.length) return;
-    chrome.runtime.sendMessage({
-      type: message.type === "lines" ? "CAPTURE_LINES" : "CAPTURE_PARTIAL",
-      lines,
-      seq: message.seq
-    }).catch(() => undefined);
-    return;
-  }
-  if (message.type === "translated") {
-    const lines = Array.isArray(message.lines) ? message.lines : [];
-    if (!lines.length) return;
-    chrome.runtime.sendMessage({
-      type: "CAPTURE_TRANSLATED",
-      lines,
-      seq: message.seq
-    }).catch(() => undefined);
-    return;
-  }
-  if (message.type === "ready") {
-    retryCount = 0;
-    clearRetryTimer();
-    return;
-  }
-  if (message.type === "error") {
-    const errorText = message.error || "实时字幕采集失败";
-    if (isRetryable(errorText)) {
-      scheduleAutoReconnect();
-      return;
-    }
-    chrome.runtime.sendMessage({ type: "CAPTURE_ERROR", error: errorText }).catch(() => undefined);
-    void stopCapture();
-    return;
-  }
-  if (message.type === "done") {
-    void stopCapture();
-  }
+  closeSocket(false);
+  frameQueue = [];
+  pcmPending = new Uint8Array(0);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  await connectRealtime();
 }
 
 function scheduleAutoReconnect() {
-  if (retryTimer || !stream) return;
+  if (stopping || retryTimer) return;
   if (retryCount >= MAX_AUTO_RETRIES) {
     chrome.runtime.sendMessage({
       type: "CAPTURE_ERROR",
-      error: "本地助手重连失败，请检查 Koe 本地助手。"
+      error: "DashScope 重连失败，请检查网络或 API Key。"
     }).catch(() => undefined);
-    void stopCapture();
     return;
   }
   retryCount += 1;
-  const delayMs = Math.min(2_000, 250 * 2 ** Math.max(0, retryCount - 1));
+  const delayMs = Math.min(4_000, 300 * 2 ** Math.max(0, retryCount - 1));
   retryTimer = setTimeout(() => {
     retryTimer = null;
-    void resetSocket({ serverUrl: captureServerUrl, translate: captureTranslate })
-      .catch(() => scheduleAutoReconnect());
+    void resetSocket().catch(() => scheduleAutoReconnect());
   }, delayMs);
 }
 
@@ -226,11 +314,14 @@ function clearRetryTimer() {
 }
 
 function isRetryable(error) {
-  const text = String(error || "").toLowerCase();
-  return /realtime_connection_closed|socket|connection|timeout|1006|econnreset|etimedout|closed/.test(text);
+  return /socket|connection|timeout|closed|network|1006|econnreset|etimedout/i.test(String(error || ""));
 }
 
 async function stopPcmCapture() {
+  if (frameTimer) clearInterval(frameTimer);
+  frameTimer = null;
+  frameQueue = [];
+  pcmPending = new Uint8Array(0);
   if (processor) {
     try { processor.disconnect(); } catch { /* ignore */ }
     processor.onaudioprocess = null;
@@ -242,7 +333,23 @@ async function stopPcmCapture() {
   }
 }
 
+function closeSocket(finish = true) {
+  taskReady = false;
+  if (!socket) return;
+  try {
+    if (finish && socket.readyState === WebSocket.OPEN && taskId) {
+      socket.send(JSON.stringify({
+        header: { action: "finish-task", task_id: taskId, streaming: "duplex" },
+        payload: { input: {} }
+      }));
+    }
+  } catch { /* ignore */ }
+  try { socket.close(1000, "bye"); } catch { /* ignore */ }
+  socket = null;
+}
+
 async function stopCapture() {
+  stopping = true;
   clearRetryTimer();
   await stopPcmCapture();
   if (monitorAudio) {
@@ -254,16 +361,23 @@ async function stopCapture() {
     stream.getTracks().forEach((track) => track.stop());
     stream = null;
   }
-  if (socket) {
-    const activeSocket = socket;
-    socket = null;
-    activeSocket.onmessage = null;
-    activeSocket.onerror = null;
-    activeSocket.onclose = null;
-    try {
-      if (activeSocket.readyState === WebSocket.OPEN) activeSocket.send(JSON.stringify({ type: "stop" }));
-    } catch { /* ignore */ }
-    try { activeSocket.close(); } catch { /* ignore */ }
-  }
-  captureServerUrl = "";
+  closeSocket(true);
+  taskId = "";
+  sentenceSeq = 0;
+}
+
+function parseJson(value) {
+  if (typeof value !== "string") return null;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+function randomTaskId() {
+  return crypto.randomUUID().replace(/-/g, "").slice(0, 32);
+}
+
+function isAlreadyChinese(value) {
+  const text = String(value || "");
+  const cjk = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+  const latin = (text.match(/[A-Za-z]/g) || []).length;
+  return cjk > 0 && cjk >= latin;
 }
