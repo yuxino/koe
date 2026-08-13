@@ -42,6 +42,7 @@
   const subtitleEl = shadow.querySelector(".subtitle");
 
   let translateOn = false;
+  let activeJobId = "";
   let lastSeenSource = "";
   let lastSeenUrl = location.href;
   let lastPageReadyAt = 0;
@@ -55,8 +56,14 @@
     if (message.type === "LIVE_STATE") {
       ack(`state:${message.status}`, true);
       if (message.translate !== undefined) translateOn = Boolean(message.translate);
+
+      const nextJobId = String(message.jobId || "");
+      if (nextJobId && nextJobId !== activeJobId) {
+        activeJobId = nextJobId;
+        resetSubtitleSession();
+      }
+
       if (message.status === "live") {
-        latestFinalSeq = 0;
         hideStatus();
       } else if (message.captureNeedsGesture) {
         showStatus(message.stageDetail || "点一下 Koe 图标，立即开始实时字幕");
@@ -69,6 +76,7 @@
     }
 
     if (message.type === "LIVE_PARTIAL") {
+      if (!belongsToActiveSession(message)) return false;
       try {
         // 翻译模式下不显示中间原文，避免和即将补上的中文来回闪烁
         if (translateOn) return false;
@@ -83,8 +91,9 @@
     }
 
     if (message.type === "LIVE_SUBTITLES") {
+      if (!belongsToActiveSession(message)) return false;
       try {
-        if (message.seq) latestFinalSeq = Number(message.seq);
+        if (message.seq !== undefined && message.seq !== null) latestFinalSeq = Number(message.seq);
         const lines = Array.isArray(message.lines) ? message.lines : [];
         const line = lines[lines.length - 1];
         const text = line?.text;
@@ -96,6 +105,7 @@
     }
 
     if (message.type === "LIVE_TRANSLATED") {
+      if (!belongsToActiveSession(message)) return false;
       try {
         if (!translateOn) return false;
         if (Number(message.seq) !== latestFinalSeq) return false;
@@ -110,10 +120,8 @@
     }
 
     if (message.type === "LIVE_STOP") {
-      clearTimeout(liveHideTimer);
-      subtitleEl.textContent = "";
-      subtitleEl.classList.remove("visible");
-      latestFinalSeq = 0;
+      if (!belongsToActiveSession(message)) return false;
+      resetSubtitleSession();
       return false;
     }
     return false;
@@ -194,6 +202,18 @@
       document.documentElement.appendChild(host);
       host.style.cssText = HOST_CSS;
     }
+  }
+
+  function belongsToActiveSession(message) {
+    const jobId = String(message.jobId || "");
+    return !jobId || !activeJobId || jobId === activeJobId;
+  }
+
+  function resetSubtitleSession() {
+    clearTimeout(liveHideTimer);
+    latestFinalSeq = 0;
+    subtitleEl.textContent = "";
+    subtitleEl.classList.remove("visible");
   }
 
   function showStatus(text, isError = false) {
