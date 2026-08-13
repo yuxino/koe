@@ -20,10 +20,16 @@
       <section class="status-card">
         <div class="status-line">
           <strong id="engine-status">未开启</strong>
-          <span id="engine-detail">打开此弹窗或按 Alt+K 开启</span>
+          <span id="engine-detail">填写 API Key 后即可开始</span>
         </div>
       </section>
 
+      <label class="field-row" for="api-key">
+        <span>DashScope API Key</span>
+        <input id="api-key" type="password" autocomplete="off" placeholder="sk-...">
+      </label>
+
+      <button id="save-key" class="secondary-button" type="button">保存 API Key</button>
       <button id="start-button" class="start-button" type="button">开始实时字幕</button>
 
       <label class="toggle-row" for="translate-toggle">
