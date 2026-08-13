@@ -56,7 +56,7 @@ async function startCapture({ streamId, serverUrl, translate }) {
 
   try {
     socket = await openSocket();
-    socket.onmessage = (event) => handleServerMessage(event);
+    bindSocket(socket);
     const started = await startPcmCapture();
     if (!started) throw new Error("浏览器不支持 16kHz 音频采集。");
     socket.send(JSON.stringify({ type: "start", format: "pcm", translate: captureTranslate }));
@@ -110,18 +110,23 @@ async function resetSocket({ serverUrl, translate }) {
   if (!stream) throw new Error("capture_not_running");
   captureServerUrl = String(serverUrl || "").replace(/\/+$/, "");
   captureTranslate = Boolean(translate);
-  if (socket) {
+  const previousSocket = socket;
+  socket = null;
+  if (previousSocket) {
+    previousSocket.onmessage = null;
+    previousSocket.onerror = null;
+    previousSocket.onclose = null;
     try {
-      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "stop" }));
+      if (previousSocket.readyState === WebSocket.OPEN) previousSocket.send(JSON.stringify({ type: "stop" }));
     } catch { /* ignore */ }
-    try { socket.close(); } catch { /* ignore */ }
-    socket = null;
+    try { previousSocket.close(); } catch { /* ignore */ }
   }
   // 等旧会话在服务端释放，避免新会话被“busy”拒绝
   await new Promise((resolve) => setTimeout(resolve, 400));
-  socket = await openSocket();
-  socket.onmessage = (event) => handleServerMessage(event);
-  socket.send(JSON.stringify({ type: "start", format: "pcm", translate: captureTranslate }));
+  const nextSocket = await openSocket();
+  socket = nextSocket;
+  bindSocket(nextSocket);
+  nextSocket.send(JSON.stringify({ type: "start", format: "pcm", translate: captureTranslate }));
 }
 
 function openSocket() {
@@ -133,7 +138,22 @@ function openSocket() {
   });
 }
 
-function handleServerMessage(event) {
+function bindSocket(activeSocket) {
+  activeSocket.onmessage = (event) => handleServerMessage(event, activeSocket);
+  activeSocket.onclose = () => {
+    if (activeSocket !== socket || !stream) return;
+    scheduleAutoReconnect();
+  };
+  activeSocket.onerror = () => {
+    if (activeSocket !== socket || !stream) return;
+    scheduleAutoReconnect();
+  };
+}
+
+function handleServerMessage(event, sourceSocket) {
+  // reset 后旧 WebSocket 仍可能补发 done/error。忽略旧会话事件，
+  // 否则它会把刚建立的新识别会话一起停掉。
+  if (sourceSocket !== socket) return;
   if (typeof event.data !== "string") return;
   let message;
   try {
@@ -162,7 +182,6 @@ function handleServerMessage(event) {
     return;
   }
   if (message.type === "ready") {
-    // 识别会话重新建立成功，重置自动重连计数
     retryCount = 0;
     clearRetryTimer();
     return;
@@ -183,7 +202,7 @@ function handleServerMessage(event) {
 }
 
 function scheduleAutoReconnect() {
-  if (retryTimer) return;
+  if (retryTimer || !stream) return;
   if (retryCount >= MAX_AUTO_RETRIES) {
     chrome.runtime.sendMessage({
       type: "CAPTURE_ERROR",
@@ -236,11 +255,15 @@ async function stopCapture() {
     stream = null;
   }
   if (socket) {
-    try {
-      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "stop" }));
-    } catch { /* ignore */ }
-    try { socket.close(); } catch { /* ignore */ }
+    const activeSocket = socket;
     socket = null;
+    activeSocket.onmessage = null;
+    activeSocket.onerror = null;
+    activeSocket.onclose = null;
+    try {
+      if (activeSocket.readyState === WebSocket.OPEN) activeSocket.send(JSON.stringify({ type: "stop" }));
+    } catch { /* ignore */ }
+    try { activeSocket.close(); } catch { /* ignore */ }
   }
   captureServerUrl = "";
 }
