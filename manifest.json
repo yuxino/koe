@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Koe",
-  "version": "1.0.37",
-  "description": "实时字幕：捕获当前标签页声音，本地识别 + 中文翻译。",
+  "version": "1.1.0",
+  "description": "Live subtitles and Chinese translation for audio playing in the current tab.",
   "icons": {
     "16": "assets/koe-avatar-16.png",
     "48": "assets/koe-avatar-48.png",
@@ -13,10 +13,13 @@
     "storage",
     "alarms",
     "tabCapture",
-    "offscreen"
+    "offscreen",
+    "declarativeNetRequestWithHostAccess"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "<all_urls>",
+    "https://dashscope.aliyuncs.com/*",
+    "wss://dashscope.aliyuncs.com/*"
   ],
   "background": {
     "service_worker": "background.js",
@@ -31,7 +34,7 @@
       "suggested_key": {
         "default": "Alt+K"
       },
-      "description": "捕获当前标签页声音并显示实时字幕"
+      "description": "Start live subtitles for the current tab"
     }
   },
   "content_scripts": [
