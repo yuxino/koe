@@ -35,7 +35,10 @@ const elements = {
   hint: document.querySelector("#hint"),
   settings: document.querySelector("#settings"),
   settingsSummary: document.querySelector("#settings-summary"),
-  feed: document.querySelector("#feed")
+  feed: document.querySelector("#feed"),
+  copyAll: document.querySelector("#copy-all"),
+  clearFeed: document.querySelector("#clear-feed"),
+  scrollBottom: document.querySelector("#scroll-bottom")
 };
 
 // 兜底：任何未捕获的脚本/异步错误都显示在底部提示里，杜绝“点了没反应”
@@ -62,6 +65,16 @@ elements.translateToggle.addEventListener("change", async () => {
   elements.hint.textContent = translate ? "中文翻译已开启 · 正在重连识别…" : "中文翻译已关闭 · 只显示原文";
 });
 elements.captureMode.addEventListener("change", () => void saveCaptureMode());
+elements.copyAll.addEventListener("click", () => void copyTranscript());
+elements.clearFeed.addEventListener("click", () => {
+  resetFeed();
+  elements.hint.textContent = "字幕记录已清空";
+});
+elements.scrollBottom.addEventListener("click", () => smoothScrollToBottom());
+elements.feed.addEventListener("scroll", () => {
+  const nearBottom = elements.feed.scrollTop + elements.feed.clientHeight >= elements.feed.scrollHeight - 48;
+  elements.scrollBottom.hidden = nearBottom;
+});
 chrome.tabs.onActivated.addListener(async () => {
   // 切换标签页时刷新状态与字幕流归属；不在切换时自动开启
   await refreshActiveTab();
@@ -464,17 +477,27 @@ function resetFeed() {
 
 function appendRow(text, className = "") {
   elements.feed.querySelectorAll(".placeholder").forEach((node) => node.remove());
+  const time = formatTime(new Date());
   const parts = segments(String(text), subtitleMaxChars(String(text)));
   for (const part of parts) {
     const row = document.createElement("div");
     row.className = `row ${className}`.trim();
-    row.textContent = part;
+    row.dataset.ts = time;
+    row.dataset.text = part;
+    const timeEl = document.createElement("span");
+    timeEl.className = "time";
+    timeEl.textContent = time;
+    const textEl = document.createElement("span");
+    textEl.className = "text";
+    textEl.textContent = part;
+    row.appendChild(timeEl);
+    row.appendChild(textEl);
     elements.feed.appendChild(row);
     while (elements.feed.children.length > MAX_ROWS) {
       elements.feed.firstElementChild.remove();
     }
   }
-  elements.feed.scrollTop = elements.feed.scrollHeight;
+  smoothScrollToBottom();
 }
 
 function setDraft(text) {
@@ -486,15 +509,53 @@ function setDraft(text) {
   if (!draftEl || !draftEl.isConnected) {
     draftEl = document.createElement("div");
     draftEl.className = "row draft";
+    const timeEl = document.createElement("span");
+    timeEl.className = "time";
+    timeEl.textContent = formatTime(new Date());
+    const textEl = document.createElement("span");
+    textEl.className = "text";
+    draftEl.appendChild(timeEl);
+    draftEl.appendChild(textEl);
     elements.feed.appendChild(draftEl);
   }
-  draftEl.textContent = joined;
-  elements.feed.scrollTop = elements.feed.scrollHeight;
+  draftEl.querySelector(".text").textContent = joined;
+  smoothScrollToBottom();
 }
 
 function clearDraft() {
   if (draftEl) {
     draftEl.remove();
     draftEl = null;
+  }
+}
+
+function formatTime(date) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function smoothScrollToBottom() {
+  if (typeof elements.feed.scrollTo === "function") {
+    elements.feed.scrollTo({ top: elements.feed.scrollHeight, behavior: "smooth" });
+  } else {
+    elements.feed.scrollTop = elements.feed.scrollHeight;
+  }
+}
+
+async function copyTranscript() {
+  const lines = [...elements.feed.children]
+    .filter((row) => !row.classList.contains("placeholder") && !row.classList.contains("draft"))
+    .map((row) => `[${row.dataset.ts || ""}] ${row.dataset.text || ""}`)
+    .filter((line) => line.trim().length > 2);
+  if (lines.length === 0) {
+    elements.hint.textContent = "还没有可复制的字幕";
+    return;
+  }
+  const content = lines.join("\n");
+  try {
+    await navigator.clipboard.writeText(content);
+    elements.hint.textContent = `已复制 ${lines.length} 条字幕`;
+  } catch {
+    elements.hint.textContent = "复制失败：请手动选中字幕记录";
   }
 }

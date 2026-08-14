@@ -89,7 +89,28 @@ body {
 .field-row input:focus,
 .field-row select:focus { border-color: rgba(203, 220, 119, .65); }
 
-/* ===== 字幕流 ===== */
+/* ===== 字幕流（转录） ===== */
+.feed-actions {
+  display: flex; align-items: center; gap: 8px; flex: none;
+}
+.feed-title { flex: 1; color: var(--muted); font-size: 12px; letter-spacing: .04em; }
+.mini-button {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.mini-button:hover { color: var(--text); border-color: rgba(255, 248, 224, .28); }
+
+.feed-area {
+  flex: 1;
+  position: relative;
+  display: flex;
+  min-height: 0;
+}
 .feed {
   flex: 1;
   overflow-y: auto;
@@ -101,19 +122,55 @@ body {
   border-radius: 12px;
   padding: 10px 12px;
   min-height: 120px;
+  scroll-behavior: smooth;
 }
 .row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
   font: 400 14px/1.6 Georgia, "Songti SC", serif;
   color: var(--text);
   padding: 6px 10px;
   border-radius: 8px;
   background: rgba(255, 248, 224, .04);
   word-break: break-word;
+  animation: rowIn .18s ease;
 }
+@keyframes rowIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.row .time {
+  flex: none;
+  font: 500 10.5px/1.6 ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--muted);
+  letter-spacing: .02em;
+}
+.row .text { flex: 1; min-width: 0; }
 .row.placeholder { color: var(--muted); font-size: 13px; font-family: inherit; }
 .row.draft {
   background: rgba(203, 220, 119, .08);
-  color: rgba(243, 236, 214, .85);
+  color: rgba(243, 236, 214, .88);
+  border-left: 2px solid var(--accent);
+  animation: draftPulse 1.6s ease-in-out infinite;
+}
+@keyframes draftPulse {
+  0%, 100% { border-left-color: rgba(203, 220, 119, .9); }
+  50% { border-left-color: rgba(203, 220, 119, .25); }
+}
+
+.scroll-bottom {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  border: 1px solid var(--line);
+  background: rgba(28, 36, 31, .92);
+  color: var(--accent);
+  font-size: 11px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .35);
 }
 
 footer { color: var(--muted); font-size: 11px; text-align: center; min-height: 16px; flex: none; }
