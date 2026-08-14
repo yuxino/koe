@@ -125,18 +125,18 @@ function makeOffCtx() {
     const run = (code) => vm.runInContext(code, h.ctx);
     await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope" }).catch(e => ({ok:false}))`);
     await flush();
-    // 客户端强切上屏 "Wow, I can't believe her too"（错误前缀）
-    run(`handleServerDraft("Wow, I can't believe her too")`);
+    // 客户端完整句上屏 "Wow, I can't believe her too."（错误前缀）
+    run(`handleServerDraft("Wow, I can't believe her too.")`);
     await run(`(() => { const c = commitPendingDraft({ forceLongIncomplete: true }); if (c) emitCommittedUnit(c); return c; })()`);
     await flush();
-    // 草稿尾 "tties are that big"（修正中的中间态）
+    // 草稿尾修正（tootties → titties）：draft 阶段应触发 revoke（词尾修正）
     run(`handleServerDraft("Wow, I can't believe her tootties are that big")`);
     await flush();
-    // 服务端 final 修正：her too → her titties
+    const revoke = h.sent.find((m) => m.type === "CAPTURE_REVOKE");
+    check(Boolean(revoke), "词尾修正触发 CAPTURE_REVOKE");
+    // 服务端 final 权威版到达 → 切块上屏
     run(`handleServerFinal("Wow, I can't believe her titties are that big.")`);
     await flush();
-    const revoke = h.sent.find((m) => m.type === "CAPTURE_REVOKE");
-    check(Boolean(revoke), "final 前缀修正触发 CAPTURE_REVOKE");
     const lines = h.sent.filter((m) => m.type === "CAPTURE_LINES").map((m) => m.lines[0].text);
     check(lines.some((l) => l === "Wow, I can't believe her titties are that big."),
       `权威修正版重新上屏（实际 ${JSON.stringify(lines)}）`);
@@ -144,7 +144,7 @@ function makeOffCtx() {
     const badSeq = h.sent.find((m) => m.type === "CAPTURE_LINES" && m.lines[0].text.includes("her too") && !m.lines[0].text.includes("titties"))?.seq;
     check(Boolean(badSeq) && revoke.fromSeq <= badSeq && revoke.toSeq >= badSeq,
       `revoke 范围覆盖错误行（badSeq=${badSeq}, revoke=${revoke.fromSeq}..${revoke.toSeq}）`);
-    console.log("T3 final 前缀修正 revoke + 重发 PASS");
+    console.log("T3 词尾修正 revoke + 重发 PASS");
   }
   {
     // T4：pendingText 清理前导标点（draft 尾巴不以 "." 开头）

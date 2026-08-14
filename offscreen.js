@@ -494,7 +494,11 @@ function handleDashScopeMessage(message) {
 const SENTENCE_DELIMITERS = ["。", "！", "？", ".", "!", "?", "\n"];
 const LONG_INCOMPLETE_THRESHOLD = 12;
 const STABLE_DRAFT_DELAY = 700;
-const MAXIMUM_WAIT_DELAY = 2_000;
+const MAXIMUM_WAIT_DELAY = 4_000;
+// 长句兜底切块阈值：没有完整句时（说话人不停顿、无句号），
+// 英文攒到 48 字符、中文 24 字才切大块，避免"半句字幕"碎上屏。
+const LONG_CHUNK_LATIN = 48;
+const LONG_CHUNK_CJK = 24;
 
 let latestDraft = "";
 let committedText = "";
@@ -554,11 +558,11 @@ function textLanguage(text) {
   return latin >= cjk ? "latin" : "cjk";
 }
 
-// 长尾强制切块也有限长：中文最多 16 字、英文最多 28 字符，英文尽量在单词边界切。
+// 长尾强制切块也有限长：英文最多 48 字符、中文最多 24 字，英文尽量在单词边界切。
 // 剩下的继续留在待提交区，由下一个计时器再切。
 function firstLongChunk(text) {
   const points = codePoints(text);
-  const maxLen = textLanguage(text) === "latin" ? 28 : 16;
+  const maxLen = textLanguage(text) === "latin" ? LONG_CHUNK_LATIN : LONG_CHUNK_CJK;
   if (points.length <= maxLen) return text;
   let end = maxLen;
   for (let index = maxLen; index >= Math.floor(maxLen / 2); index -= 1) {
@@ -594,9 +598,11 @@ function commitPendingDraft({ forceLongIncomplete = false } = {}) {
   }
   if (forceLongIncomplete) {
     const longChunk = firstLongChunk(pending);
-    // 触发阈值也按语言：中文 12 字、英文 20 字符（英文单词长，12 字符太容易误切）
-    const minLen = textLanguage(pending) === "latin" ? 20 : LONG_INCOMPLETE_THRESHOLD;
-    if (codePoints(longChunk).length >= minLen) {
+    // 触发阈值也按语言：英文攒够 48 字符、中文 24 字才切，避免半句碎上屏。
+    // 词边界切不满阈值时（长单词把边界顶到 40-47），只要待提交总量达阈值也切——
+    // 否则超长句会一直卡在待提交区，字幕永远出不来。
+    const minLen = textLanguage(pending) === "latin" ? LONG_CHUNK_LATIN : LONG_CHUNK_CJK;
+    if (codePoints(longChunk).length >= minLen || codePoints(pending).length >= minLen) {
       commitChunk(longChunk, pending);
       return longChunk;
     }
@@ -746,15 +752,26 @@ function revokeCurrentSentence(reason) {
   cancelDraftTimers();
 }
 
+// 判断两段文本是否共享词（同一句话的修正通常保留尾词，换句则无关）
+function hasSharedWord(left, right) {
+  const words = new Set(String(left || "").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean));
+  const rightWords = String(right || "").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  return rightWords.slice(-2).some((word) => words.has(word));
+}
+
 function handleServerDraft(text) {
-  // 识别修正检测：已提交过内容，但新草稿与已提交内容没有公共前缀
-  // （服务端把整句换词了，如 "Okayur assets" → "Identify your assets"）。
-  // 此时按范围撤回当前句子的全部字幕块（fromSeq..toSeq），
-  // 让修正后的文本从头重新累积，避免错行残留。
+  // 识别修正检测：服务端把已上屏的内容换词/换尾时（如 "Okayur assets" → "Identify your assets"、
+  // "levitateght" → "levitate"），撤回当前句的字幕块，让修正后的文本重新累积。
+  // 两种情况：① 整句换词（公共前缀极短，但保留尾词）→ revoke；
+  // ② 词尾被换（公共前缀长、draft 不以 committedText 开头、draft 更长）→ revoke。
   const draftText = String(text || "").trim();
   if (committedText && lastEmittedUnitSeq && draftText && !draftText.startsWith(committedText)) {
     const lcp = longestCommonPrefix(draftText, committedText);
-    if (lcp < 3) {
+    const committedLen = codePoints(committedText).length;
+    const draftLen = codePoints(draftText).length;
+    const fullSwap = lcp < 3 && hasSharedWord(draftText, committedText);
+    const tailSwap = committedLen >= 8 && lcp >= 8 && draftLen > committedLen;
+    if (fullSwap || tailSwap) {
       revokeCurrentSentence(`draft-swap new=${JSON.stringify(draftText.slice(0, 40))}`);
     }
   }

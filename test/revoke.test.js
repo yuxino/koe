@@ -72,13 +72,13 @@ async function commitOnce(run) {
     const run = (code) => vm.runInContext(code, h.ctx);
     await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope" }).catch(e => ({ok:false}))`);
     await flush();
-    run(`handleServerDraft("Okayur assets and make good on the payments")`);
-    await commitOnce(run); // 强切（英文阈值下可能是一整块）
-    await commitOnce(run); // 若还有剩余，再切
+    // 完整句上屏（强切阈值提高后，只有完整句才提交）
+    run(`handleServerDraft("Okayur assets and make good on the payments that are late.")`);
+    await commitOnce(run);
     await flush();
     const emitted = h.sent.filter((m) => m.type === "CAPTURE_LINES");
     check(emitted.length >= 1, `错块上屏（实际 ${emitted.length} 块）`);
-    // 服务端修正：新草稿与已提交内容无公共前缀
+    // 服务端修正：新草稿与已提交内容无公共前缀但保留尾词
     run(`handleServerDraft("Identify your assets and make good on the payments that are late")`);
     await flush();
     const revoke = h.sent.find((m) => m.type === "CAPTURE_REVOKE");
@@ -87,7 +87,7 @@ async function commitOnce(run) {
     const lastSeq = emitted[emitted.length - 1].seq;
     check(revoke && revoke.toSeq === lastSeq, `撤回范围覆盖最后一块（to=${revoke?.toSeq}, 期望 ${lastSeq}）`);
     // 修正后的文本继续正常累积上屏
-    run(`handleServerDraft("Identify your assets and make good on the payments that are late")`);
+    run(`handleServerDraft("Identify your assets and make good on the payments that are late.")`);
     await commitOnce(run);
     await flush();
     const after = h.sent.filter((m) => m.type === "CAPTURE_LINES");
@@ -126,21 +126,29 @@ async function commitOnce(run) {
     console.log("T3 翻译对齐首句 PASS");
   }
   {
-    // 场景：英文长句强切整体出块（不再切成 "Look, it is not" 这种半句）
+    // 场景：长句不再切半句（旧版 20 字符阈值会切出 "Look, it is not"），
+    // 只有真正超长（词边界 ≥48 字符）才切大块
     const h = makeCtx();
     const run = (code) => vm.runInContext(code, h.ctx);
     await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope" }).catch(e => ({ok:false}))`);
     await flush();
-    run(`handleServerDraft("Look, it is not my fault that my husband decided to have an affair")`);
-    await commitOnce(run); // 2s 强切
+    // 21 字符短长句：< 48 → 不切（等 final）
+    run(`handleServerDraft("Look, it is not my fault")`);
+    await commitOnce(run);
     await flush();
-    const chunks = h.sent.filter((m) => m.type === "CAPTURE_LINES").map((m) => m.lines[0].text);
-    check(chunks.length >= 1, `英文长句强切出块（实际 ${chunks.length} 块）`);
+    let chunks = h.sent.filter((m) => m.type === "CAPTURE_LINES").map((m) => m.lines[0].text);
+    check(chunks.length === 0, `21 字符短长句不切半句（实际 ${JSON.stringify(chunks)}）`);
+    // 120 字符超长句：词边界 ≥48 → 切出大块（≥40 字符，不是半句）
+    run(`handleServerDraft("Look, it is not my fault that my husband decided to have an affair with our real estate agent who lives across the street from us")`);
+    await commitOnce(run);
+    await flush();
+    chunks = h.sent.filter((m) => m.type === "CAPTURE_LINES").map((m) => m.lines[0].text);
+    check(chunks.length >= 1, `超长句切出大块（实际 ${chunks.length} 块）`);
     check(
-      chunks.some((c) => c.includes("Look, it is not my fault")),
-      `英文长句按 20 字符阈值切出完整开头（实际 ${JSON.stringify(chunks)}）`
+      chunks.every((c) => Array.from(c).length >= 40),
+      `切出的是大块而非半句（实际 ${JSON.stringify(chunks.map((c) => Array.from(c).length))}）`
     );
-    console.log("T4 英文碎块减少 PASS");
+    console.log("T4 长句不再切半句 PASS");
   }
   console.log(fail === 0 ? "revoke 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
