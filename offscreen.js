@@ -574,7 +574,8 @@ function pendingText() {
   const draft = latestDraft.trim();
   if (!committedText) return draft;
   if (!draft.startsWith(committedText)) return draft;
-  return draft.slice(committedText.length).trim();
+  // 去掉紧贴已提交内容的标点/空白，避免草稿和切块以 "." 之类开头
+  return draft.slice(committedText.length).replace(/^[\s\p{P}\p{S}]+/u, "").trim();
 }
 
 function updateDraft(text) {
@@ -706,6 +707,45 @@ function resetDraftCommitter() {
   currentSentenceStartSeq = 0;
 }
 
+// 按句切块（保留句末标点），供权威 final 整段按句上屏，避免一大段/超长译文
+function splitSentences(text) {
+  const points = codePoints(text);
+  const result = [];
+  let start = 0;
+  for (let index = 0; index < points.length; index += 1) {
+    if (SENTENCE_DELIMITERS.includes(points[index])) {
+      const sentence = points.slice(start, index + 1).join("").trim();
+      if (sentence) result.push(sentence);
+      start = index + 1;
+    }
+  }
+  const tail = points.slice(start).join("").trim();
+  if (tail) result.push(tail);
+  return result;
+}
+
+// 撤回当前句子的全部字幕块（识别修正时用），并清空待提交状态
+function revokeCurrentSentence(reason) {
+  const fromSeq = currentSentenceStartSeq || lastEmittedUnitSeq;
+  if (!fromSeq || !lastEmittedUnitSeq) return;
+  logEvent("revoke", `${reason} from=${fromSeq} to=${lastEmittedUnitSeq} old=${JSON.stringify(lastEmittedUnitText.slice(0, 40))}`);
+  chrome.runtime.sendMessage({
+    type: "CAPTURE_REVOKE",
+    fromSeq,
+    toSeq: lastEmittedUnitSeq,
+    text: lastEmittedUnitText
+  }).catch(() => undefined);
+  lastUnitTexts.length = 0;
+  lastEmittedUnitSeq = 0;
+  lastEmittedUnitText = "";
+  currentSentenceStartSeq = 0;
+  committedText = "";
+  lastCommittedChunk = "";
+  lastCommitProvisional = false;
+  lastEmittedTail = "";
+  cancelDraftTimers();
+}
+
 function handleServerDraft(text) {
   // 识别修正检测：已提交过内容，但新草稿与已提交内容没有公共前缀
   // （服务端把整句换词了，如 "Okayur assets" → "Identify your assets"）。
@@ -715,24 +755,7 @@ function handleServerDraft(text) {
   if (committedText && lastEmittedUnitSeq && draftText && !draftText.startsWith(committedText)) {
     const lcp = longestCommonPrefix(draftText, committedText);
     if (lcp < 3) {
-      const fromSeq = currentSentenceStartSeq || lastEmittedUnitSeq;
-      logEvent("revoke", `from=${fromSeq} to=${lastEmittedUnitSeq} old=${JSON.stringify(lastEmittedUnitText.slice(0, 40))} new=${JSON.stringify(draftText.slice(0, 40))}`);
-      chrome.runtime.sendMessage({
-        type: "CAPTURE_REVOKE",
-        fromSeq,
-        toSeq: lastEmittedUnitSeq,
-        text: lastEmittedUnitText
-      }).catch(() => undefined);
-      // 清掉对账缓存中属于被修正句子的块
-      lastUnitTexts.length = 0;
-      lastEmittedUnitSeq = 0;
-      lastEmittedUnitText = "";
-      currentSentenceStartSeq = 0;
-      committedText = "";
-      lastCommittedChunk = "";
-      lastCommitProvisional = false;
-      lastEmittedTail = "";
-      cancelDraftTimers();
+      revokeCurrentSentence(`draft-swap new=${JSON.stringify(draftText.slice(0, 40))}`);
     }
   }
   const tail = updateDraft(text);
@@ -768,6 +791,35 @@ function handleServerFinal(text) {
     return;
   }
 
+  // 权威 final 修正了草稿内容（如 "her too" → "her titties"）：
+  // 两种情况——① final 是已提交文本的延伸但尾巴被换词；
+  // ② final 与已提交文本前缀高度重合但词尾被换（不以 committedText 开头）。
+  // 都撤回当前句的全部字幕块，按句切块重发权威版，错行不再残留。
+  if (committedText && lastEmittedUnitSeq && finalText) {
+    const isExtension = finalText.startsWith(committedText);
+    const lcp = longestCommonPrefix(finalText, committedText);
+    const committedLen = codePoints(committedText).length;
+    const finalLen = codePoints(finalText).length;
+    const sameSentence = committedLen >= 8 && finalLen >= 8 && lcp >= 8;
+    let needsFix = false;
+    if (isExtension) {
+      // 延伸但尾巴被换词：final 的尾巴与剩余草稿不兼容
+      const finalTail = finalText.slice(committedText.length).trim();
+      const pending = pendingText();
+      needsFix = Boolean(finalTail && pending && finalTail !== pending && !finalTail.startsWith(pending));
+    } else if (sameSentence) {
+      // 前缀重合但词尾被换（"her too" → "her titties"）
+      needsFix = true;
+    }
+    if (needsFix) {
+      revokeCurrentSentence(`final-fix lcp=${lcp}`);
+      emitFinalSentences(finalText);
+      dropQueuedDrafts();
+      resetDraftCommitter();
+      return;
+    }
+  }
+
   const outcome = finishSentence(finalText);
   logEvent(`final-${outcome.kind}`,
     `final=${JSON.stringify(finalText.slice(0, 60))} out=${JSON.stringify(String(outcome.text || "").slice(0, 60))} committedLen=${Array.from(committedText).length}`);
@@ -779,11 +831,25 @@ function handleServerFinal(text) {
     if (outcome.kind === "replaced" && lastUnit && finalText.startsWith(lastUnit)) {
       unitText = finalText.slice(lastUnit.length).trim();
     }
-    if (isMeaningful(unitText)) emitUnit(unitText);
+    if (isMeaningful(unitText)) {
+      // 权威 final 可能是多句（语义断句一次性给出整段）：按句切块逐条上屏，
+      // 避免一大段突然出现、译文也超长；已上屏过的块直接跳过。
+      emitFinalSentences(unitText);
+    }
   }
   // 旧草稿尾的翻译已过期，丢弃；下一句从头开始
   dropQueuedDrafts();
   resetDraftCommitter();
+}
+
+// final 文本按句切块逐条上屏；已上屏过的块跳过（防重复）
+function emitFinalSentences(text) {
+  const sentences = splitSentences(text);
+  for (const sentence of sentences) {
+    if (lastUnitTexts.includes(sentence)) continue;
+    if (!isMeaningful(sentence)) continue;
+    emitUnit(sentence);
+  }
 }
 
 function emitCommittedUnit(text) {

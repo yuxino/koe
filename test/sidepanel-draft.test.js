@@ -49,7 +49,7 @@ function makeCtx() {
     console, Date, JSON, String, Number, Boolean, Promise, Math, Set, Intl, setTimeout, clearTimeout,
     window: {
       addEventListener: (ev, fn) => { if (ev === "error" || ev === "unhandledrejection") return; },
-      setTimeout: (fn) => { setTimeout(fn, 8); return 0; },
+      setTimeout: (fn, delay) => { setTimeout(fn, Number(delay) || 0); return 0; },
       clearTimeout: () => undefined
     },
     document: {
@@ -90,33 +90,40 @@ function draftText(feed) {
   return textEl ? textEl.textContent : "";
 }
 
+// raw 草稿防抖 300ms + correcting 过渡 320ms，等足再断言
+const WAIT = 380;
+
 (async () => {
   {
-    // 场景：翻译模式 —— 原文草稿先显示，译文到达替换，译文展示期原文不打扰
+    // 场景：翻译模式 —— 原文草稿先显示（防抖后），译文到达立即替换，译文展示期原文不打扰
     const h = makeCtx();
     h.els["#translate-toggle"].checked = true;
     // 第一条带 jobId 的消息触发接管
     sendMessage(h, { type: "LIVE_STATE", jobId: "live-1", status: "live", translate: true });
     sendMessage(h, { type: "LIVE_PARTIAL", jobId: "live-1", seq: 1, lines: [{ text: "Okayur assets and make" }] });
+    // raw 草稿防抖 300ms 后才显示
+    await new Promise((r) => setTimeout(r, WAIT));
     check(h.feed.children.length === 1, "翻译模式原文草稿行出现");
     const draft = h.feed.children[0];
     check(draft.dataset.kind === "raw", `原文草稿 kind=raw（实际 ${draft.dataset.kind}）`);
     check(draftText(h.feed).includes("Okayur assets"), "原文草稿内容正确");
-    // 译文到达：替换为 translated
+    // 译文到达：立即替换为 translated
     sendMessage(h, { type: "LIVE_TRANSLATED", jobId: "live-1", seq: 1, lines: [{ text: "Okayur assets and make", translated: "奥凯尤尔资产并让" }] });
     check(draft.dataset.kind === "translated", `译文替换后 kind=translated（实际 ${draft.dataset.kind}）`);
     check(draftText(h.feed).includes("奥凯尤尔资产并让"), "译文草稿内容正确");
     // 译文展示期：原文草稿不打扰（5 秒内不覆盖译文）
     sendMessage(h, { type: "LIVE_PARTIAL", jobId: "live-1", seq: 2, lines: [{ text: "Identify your assets and make good" }] });
+    await new Promise((r) => setTimeout(r, WAIT));
     check(draftText(h.feed).includes("奥凯尤尔资产并让"), "译文展示期原文不覆盖（保持译文）");
     console.log("T1 翻译模式: 原文草稿 → 译文替换 → 不打扰 PASS");
   }
   {
-    // 场景：翻译关闭 —— 原文草稿正常显示
+    // 场景：翻译关闭 —— 原文草稿正常显示（防抖后）
     const h = makeCtx();
     h.els["#translate-toggle"].checked = false;
     sendMessage(h, { type: "LIVE_STATE", jobId: "live-2", status: "live", translate: false });
     sendMessage(h, { type: "LIVE_PARTIAL", jobId: "live-2", seq: 1, lines: [{ text: "Hey there" }] });
+    await new Promise((r) => setTimeout(r, WAIT));
     check(h.feed.children.length === 1, "原文模式草稿行出现");
     check(draftText(h.feed).includes("Hey there"), "原文草稿内容正确");
     console.log("T2 原文模式草稿正常 PASS");
@@ -127,13 +134,16 @@ function draftText(feed) {
     h.els["#translate-toggle"].checked = false;
     sendMessage(h, { type: "LIVE_STATE", jobId: "live-3", status: "live", translate: false });
     sendMessage(h, { type: "LIVE_PARTIAL", jobId: "live-3", seq: 1, lines: [{ text: "Okayur assets and make" }] });
+    await new Promise((r) => setTimeout(r, WAIT));
     // 服务端整体换词：互不包含 → correcting（8ms 后自动移除）
     sendMessage(h, { type: "LIVE_PARTIAL", jobId: "live-3", seq: 2, lines: [{ text: "Identify your assets and make good" }] });
+    await new Promise((r) => setTimeout(r, WAIT));
     const draft = h.feed.children[0];
     check(draft.classList.contains("correcting"), "修正时草稿加 correcting 过渡类");
     // 等过渡类自动移除后再发正常延伸 → 不加 correcting
-    await new Promise((r) => setTimeout(r, 20));
+    await new Promise((r) => setTimeout(r, WAIT));
     sendMessage(h, { type: "LIVE_PARTIAL", jobId: "live-3", seq: 3, lines: [{ text: "Identify your assets and make good on" }] });
+    await new Promise((r) => setTimeout(r, WAIT));
     check(!draft.classList.contains("correcting"), "正常延伸不加 correcting（过渡类已移除）");
     console.log("T3 草稿修正过渡 PASS");
   }

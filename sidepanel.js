@@ -538,7 +538,32 @@ function revokeRow(fromSeq, toSeq) {
   }
 }
 
+let draftDebounceTimer = null;
+let pendingDraftPayload = null;
+
+// 草稿显示防抖：原文草稿 300ms 内稳定了才显示，避免识别修正时
+// （"好"→"hooly"→"Holy shit"）草稿行快速跳变闪烁；
+// 译文草稿（kind=translated）不防抖，译文到了立即显示。
 function setDraft(text, kind = "raw") {
+  pendingDraftPayload = { text: String(text), kind };
+  if (draftDebounceTimer) clearTimeout(draftDebounceTimer);
+  if (kind === "translated") {
+    draftDebounceTimer = null;
+    applyDraft(pendingDraftPayload.text, pendingDraftPayload.kind);
+    pendingDraftPayload = null;
+    return;
+  }
+  draftDebounceTimer = window.setTimeout(() => {
+    draftDebounceTimer = null;
+    if (pendingDraftPayload) {
+      const { text: value, kind: payloadKind } = pendingDraftPayload;
+      pendingDraftPayload = null;
+      applyDraft(value, payloadKind);
+    }
+  }, 300);
+}
+
+function applyDraft(text, kind = "raw") {
   elements.feed.querySelectorAll(".placeholder").forEach((node) => node.remove());
   // 草稿只显示最新两段，避免草稿行越长越高
   const value = String(text);
@@ -577,6 +602,9 @@ function setDraft(text, kind = "raw") {
 }
 
 function clearDraft() {
+  if (draftDebounceTimer) clearTimeout(draftDebounceTimer);
+  draftDebounceTimer = null;
+  pendingDraftPayload = null;
   if (draftEl) {
     draftEl.remove();
     draftEl = null;

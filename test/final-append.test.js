@@ -61,19 +61,17 @@ function makeOffCtx() {
     await flush();
     const before = h.sent.filter((m) => m.type === "CAPTURE_LINES").length;
     check(before === 1, `客户端块先上屏（实际 ${before} 块）`);
-    // 服务端 final 整段到达（含已上屏部分 + 更多）
+    // 服务端 final 整段到达（含已上屏部分 + 更多）→ 按句切块，已上屏的跳过
     run(`handleServerFinal("Oh shit, she's coming. Yeah. Yeah. No, you wait, see you later. Okay. Okay. Bye.")`);
     await flush();
     const units = h.sent.filter((m) => m.type === "CAPTURE_LINES").map((m) => m.lines[0].text);
-    // 只补发新增后缀，不再重复整段
-    check(units.length === 2, `final 只补发新增（实际 ${units.length} 块）`);
-    const added = units[units.length - 1];
-    check(
-      !added.includes("Oh shit, she's coming"),
-      `补发内容不含已上屏部分（实际 ${JSON.stringify(added)}）`
-    );
-    check(added.includes("see you later"), `补发的是新增后缀（实际 ${JSON.stringify(added)}）`);
-    console.log("T1 final appended 只补发新增 PASS");
+    // 已上屏的 "Oh shit, she's coming." 不重复；其余按句切块逐条上屏
+    check(units.filter((u) => u.includes("Oh shit, she's coming")).length === 1,
+      `已上屏部分不重复（实际 ${JSON.stringify(units)}）`);
+    check(units.some((u) => u === "Yeah."), "新增部分按句切块（Yeah.）");
+    check(units.some((u) => u.includes("see you later")), "新增部分包含后续句");
+    check(units.some((u) => u === "Bye."), "结尾句单独成块（Bye.）");
+    console.log("T1 final 按句切块 + 不重复 PASS");
   }
   {
     // T2：并发 appendLog 不丢日志
@@ -120,6 +118,50 @@ function makeOffCtx() {
     check(got.logs.length === 20, `并发 20 条日志全保留（实际 ${got.logs.length}）`);
     check(got.logs[0].event === "evt-1" && got.logs[19].event === "evt-20", "并发日志顺序完整");
     console.log("T2 并发 appendLog 不丢日志 PASS");
+  }
+  {
+    // T3：final 前缀修正（"her too" → "her titties"）→ 撤回整句 + 重发权威版
+    const h = makeOffCtx();
+    const run = (code) => vm.runInContext(code, h.ctx);
+    await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope" }).catch(e => ({ok:false}))`);
+    await flush();
+    // 客户端强切上屏 "Wow, I can't believe her too"（错误前缀）
+    run(`handleServerDraft("Wow, I can't believe her too")`);
+    await run(`(() => { const c = commitPendingDraft({ forceLongIncomplete: true }); if (c) emitCommittedUnit(c); return c; })()`);
+    await flush();
+    // 草稿尾 "tties are that big"（修正中的中间态）
+    run(`handleServerDraft("Wow, I can't believe her tootties are that big")`);
+    await flush();
+    // 服务端 final 修正：her too → her titties
+    run(`handleServerFinal("Wow, I can't believe her titties are that big.")`);
+    await flush();
+    const revoke = h.sent.find((m) => m.type === "CAPTURE_REVOKE");
+    check(Boolean(revoke), "final 前缀修正触发 CAPTURE_REVOKE");
+    const lines = h.sent.filter((m) => m.type === "CAPTURE_LINES").map((m) => m.lines[0].text);
+    check(lines.some((l) => l === "Wow, I can't believe her titties are that big."),
+      `权威修正版重新上屏（实际 ${JSON.stringify(lines)}）`);
+    // 模拟侧边栏应用 revoke：删除 [fromSeq, toSeq] 范围的行后，错误前缀不再残留
+    const badSeq = h.sent.find((m) => m.type === "CAPTURE_LINES" && m.lines[0].text.includes("her too") && !m.lines[0].text.includes("titties"))?.seq;
+    check(Boolean(badSeq) && revoke.fromSeq <= badSeq && revoke.toSeq >= badSeq,
+      `revoke 范围覆盖错误行（badSeq=${badSeq}, revoke=${revoke.fromSeq}..${revoke.toSeq}）`);
+    console.log("T3 final 前缀修正 revoke + 重发 PASS");
+  }
+  {
+    // T4：pendingText 清理前导标点（draft 尾巴不以 "." 开头）
+    const h = makeOffCtx();
+    const run = (code) => vm.runInContext(code, h.ctx);
+    await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope" }).catch(e => ({ok:false}))`);
+    await flush();
+    // 已提交 "Oh shit, she's coming"（无句号），新草稿从 "." 开始
+    run(`handleServerDraft("Oh shit, she's coming")`);
+    await run(`(() => { const c = commitPendingDraft({ forceLongIncomplete: true }); if (c) emitCommittedUnit(c); return c; })()`);
+    await flush();
+    run(`handleServerDraft("Oh shit, she's coming. Yeah.. No")`);
+    await flush();
+    const partials = h.sent.filter((m) => m.type === "CAPTURE_PARTIAL").map((m) => m.lines[0].text);
+    check(partials.every((t) => !t.startsWith(".") && !t.startsWith("。")),
+      `草稿尾巴不以标点开头（实际 ${JSON.stringify(partials)}）`);
+    console.log("T4 前导标点清理 PASS");
   }
   console.log(fail === 0 ? "final-append/log-race 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
