@@ -472,6 +472,19 @@ async function stopCaptureForTab(tabId) {
     state.stageDetail = "";
     state.captureNeedsGesture = false;
     await pushState(state);
+  } else {
+    // captureStarted 为 false（如 SW 休眠后从 session 恢复的状态固定为 false），
+    // 但 offscreen 采集页可能还在跑（它是独立文档，SW 休眠不影响它）——
+    // 必须无条件通知 offscreen 彻底停止，否则"点了停止还在采集"。
+    try {
+      await chrome.runtime.sendMessage({ type: "CAPTURE_STOP" });
+    } catch {
+      // 后台刚唤醒、offscreen 未就绪时忽略
+    }
+    if (captureTabId === id) captureTabId = null;
+    state.status = "idle";
+    state.stageDetail = "";
+    state.captureNeedsGesture = false;
   }
   // 主动停止 = 彻底释放：清掉缓存的音频流 id（流已释放，旧 id 不应残留）
   captureStreamIds.delete(id);
@@ -652,6 +665,13 @@ async function restoreStates() {
       stageDetail: "点击 Koe 图标（弹窗一键开启）或按 Alt+K",
       startedAt: Date.now()
     });
+  }
+  // SW 休眠后恢复：offscreen 采集页是独立文档，SW 生命周期不影响它，
+  // 可能还在跑旧会话——兜底通知它停止，避免"后台一直占着标签页声音"。
+  try {
+    await chrome.runtime.sendMessage({ type: "CAPTURE_STOP" });
+  } catch {
+    // offscreen 未就绪/未创建时忽略
   }
 }
 
