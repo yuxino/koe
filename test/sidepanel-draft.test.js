@@ -147,6 +147,19 @@ const WAIT = 380;
     check(!draft.classList.contains("correcting"), "正常延伸不加 correcting（过渡类已移除）");
     console.log("T3 草稿修正过渡 PASS");
   }
+  {
+    // 场景：翻译开关显示跟随"捕获会话"的真实状态（视频 tab 会话 translate=false → toggle 显示关）
+    const h = makeCtx();
+    h.els["#translate-toggle"].checked = true;
+    h.ctx.chrome.runtime.sendMessage = async (msg) => {
+      if (msg.type === "GET_STATE") return { ok: true, state: { status: "live", translate: false, tabId: 9 } };
+      return { ok: true };
+    };
+    await vm.runInContext(`refreshState()`, h.ctx);
+    check(h.els["#translate-toggle"].checked === false,
+      `toggle 跟随捕获会话 translate=false（实际 ${h.els["#translate-toggle"].checked}）`);
+    console.log("T4 翻译开关跟随会话状态 PASS");
+  }
   console.log(fail === 0 ? "sidepanel-draft 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
 })().catch((err) => { console.error(err); process.exit(1); });

@@ -64,8 +64,11 @@ elements.saveKey.addEventListener("click", () => void saveApiKey());
 elements.translateToggle.addEventListener("change", async () => {
   const translate = elements.translateToggle.checked;
   await chrome.storage.local.set({ koeTranslate: translate });
-  if (activeTab?.id) {
-    await chrome.runtime.sendMessage({ type: "SET_TRANSLATE", tabId: activeTab.id, translate }).catch(() => undefined);
+  // 翻译开关更新的是"正在捕获的会话"（可能在别的标签页），不是当前 tab——
+  // 否则在其他 tab 上切开关，视频 tab 的字幕翻译永远不更新（"唯独视频没翻译"）。
+  const targetTabId = currentState.tabId || activeTab?.id;
+  if (targetTabId) {
+    await chrome.runtime.sendMessage({ type: "SET_TRANSLATE", tabId: targetTabId, translate }).catch(() => undefined);
   }
   elements.hint.textContent = translate ? "中文翻译已开启 · 正在重连识别…" : "中文翻译已关闭 · 只显示原文";
 });
@@ -257,6 +260,11 @@ async function refreshState() {
   if (!captureStateResponse) return;
   const captureState = captureStateResponse.state || { status: "idle" };
   currentState = captureState;
+  // toggle 反映"捕获会话"的真实翻译状态，而不是本地偏好——
+  // 否则在其他 tab 上改过开关后，这里的勾选会与实际翻译不一致
+  if (typeof captureState.translate === "boolean" && elements.translateToggle.checked !== captureState.translate) {
+    elements.translateToggle.checked = captureState.translate;
+  }
   const jobId = String(captureState.jobId || "");
   if (captureState.captureActive && jobId && jobId !== activeJobId) {
     activeJobId = jobId;
