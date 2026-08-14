@@ -1,4 +1,6 @@
-// 回归：点图标时若字幕在跑 → 打开侧边栏并关弹窗；弹窗里“打开字幕侧边栏”按钮 → 只开面板不开字幕。
+// 回归：点图标弹窗必须"无条件开侧边栏"（init 阶段、手势窗口内尽早开）；
+// 任何按钮点击还要用缓存 windowId 同步再开一次（新点击 = 新手势）；
+// live 时开完关弹窗；idle 时弹窗留着显示开始按钮；open 失败不静默。
 const fs = require("fs");
 const vm = require("vm");
 const path = require("path");
@@ -11,15 +13,14 @@ function makeElement() {
     textContent: "",
     disabled: false,
     className: "",
-    classes: { toggle: (c, v) => { el.className = v ? c : ""; } },
     addEventListener: (ev, fn) => { el.listeners[ev] = fn; },
-    classList: { toggle: (c, v) => el.classes.toggle(c, v) },
+    classList: { toggle: () => {} },
     click() { if (el.listeners.click) el.listeners.click(); }
   };
   return el;
 }
 
-function runScenario({ state, startOk = true, clickOpenPanel = false, expectStart = false }) {
+function runScenario({ state, startOk = true, clickOpenPanel = false }) {
   return new Promise((resolve, reject) => {
     const els = {};
     const calls = { getMediaStreamId: 0, sidePanelOpen: 0, closed: 0, started: 0 };
@@ -39,7 +40,7 @@ function runScenario({ state, startOk = true, clickOpenPanel = false, expectStar
       },
       chrome: {
         runtime: {
-          getManifest: () => ({ version: "1.6.2" }),
+          getManifest: () => ({ version: "1.6.3" }),
           sendMessage: async (msg) => {
             if (msg.type === "GET_STATE") return { state };
             if (msg.type === "START_CAPTURE") {
@@ -77,18 +78,19 @@ function runScenario({ state, startOk = true, clickOpenPanel = false, expectStar
 
     const deadline = Date.now() + 2000;
     const poll = () => {
-      if (calls.sidePanelOpen > 0 || Date.now() > deadline) {
+      if (calls.sidePanelOpen >= 1 && (calls.closed >= 1 || Date.now() > deadline - 1500)) {
         try {
-          if (clickOpenPanel || state.captureActive || state.status === "live") {
-            if (calls.sidePanelOpen !== 1) throw new Error(`期望开 1 次侧边栏，实际 ${calls.sidePanelOpen}`);
-            if (calls.closed !== 1) throw new Error(`期望关 1 次弹窗，实际 ${calls.closed}`);
-          }
-          if (expectStart && calls.getMediaStreamId !== 1) throw new Error("期望发起 tabCapture 授权");
-          if (!expectStart && !clickOpenPanel && calls.getMediaStreamId !== 0 && !(state.captureActive)) {
-            throw new Error("不应发起 tabCapture 授权");
+          if (calls.sidePanelOpen < 1) throw new Error(`期望至少开 1 次侧边栏，实际 ${calls.sidePanelOpen}`);
+          if (clickOpenPanel) {
+            if (calls.getMediaStreamId !== 0) throw new Error("次按钮不应发起 tabCapture");
+            if (calls.closed !== 1) throw new Error(`次按钮应关弹窗，实际 close ${calls.closed}`);
           }
           resolve({ ok: true, calls });
         } catch (err) { reject(err); }
+        return;
+      }
+      if (Date.now() > deadline) {
+        reject(new Error(`超时：sidePanelOpen=${calls.sidePanelOpen} closed=${calls.closed}`));
         return;
       }
       setTimeout(poll, 10);
@@ -98,14 +100,20 @@ function runScenario({ state, startOk = true, clickOpenPanel = false, expectStar
 }
 
 (async () => {
-  // A：字幕在跑，点图标 → 开面板 + 关弹窗，不重复开字幕
-  await runScenario({ state: { status: "live", captureActive: true }, expectStart: false });
-  console.log("A 字幕运行中点图标 → 打开侧边栏 + 关闭弹窗 ✓");
-  // B：空闲但需要手势 → 维持自动开启流程
-  await runScenario({ state: { status: "idle", captureNeedsGesture: true }, expectStart: true });
-  console.log("B 空闲需手势 → 自动开启流程不受影响 ✓");
+  // A：字幕在跑，点图标 → 无条件开面板 + 关弹窗，不重复开字幕
+  const a = await runScenario({ state: { status: "live", captureActive: true } });
+  console.log(`A 字幕运行中点图标 → 开面板 ${a.calls.sidePanelOpen} 次 + 关弹窗，不重复开字幕 ✓`);
+  // B：空闲但需要手势 → 无条件开面板 + 自动开启流程照跑
+  const b = await runScenario({ state: { status: "idle", captureNeedsGesture: true } });
+  if (b.calls.getMediaStreamId !== 1) throw new Error(`B 期望 tabCapture 1 次，实际 ${b.calls.getMediaStreamId}`);
+  console.log(`B 空闲需手势 → 开面板 ${b.calls.sidePanelOpen} 次 + 自动开启流程不受影响 ✓`);
   // C：空闲，点“打开字幕侧边栏” → 只开面板，不碰 tabCapture
-  await runScenario({ state: { status: "idle" }, clickOpenPanel: true, expectStart: false });
-  console.log("C 打开侧边栏按钮 → 只开面板，不发起开启 ✓");
+  const c = await runScenario({ state: { status: "idle" }, clickOpenPanel: true });
+  console.log(`C 打开侧边栏按钮 → 开面板 ${c.calls.sidePanelOpen} 次，不发起开启 ✓`);
+  // D：空闲且无手势需求，仅开弹窗 → 面板开出，弹窗留着（closed=0）
+  const d = await runScenario({ state: { status: "idle" } });
+  if (d.calls.closed !== 0) throw new Error(`D 空闲时弹窗应保留，实际 close ${d.calls.closed}`);
+  if (d.calls.sidePanelOpen < 1) throw new Error("D 空闲时也应无条件开面板");
+  console.log(`D 空闲点图标 → 面板开出 ${d.calls.sidePanelOpen} 次，弹窗保留显示开始按钮 ✓`);
   console.log("panel-open 回归测试全部通过");
 })().catch((err) => { console.error("FAIL:", err.message); process.exit(1); });

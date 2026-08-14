@@ -1,8 +1,11 @@
-// Koe 弹窗：唯一职责 = 用“弹窗按钮点击”这个被 Chrome 认可的手势开启/停止字幕。
-// 弹窗按钮点击是本地实测唯一稳定有效的 tabCapture 授权手势（侧边栏点击无效）。
-// 开启成功后：弹窗自动关闭，侧边栏打开显示字幕流。设置都在侧边栏里。
+// Koe 弹窗：点图标 = 弹窗 + 侧边栏一起出现。
+// 侧边栏打开的硬约束：chrome.sidePanel.open() 必须发生在"用户手势上下文"内，
+// await 链之后的调用会抛 "may only be called in response to a user gesture"（Chromium issue 356181670）。
+// 因此策略：① init 在 5 秒手势窗口内尽量早开；② 任何按钮点击先用缓存的 windowId 同步开一次（新手势）；
+// ③ 开失败绝不静默——状态行提示 + 次按钮可再次点击重试。
 
 let activeTab;
+let lastWindowId = null;   // 最近一次拿到的窗口 id，供"点击时同步开面板"使用
 let currentState = { status: "idle" };
 let autoStartTried = false;
 
@@ -16,44 +19,55 @@ const elements = {
 
 document.addEventListener("DOMContentLoaded", init);
 elements.startButton.addEventListener("click", () => {
+  // 同步调用开面板：这次点击就是新的手势，必须在同一事件栈里发出
+  fireAndForgetOpen();
   if (currentState.captureActive) void stop();
   else void start();
 });
-elements.openPanel.addEventListener("click", () => { void openPanelAndClose(); });
+elements.openPanel.addEventListener("click", () => {
+  fireAndForgetOpen();
+  void (async () => {
+    if (await openPanelAndClose()) window.close();
+  })();
+});
 
 async function init() {
   if (elements.version) elements.version.textContent = `v${chrome.runtime.getManifest().version}`;
   await refreshActiveTab();
+  // 无条件先开面板：点图标就该看到侧边栏（用户心智 = 旧版 openPanelOnActionClick 行为）
+  const opened = await openPanelAndClose();
   await refreshState();
-  // 字幕正在跑：点图标 = 查看侧边栏（恢复旧版“点图标开侧边栏”的行为）。
-  // 否则用户想看字幕记录时只能看到一个小弹窗，侧边栏永远叫不出来。
-  if (currentState.captureActive || currentState.status === "live") {
-    await openPanelAndClose();
-    return;
-  }
+  if (currentState.captureActive || currentState.status === "live") return; // 开完即关弹窗
+  if (!opened) setStatus("侧边栏没开出来？点「打开字幕侧边栏」再试一次", true);
   tryAutoStart();
 }
 
+function fireAndForgetOpen() {
+  if (!lastWindowId) return;
+  void chrome.sidePanel.open({ windowId: lastWindowId }).catch(() => {});
+}
+
 async function openPanelAndClose() {
-  // 不依赖 init 时序：按钮被点时就地取一次标签页，避免点击早于 init 完成时静默失效
+  // 优先用缓存的 windowId；没有缓存才异步查（异步段手势可能失效，但总比不开强）
   let tab = activeTab;
-  if (!tab?.windowId) {
+  if (!tab?.windowId && !lastWindowId) {
     try {
       const [window] = await chrome.windows.getLastFocused().catch(() => []);
       [tab] = window?.id
         ? await chrome.tabs.query({ active: true, windowId: window.id })
         : await chrome.tabs.query({ active: true, currentWindow: true });
     } catch {
-      return;
+      return false;
     }
   }
-  if (!tab?.windowId) return;
+  const windowId = tab?.windowId || lastWindowId;
+  if (!windowId) return false;
   try {
-    await chrome.sidePanel.open({ windowId: tab.windowId });
+    await chrome.sidePanel.open({ windowId });
+    return true;
   } catch {
-    // 旧版浏览器没有侧边栏 API，忽略即可
+    return false;
   }
-  window.close();
 }
 
 async function refreshActiveTab() {
@@ -65,6 +79,7 @@ async function refreshActiveTab() {
   } catch {
     [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
   }
+  if (activeTab?.windowId) lastWindowId = activeTab.windowId;
 }
 
 async function refreshState() {
@@ -105,12 +120,9 @@ async function start() {
     if (!response?.ok) throw new Error(response?.error || "无法启动实时字幕。");
     currentState = response.state || { status: "live" };
     render();
-    // 开好了：打开侧边栏显示字幕，弹窗自动关闭
-    try {
-      await chrome.sidePanel.open({ windowId: activeTab.windowId });
-    } catch {
-      // 旧版浏览器无侧边栏时忽略
-    }
+    // 开好了：确保侧边栏开着，然后关弹窗
+    fireAndForgetOpen();
+    await openPanelAndClose();
     window.close();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
