@@ -212,6 +212,33 @@ function makeOffCtx() {
       `只补发差异部分（实际 ${JSON.stringify(lines.slice(-3))}）`);
     console.log("T6 仅标点差异不重发 PASS");
   }
+  {
+    // T7：多句已上屏后，final 是整体前缀延伸（多出几句）→ 只补发新增尾巴
+    // （日志 17:26:56 场景：客户端上屏 15 块后 final 整段到达，
+    //  suffixOverlap 算出 0 → 整段重发 = 字幕刷两遍）
+    const h = makeOffCtx();
+    const run = (code) => vm.runInContext(code, h.ctx);
+    await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope" }).catch(e => ({ok:false}))`);
+    await flush();
+    // 客户端逐句上屏（15 块）
+    run(`handleServerDraft("All right. Bring it down to your chest and up. One quick motion. Perfect. And up. Very good. Let's do six of those. Come on. Two. Excellent. Three.")`);
+    await run(`(() => { let c; let guard = 0; while ((c = commitPendingDraft({ forceLongIncomplete: false })) && guard < 20) { emitCommittedUnit(c); guard += 1; } return guard; })()`);
+    await flush();
+    const before = h.sent.filter((m) => m.type === "CAPTURE_LINES").length;
+    check(before >= 5, `多块先上屏（实际 ${before} 块）`);
+    // final 整体延伸：多出 "Very nice. Four."
+    run(`handleServerFinal("All right. Bring it down to your chest and up. One quick motion. Perfect. And up. Very good. Let's do six of those. Come on. Two. Excellent. Three. Very nice. Four.")`);
+    await flush();
+    const revoke = h.sent.find((m) => m.type === "CAPTURE_REVOKE");
+    check(!revoke, "整体前缀延伸不触发 revoke");
+    const lines = h.sent.filter((m) => m.type === "CAPTURE_LINES").map((m) => m.lines[0].text);
+    check(lines.filter((l) => l === "All right.").length === 1,
+      `已上屏句子不重发（实际 ${JSON.stringify(lines)}）`);
+    check(lines.filter((l) => l === "Two.").length === 1, "数字句不重发");
+    check(lines.some((l) => l === "Very nice.") && lines.some((l) => l === "Four."),
+      `只补发新增尾巴（实际 ${JSON.stringify(lines.slice(-4))}）`);
+    console.log("T7 整体前缀延伸只补发尾巴 PASS");
+  }
   console.log(fail === 0 ? "final-append/log-race 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
 })().catch((err) => { console.error(err); process.exit(1); });

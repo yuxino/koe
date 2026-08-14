@@ -634,7 +634,10 @@ function finishSentence(text) {
   }
   if (lastCommitProvisional && lastCommittedChunk && finalPoints.length >= 2) {
     const chunk = lastCommittedChunk;
-    const supersedes = finalText !== chunk && (finalText.startsWith(chunk) || finalText.includes(chunk));
+    // final 以最后提交块开头 = 该块被权威版取代/延伸 → replaced。
+    // 只用 startsWith，不用 includes：includes 会把"最后一块恰好是 final
+    // 中间内容"（多句累积后 final 整段）误判成取代 → 整段重发（字幕刷两遍）。
+    const supersedes = finalText !== chunk && finalText.startsWith(chunk);
     if (supersedes) {
       if (committedText.endsWith(chunk)) {
         committedText = dropSuffix(committedText, codePoints(chunk).length);
@@ -647,7 +650,15 @@ function finishSentence(text) {
       return { kind: "replaced", text: finalText };
     }
   }
-  const overlap = suffixOverlap(committedText, finalText);
+  // 计算 final 相对 committedText 的新增起点：
+  // ① committed 是 final 的前缀（整体延伸，如 "A. B." → "A. B. C."）→ 从 committed 末尾补发；
+  // ② 否则看 committed 后缀与 final 前缀的重叠（尾部延伸）。
+  // 只用 suffixOverlap 时，整体前缀相同但结尾微调的情况会算出 overlap=0，
+  // 导致 final 整段被当新增重发（字幕刷两遍）。
+  const prefixOverlap = longestCommonPrefix(committedText, finalText);
+  const overlap = prefixOverlap >= codePoints(committedText).length
+    ? prefixOverlap
+    : suffixOverlap(committedText, finalText);
   const newText = finalPoints.slice(overlap).join("").trim();
   if (!isMeaningful(newText)) {
     lastCommitProvisional = false;
