@@ -676,13 +676,11 @@ async function restoreStates() {
       startedAt: Date.now()
     });
   }
-  // SW 休眠后恢复：offscreen 采集页是独立文档，SW 生命周期不影响它，
-  // 可能还在跑旧会话——兜底通知它停止，避免"后台一直占着标签页声音"。
-  try {
-    await chrome.runtime.sendMessage({ type: "CAPTURE_STOP" });
-  } catch {
-    // offscreen 未就绪/未创建时忽略
-  }
+  // 注意：绝不在 restoreStates 里发 CAPTURE_STOP！
+  // 该函数被 koe-restore 闹钟每 30 秒调用一次，之前加的无条件 CAPTURE_STOP
+  // 会每 30 秒把正在运行的识别会话杀掉（日志里 stop full 每 30 秒一次、
+  // "切 tab 丢字幕/卡住"的根源）。offscreen 是独立文档，SW 休眠不影响它；
+  // 用户主动停止走 stopCaptureForTab，那里已无条件发 CAPTURE_STOP。
 }
 
 // ===== 找正在播放的主视频（只用来判断该不该开、有没有切视频） =====

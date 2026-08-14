@@ -66,6 +66,18 @@ function makeCtx({ captureStarted = false } = {}) {
     check(after.captureTabId === null, "停止后 captureTabId 清空");
     console.log("T2 SW 恢复场景停止仍彻底 PASS");
   }
+  {
+    // 场景：restoreStates（koe-restore 闹钟每 30 秒调用）绝不能发 CAPTURE_STOP——
+    // 否则正在运行的识别会话每 30 秒被杀一次（日志里 stop full 每 30 秒、
+    // "切 tab 丢字幕/卡住"的根源）。
+    const h = makeCtx();
+    const before = h.sent.length;
+    await vm.runInContext(`restoreStates()`, h.ctx);
+    await flush();
+    check(!h.sent.some((m) => m.type === "CAPTURE_STOP"),
+      `restoreStates 不发 CAPTURE_STOP（实际 ${JSON.stringify(h.sent.slice(before).map((m) => m.type))}）`);
+    console.log("T3 restoreStates 不再杀会话 PASS");
+  }
   console.log(fail === 0 ? "stop-always 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
 })().catch((err) => { console.error(err); process.exit(1); });
