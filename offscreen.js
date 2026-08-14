@@ -810,31 +810,25 @@ function handleServerFinal(text) {
   }
 
   // 权威 final 修正了草稿内容（如 "her too" → "her titties"）：
-  // 两种情况——① final 是已提交文本的延伸但尾巴被换词；
-  // ② final 与已提交文本前缀高度重合但词尾被换（不以 committedText 开头）。
-  // 都撤回当前句的全部字幕块，按句切块重发权威版，错行不再残留。
+  // 前缀高度重合但词尾被换（final 不以 committedText 开头）时，
+  // 撤回当前句的全部字幕块，按句切块重发权威版，错行不再残留。
+  // 注意：final 以 committedText 开头（正常延伸）绝不 revoke——
+  // 客户端已上屏的是 final 的正确前缀，finishSentence 会只补发新增部分，
+  // revoke 整句重发反而造成"一片字幕删了重来"的大闪。
   if (committedText && lastEmittedUnitSeq && finalText) {
     const isExtension = finalText.startsWith(committedText);
-    const lcp = longestCommonPrefix(finalText, committedText);
-    const committedLen = codePoints(committedText).length;
-    const finalLen = codePoints(finalText).length;
-    const sameSentence = committedLen >= 8 && finalLen >= 8 && lcp >= 8;
-    let needsFix = false;
-    if (isExtension) {
-      // 延伸但尾巴被换词：final 的尾巴与剩余草稿不兼容
-      const finalTail = finalText.slice(committedText.length).trim();
-      const pending = pendingText();
-      needsFix = Boolean(finalTail && pending && finalTail !== pending && !finalTail.startsWith(pending));
-    } else if (sameSentence) {
-      // 前缀重合但词尾被换（"her too" → "her titties"）
-      needsFix = true;
-    }
-    if (needsFix) {
-      revokeCurrentSentence(`final-fix lcp=${lcp}`);
-      emitFinalSentences(finalText);
-      dropQueuedDrafts();
-      resetDraftCommitter();
-      return;
+    if (!isExtension) {
+      const lcp = longestCommonPrefix(finalText, committedText);
+      const committedLen = codePoints(committedText).length;
+      const finalLen = codePoints(finalText).length;
+      const sameSentence = committedLen >= 8 && finalLen >= 8 && lcp >= 8;
+      if (sameSentence) {
+        revokeCurrentSentence(`final-fix lcp=${lcp}`);
+        emitFinalSentences(finalText);
+        dropQueuedDrafts();
+        resetDraftCommitter();
+        return;
+      }
     }
   }
 

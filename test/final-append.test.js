@@ -163,6 +163,30 @@ function makeOffCtx() {
       `草稿尾巴不以标点开头（实际 ${JSON.stringify(partials)}）`);
     console.log("T4 前导标点清理 PASS");
   }
+  {
+    // T5：final 是 committedText 的正常延伸（多一句）→ 不 revoke，只补发新增
+    // （日志 17:07:55 场景：final 多出 "You want that stimulus check?"，
+    //  旧逻辑误判修正把已上屏 7 块全撤重发 → 大闪）
+    const h = makeOffCtx();
+    const run = (code) => vm.runInContext(code, h.ctx);
+    await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope" }).catch(e => ({ok:false}))`);
+    await flush();
+    // 客户端上屏完整句
+    run(`handleServerDraft("Are you ready? Yes? You have such a cute little accent. So you're ready to be part of the Cash for Chunkers program?")`);
+    await run(`(() => { const c = commitPendingDraft({ forceLongIncomplete: false }); if (c) emitCommittedUnit(c); return c; })()`);
+    await flush();
+    const beforeCount = h.sent.filter((m) => m.type === "CAPTURE_LINES").length;
+    check(beforeCount >= 1, `客户端完整句先上屏（实际 ${beforeCount} 块）`);
+    // final 只是延伸（多一句）→ 不 revoke，只补发新增
+    run(`handleServerFinal("Are you ready? Yes? You have such a cute little accent. So you're ready to be part of the Cash for Chunkers program? You want that stimulus check?")`);
+    await flush();
+    const revoke = h.sent.find((m) => m.type === "CAPTURE_REVOKE");
+    check(!revoke, "final 正常延伸不触发 revoke");
+    const afterLines = h.sent.filter((m) => m.type === "CAPTURE_LINES").map((m) => m.lines[0].text);
+    check(afterLines.some((l) => l.includes("You want that stimulus check")),
+      `只补发新增句（实际 ${JSON.stringify(afterLines)}）`);
+    console.log("T5 final 正常延伸只补发新增 PASS");
+  }
   console.log(fail === 0 ? "final-append/log-race 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
 })().catch((err) => { console.error(err); process.exit(1); });
