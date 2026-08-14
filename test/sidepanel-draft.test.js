@@ -148,17 +148,22 @@ const WAIT = 380;
     console.log("T3 草稿修正过渡 PASS");
   }
   {
-    // 场景：翻译开关显示跟随"捕获会话"的真实状态（视频 tab 会话 translate=false → toggle 显示关）
+    // 场景：会话 translate=false 但开关偏好开 → 自动补发 SET_TRANSLATE(true) 对齐，
+    // 开关不被会话值改掉（"每次切过去重置翻译"的修复）
     const h = makeCtx();
-    h.els["#translate-toggle"].checked = true;
+    const sent = [];
+    h.els["#translate-toggle"].checked = true; // 用户偏好：开
     h.ctx.chrome.runtime.sendMessage = async (msg) => {
-      if (msg.type === "GET_STATE") return { ok: true, state: { status: "live", translate: false, tabId: 9 } };
+      if (msg.type === "GET_STATE") return { ok: true, state: { status: "live", translate: false, tabId: 9, captureActive: true } };
+      sent.push(msg);
       return { ok: true };
     };
     await vm.runInContext(`refreshState()`, h.ctx);
-    check(h.els["#translate-toggle"].checked === false,
-      `toggle 跟随捕获会话 translate=false（实际 ${h.els["#translate-toggle"].checked}）`);
-    console.log("T4 翻译开关跟随会话状态 PASS");
+    check(h.els["#translate-toggle"].checked === true, `开关保持用户偏好（不被会话值改掉）`);
+    const sync = sent.find((m) => m.type === "SET_TRANSLATE");
+    check(Boolean(sync) && sync.translate === true && sync.tabId === 9,
+      `自动补发 SET_TRANSLATE(true) 给会话 tab 9（实际 ${JSON.stringify(sync)}）`);
+    console.log("T4 偏好开→会话自动对齐, 开关不被重置 PASS");
   }
   console.log(fail === 0 ? "sidepanel-draft 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);

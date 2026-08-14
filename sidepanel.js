@@ -14,6 +14,8 @@ let draftEl = null;
 // 草稿行当前形态："raw"（原文草稿，弱化显示）| "translated"（译文草稿）
 let draftKind = "";
 let draftTranslatedAt = 0;
+// 翻译偏好自动同步节流：会话与开关不一致时最多 10 秒补发一次 SET_TRANSLATE
+let lastTranslateSyncAt = 0;
 let lastStatusHint = "";
 const MAX_ROWS = 120;
 
@@ -260,10 +262,22 @@ async function refreshState() {
   if (!captureStateResponse) return;
   const captureState = captureStateResponse.state || { status: "idle" };
   currentState = captureState;
-  // toggle 反映"捕获会话"的真实翻译状态，而不是本地偏好——
-  // 否则在其他 tab 上改过开关后，这里的勾选会与实际翻译不一致
-  if (typeof captureState.translate === "boolean" && elements.translateToggle.checked !== captureState.translate) {
-    elements.translateToggle.checked = captureState.translate;
+  // 开关 = 用户偏好（koeTranslate），永远不被会话值改掉（否则"每次切过去开关被重置"）。
+  // 若会话翻译与偏好不一致（如历史遗留、会话重启读到旧值），自动把偏好同步到会话，
+  // 但节流到 10 秒一次，避免每 1 秒轮询触发一次重连识别。
+  if (captureState.captureActive
+    && typeof captureState.translate === "boolean"
+    && captureState.translate !== elements.translateToggle.checked
+    && Date.now() - lastTranslateSyncAt > 10_000) {
+    lastTranslateSyncAt = Date.now();
+    const targetTabId = captureState.tabId || activeTab?.id;
+    if (targetTabId) {
+      await chrome.runtime.sendMessage({
+        type: "SET_TRANSLATE",
+        tabId: targetTabId,
+        translate: elements.translateToggle.checked
+      }).catch(() => undefined);
+    }
   }
   const jobId = String(captureState.jobId || "");
   if (captureState.captureActive && jobId && jobId !== activeJobId) {
