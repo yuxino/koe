@@ -47,8 +47,12 @@ function runScenario({ state, startOk = true, recommendTabId = 1, clickOpenPanel
             if (msg.type === "START_CAPTURE") {
               calls.startedTab = msg.tabId;
               return startOk
-                ? { ok: true, state: { status: "live", captureActive: true } }
+                ? { ok: true, state: { status: "live", captureActive: true, tabId: msg.tabId } }
                 : { ok: false, error: "当前页面没有正在播放、未静音的视频。" };
+            }
+            if (msg.type === "STOP_CAPTURE") {
+              calls.stoppedTab = msg.tabId;
+              return { ok: true, state: { status: "idle" } };
             }
             return null;
           }
@@ -93,7 +97,7 @@ function runScenario({ state, startOk = true, recommendTabId = 1, clickOpenPanel
             if (calls.getMediaStreamId !== 0) throw new Error("次按钮不应发起 tabCapture");
             if (calls.closed !== 1) throw new Error(`次按钮应关弹窗，实际 close ${calls.closed}`);
           }
-          resolve({ ok: true, calls });
+          resolve({ ok: true, calls, els });
         } catch (err) { reject(err); }
         return;
       }
@@ -130,5 +134,16 @@ function runScenario({ state, startOk = true, recommendTabId = 1, clickOpenPanel
   if (e.calls.getTarget !== 9) throw new Error(`E 应跟随发声标签页 9，实际 ${e.calls.getTarget}`);
   if (e.calls.startedTab !== 9) throw new Error(`E 应捕获 tab 9，实际 ${e.calls.startedTab}`);
   console.log(`E 本页无声音 → 自动跟随发声标签页 9 ✓`);
+  // F：捕获在别的标签页（tab 5）跑着，弹窗状态必须跟随捕获会话：
+  // 按钮显示“停止实时字幕”，不自动开，停止时停的是捕获会话（tab 5）
+  const f = await runScenario({ state: { status: "live", captureActive: true, tabId: 5 } });
+  if (f.calls.getMediaStreamId !== 0) throw new Error("F 捕获运行时不应重复开启");
+  if (f.els["#start-button"].textContent !== "停止实时字幕") {
+    throw new Error(`F 按钮应显示“停止实时字幕”，实际 ${JSON.stringify(f.els["#start-button"].textContent)}`);
+  }
+  f.els["#start-button"].click();
+  await new Promise((r) => setTimeout(r, 50));
+  if (f.calls.stoppedTab !== 5) throw new Error(`F 停止应发给捕获会话 tab 5，实际 ${f.calls.stoppedTab}`);
+  console.log(`F 捕获在其他标签页 → 按钮跟随会话状态，停止发到 tab ${f.calls.stoppedTab} ✓`);
   console.log("panel-open 回归测试全部通过");
 })().catch((err) => { console.error("FAIL:", err.message); process.exit(1); });

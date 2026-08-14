@@ -772,7 +772,8 @@ function publicState(state) {
     translate: state.translate,
     captureActive: Boolean(state.captureStarted),
     captureNeedsGesture: Boolean(state.captureNeedsGesture),
-    stageDetail: state.stageDetail
+    stageDetail: state.stageDetail,
+    tabId: state.tabId
   };
 }
 

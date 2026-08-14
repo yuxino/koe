@@ -235,15 +235,11 @@ async function refreshActiveTab() {
 }
 
 async function refreshState() {
-  const [tabStateResponse, captureStateResponse] = await Promise.all([
-    activeTab?.id
-      ? chrome.runtime.sendMessage({ type: "GET_STATE", tabId: activeTab.id }).catch(() => null)
-      : Promise.resolve(null),
-    chrome.runtime.sendMessage({ type: "GET_STATE" }).catch(() => null)
-  ]);
-  // 状态走“圆点 + 按钮 + 底部提示”，字幕流跟随“正在捕获的会话”（可能在其他标签页）
-  currentState = tabStateResponse?.state || { status: "idle" };
+  // 字幕捕获是全局单会话：按钮状态跟随“正在捕获的会话”，
+  // 而不是当前标签页——否则字幕在别的标签页跑着，这里却显示“开启”。
+  const captureStateResponse = await chrome.runtime.sendMessage({ type: "GET_STATE" }).catch(() => null);
   const captureState = captureStateResponse?.state || { status: "idle" };
+  currentState = captureState;
   const jobId = String(captureState.jobId || "");
   if (captureState.captureActive && jobId && jobId !== activeJobId) {
     activeJobId = jobId;
@@ -278,7 +274,8 @@ function updateStatusHint() {
   if (!next || next === lastStatusHint) return;
   lastStatusHint = next;
   if (next === "live") {
-    elements.hint.textContent = "字幕已开启 · 内容持续滚动在下方";
+    const otherTab = currentState.tabId && activeTab?.id && currentState.tabId !== activeTab.id;
+    elements.hint.textContent = otherTab ? "字幕运行于其他标签页 · 点击「停止」可关闭" : "字幕已开启 · 内容持续滚动在下方";
   } else if (next === "error") {
     elements.hint.textContent = currentState.stageDetail || "已断开 · 点击「开启实时字幕」重试";
   } else if (next === "idle" && !String(elements.hint.textContent).startsWith("①")) {
@@ -352,10 +349,12 @@ async function startForTab() {
 }
 
 async function stopForTab() {
-  if (!activeTab?.id) return;
+  // 停的是“正在捕获的会话”，可能在别的标签页
+  const tabId = currentState.tabId || activeTab?.id;
+  if (!tabId) return;
   setButtonBusy(true);
   try {
-    const response = await chrome.runtime.sendMessage({ type: "STOP_CAPTURE", tabId: activeTab.id });
+    const response = await chrome.runtime.sendMessage({ type: "STOP_CAPTURE", tabId });
     currentState = response?.state || { status: "idle" };
     lastStatusHint = "";
     elements.hint.textContent = "已停止 · 字幕流保留";

@@ -83,9 +83,9 @@ async function refreshActiveTab() {
 }
 
 async function refreshState() {
-  const response = activeTab?.id
-    ? await chrome.runtime.sendMessage({ type: "GET_STATE", tabId: activeTab.id }).catch(() => null)
-    : null;
+  // 字幕捕获是全局单会话（一次只跑一个）：按钮状态跟随“正在捕获的会话”，
+  // 而不是当前标签页——否则字幕还在别的标签页跑着，切个 tab 按钮却变回“开启”。
+  const response = await chrome.runtime.sendMessage({ type: "GET_STATE" }).catch(() => null);
   currentState = response?.state || { status: "idle" };
   render();
 }
@@ -156,10 +156,12 @@ async function start(targetIdOverride) {
 }
 
 async function stop() {
-  if (!activeTab?.id) return;
+  // 停的是“正在捕获的会话”，可能在别的标签页
+  const tabId = currentState.tabId || activeTab?.id;
+  if (!tabId) return;
   setBusy(true);
   try {
-    const response = await chrome.runtime.sendMessage({ type: "STOP_CAPTURE", tabId: activeTab.id });
+    const response = await chrome.runtime.sendMessage({ type: "STOP_CAPTURE", tabId });
     currentState = response?.state || { status: "idle" };
     setStatus("已停止");
   } catch (error) {
@@ -188,5 +190,9 @@ function render() {
   elements.statusDot.className = `dot ${error ? "bad" : live ? "ok" : gesture || starting ? "busy" : ""}`;
   elements.startButton.textContent = live ? "停止实时字幕" : "开启实时字幕";
   elements.startButton.classList.toggle("active", live);
-  if (live) setStatus("字幕已开启 · 显示在侧边栏");
+  if (live) {
+    // 字幕可能在别的标签页跑着：状态跟捕获会话走，别让用户以为没开
+    const otherTab = currentState.tabId && activeTab?.id && currentState.tabId !== activeTab.id;
+    setStatus(otherTab ? "字幕运行于其他标签页 · 停止按钮可关闭" : "字幕已开启 · 显示在侧边栏");
+  }
 }
