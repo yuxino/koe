@@ -63,7 +63,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-async function startCapture({ streamId, translate, apiKey, source, engine }) {
+// 并发启动合并：弹窗自动开启 + 按钮点击可能同时到达，只允许一次启动在跑，
+// 避免双识别会话产生重复字幕。
+let startCapturePromise = null;
+
+async function startCapture(message) {
+  if (startCapturePromise) return startCapturePromise;
+  startCapturePromise = runStartCapture(message).finally(() => {
+    startCapturePromise = null;
+  });
+  return startCapturePromise;
+}
+
+async function runStartCapture({ streamId, translate, apiKey, source, engine }) {
   retryCount = 0;
   stopping = false;
   clearRetryTimer();

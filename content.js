@@ -249,11 +249,22 @@
   }
 
   function showCaption(text) {
+    if (text === captionEl.textContent) {
+      // 内容没变：只续期自动隐藏计时，不做动画，避免“被覆盖”的闪烁
+      refreshCaptionHideTimer();
+      return;
+    }
+    const wasHidden = captionEl.hidden;
     captionEl.textContent = text;
     captionEl.hidden = false;
-    // 让高度动画生效：先移除再添加 visible
-    captionEl.classList.remove("visible");
-    requestAnimationFrame(() => captionEl.classList.add("visible"));
+    if (wasHidden) {
+      captionEl.classList.remove("visible");
+      requestAnimationFrame(() => captionEl.classList.add("visible"));
+    }
+    refreshCaptionHideTimer();
+  }
+
+  function refreshCaptionHideTimer() {
     clearTimeout(captionHideTimer);
     captionHideTimer = setTimeout(() => {
       captionEl.classList.remove("visible");

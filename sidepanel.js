@@ -105,18 +105,14 @@ chrome.runtime.onMessage.addListener((message) => {
       if (translateOn()) return false;
       if (!acceptUnitSeq(message.seq)) return false;
       const text = lastLine(message.lines)?.text;
-      if (text) {
-        appendRow(text);
-        clearDraft();
-      }
+      if (text) promoteDraftOrAppend(text);
     } else if (message.type === "LIVE_TRANSLATED") {
       if (!translateOn()) return false;
       const text = lastLine(message.lines)?.translated;
       if (!text) return false;
       if (message.unit) {
         if (!acceptUnitSeq(message.seq)) return false;
-        appendRow(text);
-        clearDraft();
+        promoteDraftOrAppend(text);
       } else {
         if (!acceptDraftSeq(message.seq)) return false;
         setDraft(text);
@@ -527,6 +523,23 @@ function clearDraft() {
     draftEl.remove();
     draftEl = null;
   }
+}
+
+// 字幕块提交时把草稿行原地“转正”：同一句话在记录里只出现一次，
+// 不会出现“草稿一行 + 正式一行”的重复观感。
+function promoteDraftOrAppend(text) {
+  const value = String(text);
+  if (draftEl && draftEl.isConnected && segments(value, subtitleMaxChars(value)).length <= 1) {
+    draftEl.className = "row";
+    draftEl.dataset.text = value;
+    const textEl = draftEl.querySelector(".text");
+    if (textEl) textEl.textContent = value;
+    draftEl = null;
+    smoothScrollToBottom();
+    return;
+  }
+  clearDraft();
+  appendRow(value);
 }
 
 function formatTime(date) {
