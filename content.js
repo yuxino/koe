@@ -1,11 +1,25 @@
 (() => {
-  const CONTENT_VERSION = "1.6.4";
+  // 版本号动态读 manifest：扩展更新/重载后新副本版本号不同，
+  // 旧副本检测到 __koeLoaded 变化会自行停用，不会残留失效上下文。
+  // 写死版本号（如 1.6.4）在后续升级后会导致新旧副本版本相同、
+  // 新副本不注入、旧副本继续跑失效的 chrome API → "Extension context invalidated"。
+  const CONTENT_VERSION = chrome.runtime.getManifest().version;
   if (window.__koeLoaded === CONTENT_VERSION) return;
   window.__koeLoaded = CONTENT_VERSION;
 
-  // 扩展重新加载后，页面里的旧 DOM 仍可能存在，但它对应的消息监听器已经失效。
+  // 扩展重载后，页面里的旧 DOM 仍可能存在，但它对应的消息监听器已经失效。
   // 移除旧容器并完整重建，避免后台已开启、页面却停在旧错误提示。
   document.querySelector("#koe-root")?.remove();
+
+  // 扩展上下文失效（重载/禁用）时 chrome.runtime.sendMessage 会同步 throw，
+  // promise 的 .catch 挡不住——统一走安全封装，避免控制台报错
+  function safeSend(message) {
+    try {
+      return chrome.runtime.sendMessage(message).catch(() => undefined);
+    } catch {
+      return undefined;
+    }
+  }
 
   const HOST_CSS = "position:fixed;inset:0;pointer-events:none;z-index:2147483647;";
   const host = document.createElement("div");
@@ -73,14 +87,14 @@
   });
 
   // 页面加载即通知后台；加载慢则每 3 秒重试（最多 10 次）
-  chrome.runtime.sendMessage({ type: "PAGE_READY" }).catch(() => undefined);
+  safeSend({ type: "PAGE_READY" });
   ack("ready", true);
   let pageReadyAttempts = 0;
   window.setInterval(() => {
     if (window.__koeLoaded !== CONTENT_VERSION) return; // 旧副本：停止工作
     if (pageReadyAttempts >= 10) return;
     pageReadyAttempts += 1;
-    chrome.runtime.sendMessage({ type: "PAGE_READY" }).catch(() => undefined);
+    safeSend({ type: "PAGE_READY" });
   }, 3_000);
 
   document.addEventListener("play", (event) => {
@@ -90,14 +104,14 @@
     const now = Date.now();
     if (now - lastPageReadyAt < 3_000) return;
     lastPageReadyAt = now;
-    chrome.runtime.sendMessage({ type: "PAGE_READY" }).catch(() => undefined);
+    safeSend({ type: "PAGE_READY" });
   }, true);
 
   document.addEventListener("emptied", (event) => {
     if (window.__koeLoaded !== CONTENT_VERSION) return;
     const target = event.target;
     if (!(target instanceof HTMLVideoElement)) return;
-    chrome.runtime.sendMessage({ type: "VIDEO_CHANGED" }).catch(() => undefined);
+    safeSend({ type: "VIDEO_CHANGED" });
   }, true);
 
   // 周期检测：源/URL 变化 → 通知后台重连识别；正在播放且未静音 → 触发实时字幕
@@ -109,14 +123,14 @@
     const source = video ? (video.currentSrc || video.src || "") : "";
     if (source && source !== lastSeenSource) {
       lastSeenSource = source;
-      chrome.runtime.sendMessage({ type: "VIDEO_CHANGED" }).catch(() => undefined);
+      safeSend({ type: "VIDEO_CHANGED" });
       return;
     }
     if (video && !video.paused && !video.muted && video.readyState >= 2) {
       const now = Date.now();
       if (now - lastPageReadyAt >= 3_000) {
         lastPageReadyAt = now;
-        chrome.runtime.sendMessage({ type: "PAGE_READY" }).catch(() => undefined);
+        safeSend({ type: "PAGE_READY" });
       }
     }
   }
@@ -126,7 +140,7 @@
     if (window.__koeLoaded !== CONTENT_VERSION) return; // 旧副本：停止工作
     if (location.href === lastSeenUrl) return;
     lastSeenUrl = location.href;
-    chrome.runtime.sendMessage({ type: "VIDEO_CHANGED" }).catch(() => undefined);
+    safeSend({ type: "VIDEO_CHANGED" });
   }
   const wrapHistory = (method) => {
     const original = history[method];
@@ -168,7 +182,7 @@
     const now = Date.now();
     if (!force && now - lastAckAt < 3_000) return;
     lastAckAt = now;
-    chrome.runtime.sendMessage({ type: "CONTENT_ACK", stage }).catch(() => undefined);
+    safeSend({ type: "CONTENT_ACK", stage });
   }
 
   function currentVideo() {
