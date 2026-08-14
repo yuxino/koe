@@ -114,6 +114,7 @@ async function handle(message, sender) {
   if (message.type === "CAPTURE_LINES") return forwardCaptureLines(message, "LIVE_SUBTITLES");
   if (message.type === "CAPTURE_PARTIAL") return forwardCaptureLines(message, "LIVE_PARTIAL");
   if (message.type === "CAPTURE_TRANSLATED") return forwardCaptureLines(message, "LIVE_TRANSLATED");
+  if (message.type === "CAPTURE_REVOKE") return forwardRevoke(message);
   if (message.type === "CAPTURE_ERROR") return handleCaptureError(message);
   if (message.type === "START_CAPTURE") return startCaptureForTab(message);
   if (message.type === "RECOMMEND_TAB") return recommendCaptureTab(Number(message.tabId));
@@ -468,6 +469,32 @@ async function stopCaptureForTab(tabId) {
   // 主动停止 = 不再打扰：本页不再弹“点击开启”，直到切换视频或手动再开
   state.userStopped = true;
   return { ok: true, state: publicState(tabStates.get(Number(tabId))) };
+}
+
+// 识别修正撤回：offscreen 发现服务端把已上屏的句子整体换词时，
+// 通知侧边栏删掉对应行（按 seq 匹配），避免“奥凯尤尔资产/识别你的资产”这类错行并存。
+async function forwardRevoke({ fromSeq = 0, toSeq = 0, text = "" }) {
+  const tabId = captureTabId;
+  const state = tabId ? tabStates.get(tabId) : null;
+  if (!state?.captureStarted || !state.jobId) return { ok: true, ignored: true };
+  const payload = {
+    type: "LIVE_REVOKE",
+    jobId: state.jobId,
+    fromSeq: Number(fromSeq) || 0,
+    toSeq: Number(toSeq) || 0,
+    text: String(text || "")
+  };
+  try {
+    await chrome.runtime.sendMessage(payload);
+  } catch {
+    // 侧边栏未打开时忽略
+  }
+  try {
+    await forwardToTab(tabId, payload, state.frameId);
+  } catch {
+    // 页面内容脚本缺失时忽略
+  }
+  return { ok: true };
 }
 
 async function forwardCaptureLines(message, type) {

@@ -493,7 +493,7 @@ function handleDashScopeMessage(message) {
 // 翻译因此永远拿到的是短文本，不会等整段独白。
 const SENTENCE_DELIMITERS = ["。", "！", "？", ".", "!", "?", "\n"];
 const LONG_INCOMPLETE_THRESHOLD = 12;
-const STABLE_DRAFT_DELAY = 500;
+const STABLE_DRAFT_DELAY = 700;
 const MAXIMUM_WAIT_DELAY = 2_000;
 
 let latestDraft = "";
@@ -503,11 +503,25 @@ let lastCommitProvisional = false;
 let stableTimer = null;
 let maxWaitTimer = null;
 let lastEmittedTail = "";
+// 最近一次上屏的字幕块（seq + 文本），供“识别修正撤回”使用
+let lastEmittedUnitSeq = 0;
+let lastEmittedUnitText = "";
+// 当前句子的第一块 seq（识别修正时按范围撤回整句，而不是只撤最后一块）
+let currentSentenceStartSeq = 0;
 // 最近上屏的字幕块（最多 3 条），用于与迟到的服务端 final 对账：
 // 重复的 final、或只是已上屏块的一部分，都不再上屏，避免字幕重复。
 const lastUnitTexts = [];
 
 const codePoints = (text) => Array.from(String(text));
+
+// 两段文本的公共前缀长度（按字符），用于区分“正常延伸”与“识别修正”
+function longestCommonPrefix(left, right) {
+  const a = String(left || "");
+  const b = String(right || "");
+  let count = 0;
+  while (count < a.length && count < b.length && a[count] === b[count]) count += 1;
+  return count;
+}
 
 function isMeaningful(text) {
   return codePoints(text).some((ch) => !/\s/.test(ch) && !isPunctuation(ch));
@@ -674,9 +688,38 @@ function resetDraftCommitter() {
   lastCommittedChunk = "";
   lastCommitProvisional = false;
   lastEmittedTail = "";
+  currentSentenceStartSeq = 0;
 }
 
 function handleServerDraft(text) {
+  // 识别修正检测：已提交过内容，但新草稿与已提交内容没有公共前缀
+  // （服务端把整句换词了，如 "Okayur assets" → "Identify your assets"）。
+  // 此时按范围撤回当前句子的全部字幕块（fromSeq..toSeq），
+  // 让修正后的文本从头重新累积，避免错行残留。
+  const draftText = String(text || "").trim();
+  if (committedText && lastEmittedUnitSeq && draftText && !draftText.startsWith(committedText)) {
+    const lcp = longestCommonPrefix(draftText, committedText);
+    if (lcp < 3) {
+      const fromSeq = currentSentenceStartSeq || lastEmittedUnitSeq;
+      logEvent("revoke", `from=${fromSeq} to=${lastEmittedUnitSeq} old=${JSON.stringify(lastEmittedUnitText.slice(0, 40))} new=${JSON.stringify(draftText.slice(0, 40))}`);
+      chrome.runtime.sendMessage({
+        type: "CAPTURE_REVOKE",
+        fromSeq,
+        toSeq: lastEmittedUnitSeq,
+        text: lastEmittedUnitText
+      }).catch(() => undefined);
+      // 清掉对账缓存中属于被修正句子的块
+      lastUnitTexts.length = 0;
+      lastEmittedUnitSeq = 0;
+      lastEmittedUnitText = "";
+      currentSentenceStartSeq = 0;
+      committedText = "";
+      lastCommittedChunk = "";
+      lastCommitProvisional = false;
+      lastEmittedTail = "";
+      cancelDraftTimers();
+    }
+  }
   const tail = updateDraft(text);
   if (!tail || !isMeaningful(tail)) return;
   scheduleDraftTimers();
@@ -689,7 +732,12 @@ function handleServerDraft(text) {
     lines: [{ text: tail }],
     seq
   }).catch(() => undefined);
-  if (captureTranslate) scheduleDraftTranslation(tail, seq);
+  if (captureTranslate) {
+    // 翻译只译“即将上屏的那一句”，与字幕块对齐——译整段待提交文本
+    // 会让译文比字幕多出后续内容，图文对不上。
+    const first = firstCompleteSentence(tail) || tail;
+    scheduleDraftTranslation(first, seq);
+  }
 }
 
 function handleServerFinal(text) {
@@ -732,6 +780,9 @@ function emitUnit(text) {
   lastUnitTexts.push(unitText);
   if (lastUnitTexts.length > 3) lastUnitTexts.shift();
   const seq = ++emitSeq;
+  lastEmittedUnitSeq = seq;
+  lastEmittedUnitText = unitText;
+  if (!currentSentenceStartSeq) currentSentenceStartSeq = seq;
   logEvent("unit-emit", `seq=${seq} text=${JSON.stringify(unitText.slice(0, 80))}`);
   chrome.runtime.sendMessage({
     type: "CAPTURE_LINES",

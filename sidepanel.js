@@ -98,6 +98,10 @@ chrome.runtime.onMessage.addListener((message) => {
   }
   if (!belongsToSession(message)) return false;
   try {
+    if (message.type === "LIVE_REVOKE") {
+      revokeRow(message.fromSeq, message.toSeq);
+      return false;
+    }
     if (message.type === "LIVE_PARTIAL") {
       if (translateOn()) return false;
       if (!acceptDraftSeq(message.seq)) return false;
@@ -107,14 +111,14 @@ chrome.runtime.onMessage.addListener((message) => {
       if (translateOn()) return false;
       if (!acceptUnitSeq(message.seq)) return false;
       const text = lastLine(message.lines)?.text;
-      if (text) promoteDraftOrAppend(text);
+      if (text) promoteDraftOrAppend(text, message.seq);
     } else if (message.type === "LIVE_TRANSLATED") {
       if (!translateOn()) return false;
       const text = lastLine(message.lines)?.translated;
       if (!text) return false;
       if (message.unit) {
         if (!acceptUnitSeq(message.seq)) return false;
-        promoteDraftOrAppend(text);
+        promoteDraftOrAppend(text, message.seq);
       } else {
         if (!acceptDraftSeq(message.seq)) return false;
         setDraft(text);
@@ -473,7 +477,7 @@ function resetFeed() {
   lastDraftSeq = 0;
 }
 
-function appendRow(text, className = "") {
+function appendRow(text, className = "", seq = "") {
   elements.feed.querySelectorAll(".placeholder").forEach((node) => node.remove());
   const time = formatTime(new Date());
   const parts = segments(String(text), subtitleMaxChars(String(text)));
@@ -482,6 +486,7 @@ function appendRow(text, className = "") {
     row.className = `row ${className}`.trim();
     row.dataset.ts = time;
     row.dataset.text = part;
+    if (seq) row.dataset.seq = String(seq);
     const timeEl = document.createElement("span");
     timeEl.className = "time";
     timeEl.textContent = time;
@@ -496,6 +501,31 @@ function appendRow(text, className = "") {
     }
   }
   smoothScrollToBottom();
+}
+
+// 识别修正撤回：删除 seq 落在 [fromSeq, toSeq] 的字幕行（原文行和它的译文行
+// 同 seq，一起删），让修正后的正确文本重新累积，不再残留错行。
+function revokeRow(fromSeq, toSeq) {
+  clearDraft();
+  const from = Number(fromSeq) || 0;
+  const to = Number(toSeq) || from;
+  if (!from) return;
+  const rows = [...elements.feed.children];
+  let removed = 0;
+  for (const row of rows) {
+    const seq = Number(row.dataset.seq || 0);
+    if (seq && seq >= from && seq <= to) {
+      row.remove();
+      removed += 1;
+    }
+  }
+  // 行没带 seq 时兜底：删最后一条非草稿行
+  if (removed === 0) {
+    const units = [...elements.feed.children]
+      .filter((row) => !row.classList.contains("placeholder") && !row.classList.contains("draft"));
+    const last = units[units.length - 1];
+    if (last) last.remove();
+  }
 }
 
 function setDraft(text) {
@@ -529,11 +559,12 @@ function clearDraft() {
 
 // 字幕块提交时把草稿行原地“转正”：同一句话在记录里只出现一次，
 // 不会出现“草稿一行 + 正式一行”的重复观感。
-function promoteDraftOrAppend(text) {
+function promoteDraftOrAppend(text, seq = "") {
   const value = String(text);
   if (draftEl && draftEl.isConnected && segments(value, subtitleMaxChars(value)).length <= 1) {
     draftEl.className = "row";
     draftEl.dataset.text = value;
+    if (seq) draftEl.dataset.seq = String(seq);
     const textEl = draftEl.querySelector(".text");
     if (textEl) textEl.textContent = value;
     draftEl = null;
@@ -541,7 +572,7 @@ function promoteDraftOrAppend(text) {
     return;
   }
   clearDraft();
-  appendRow(value);
+  appendRow(value, "", seq);
 }
 
 function formatTime(date) {
