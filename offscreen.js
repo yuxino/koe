@@ -9,6 +9,7 @@ const PCM_FRAME_BYTES = 3_200; // 100 ms, 16 kHz mono int16
 const MAX_AUTO_RETRIES = 5;
 
 let stream = null;
+let currentStreamSource = ""; // 当前流的来源："tab" | "mic"
 let monitorAudio = null;
 let audioContext = null;
 let processor = null;
@@ -37,7 +38,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message.type === "CAPTURE_STOP") {
-    stopCapture().then(() => sendResponse({ ok: true })).catch((error) => {
+    // 停止只停识别：音频流和监听器保持存活，再次开启直接复用，
+    // 避免“Cannot capture a tab with an active stream”冲突
+    stopRecognitionOnly().then(() => sendResponse({ ok: true })).catch((error) => {
       sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
     });
     return true;
@@ -64,7 +67,7 @@ async function startCapture({ streamId, translate, apiKey, source, engine }) {
   retryCount = 0;
   stopping = false;
   clearRetryTimer();
-  await stopCapture();
+  await stopRecognitionOnly();
   stopping = false;
   captureSource = source === "mic" ? "mic" : "tab";
   captureEngine = ["webspeech", "vosk-zh", "vosk-en"].includes(engine) ? engine : "dashscope";
@@ -76,28 +79,12 @@ async function startCapture({ streamId, translate, apiKey, source, engine }) {
     if (captureSource !== "mic") {
       throw new Error("内置语音识别只支持「麦克风」声音来源，请在设置里切换。");
     }
-    await acquireMicStream();
+    await acquireStreamForSource("");
     startWebSpeech();
     return { ok: true, mode: "webspeech" };
   }
 
-  if (captureSource === "mic") {
-    await acquireMicStream();
-  } else {
-    if (!streamId) throw new Error("缺少标签页音频流。");
-    if (!captureApiKey) throw new Error("请先在 Koe 中保存 DashScope API Key。");
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        mandatory: { chromeMediaSource: "tab", chromeMediaSourceId: streamId }
-      }
-    });
-    // tabCapture 会把标签页自身的声音静音、只交给捕获流，
-    // 因此这里必须把捕获到的声音原样播放出来，用户才能继续听到视频。
-    // Chrome 已抑制标签页直出，不会出现双重声音。
-    monitorAudio = new Audio();
-    monitorAudio.srcObject = stream;
-    monitorAudio.play().catch(() => undefined);
-  }
+  await acquireStreamForSource(streamId);
 
   try {
     // 先开始采集再连接识别会话：连接期间的音频先排队，连上后立即补发，开播头几秒不丢
@@ -117,15 +104,68 @@ async function startCapture({ streamId, translate, apiKey, source, engine }) {
   }
 }
 
-// 麦克风来源：一次授权、之后永久有效，不需要任何手势
-async function acquireMicStream() {
-  stream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true
+// 获取（或复用）音频流：来源未变时直接复用已存在的流，
+// 只有来源切换或首次开启时才真正调用 getUserMedia。
+async function acquireStreamForSource(streamId) {
+  if (stream && currentStreamSource === captureSource) return;
+  releaseStream();
+  if (captureSource === "mic") {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    });
+  } else {
+    if (!streamId) throw new Error("缺少标签页音频流。");
+    if (!captureApiKey) throw new Error("请先在 Koe 中保存 DashScope API Key。");
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          mandatory: { chromeMediaSource: "tab", chromeMediaSourceId: streamId }
+        }
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/active stream|already|captur/i.test(message)) {
+        // 标签页可能被旧会话占用：稍等后重试一次，仍失败则给出明确指引
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            mandatory: { chromeMediaSource: "tab", chromeMediaSourceId: streamId }
+          }
+        }).catch(() => null);
+        if (!stream) {
+          throw new Error("标签页音频被旧会话占用：请刷新视频页面，或先按 Alt+K 重试。");
+        }
+      } else {
+        throw error;
+      }
     }
-  });
+    // tabCapture 会把标签页自身的声音静音、只交给捕获流，
+    // 因此这里必须把捕获到的声音原样播放出来，用户才能继续听到视频。
+    // Chrome 已抑制标签页直出，不会出现双重声音。
+    monitorAudio = new Audio();
+    monitorAudio.srcObject = stream;
+    monitorAudio.play().catch(() => undefined);
+  }
+  currentStreamSource = captureSource;
+}
+
+function releaseStream() {
+  if (monitorAudio) {
+    try { monitorAudio.srcObject = null; } catch { /* ignore */ }
+    try { monitorAudio.pause(); } catch { /* ignore */ }
+    monitorAudio = null;
+  }
+  if (stream) {
+    stream.getTracks().forEach((track) => {
+      try { track.stop(); } catch { /* ignore */ }
+    });
+    stream = null;
+  }
+  currentStreamSource = "";
 }
 
 // ===== Chrome 内置语音识别（webkitSpeechRecognition）=====
@@ -170,7 +210,7 @@ async function restartWebSpeech() {
     recognition = null;
   }
   resetDraftCommitter();
-  if (!stream) await acquireMicStream();
+  await acquireStreamForSource("");
   startWebSpeech();
 }
 
@@ -279,9 +319,10 @@ async function startVosk() {
 async function restartVosk() {
   stopVoskRecognizer();
   resetDraftCommitter();
-  if (!stream) {
-    if (captureSource === "mic") await acquireMicStream();
-    else throw new Error("capture_not_running");
+  if (captureSource === "mic") {
+    await acquireStreamForSource("");
+  } else if (!stream) {
+    throw new Error("capture_not_running");
   }
   await startVosk();
 }
@@ -977,6 +1018,36 @@ function closeSocket(finish = true) {
   socket = null;
 }
 
+// 只停识别、保留音频流与监听器：再次开启时直接复用流，
+// 避免“Cannot capture a tab with an active stream”冲突。
+// 注意：标签页来源的监听器必须继续播放（tabCapture 会静音标签页自身）。
+async function stopRecognitionOnly() {
+  stopping = true;
+  captureGeneration += 1;
+  clearRetryTimer();
+  if (recognition) {
+    try {
+      recognition.onend = null;
+      recognition.onerror = null;
+      recognition.onresult = null;
+      recognition.abort();
+    } catch { /* ignore */ }
+    recognition = null;
+  }
+  stopVoskRecognizer();
+  await stopPcmCapture();
+  closeSocket(true);
+  taskId = "";
+  emitSeq = 0;
+  translationQueue.length = 0;
+  inFlightItem = null;
+  throttleCooldownUntil = 0;
+  lastTranslationAt = 0;
+  lastUnitTexts.length = 0;
+  resetDraftCommitter();
+  // stream 与 monitorAudio 保留，供下次开启复用
+}
+
 async function stopCapture() {
   stopping = true;
   captureGeneration += 1;
@@ -992,15 +1063,7 @@ async function stopCapture() {
   }
   stopVoskRecognizer();
   await stopPcmCapture();
-  if (monitorAudio) {
-    try { monitorAudio.srcObject = null; } catch { /* ignore */ }
-    try { monitorAudio.pause(); } catch { /* ignore */ }
-    monitorAudio = null;
-  }
-  if (stream) {
-    stream.getTracks().forEach((track) => track.stop());
-    stream = null;
-  }
+  releaseStream();
   closeSocket(true);
   taskId = "";
   emitSeq = 0;
