@@ -1,5 +1,5 @@
 (() => {
-  const CONTENT_VERSION = "1.6.0";
+  const CONTENT_VERSION = "1.6.4";
   if (window.__koeLoaded === CONTENT_VERSION) return;
   window.__koeLoaded = CONTENT_VERSION;
 
@@ -28,31 +28,11 @@
       }
       .status.error { color: #ffd9d4; border-color: rgba(255,122,110,.35); }
       .status.visible { opacity: 1; }
-      .caption {
-        position: fixed; left: 0; right: 0; margin: 0 auto; width: fit-content;
-        max-width: min(760px, 88vw); bottom: 6vh;
-        opacity: 0; transform: translateY(10px);
-        transition: opacity .25s ease, transform .25s ease;
-        pointer-events: auto; cursor: grab; user-select: none;
-        text-align: center;
-        font: 400 22px/1.5 Georgia, "Songti SC", serif; color: #fbf4df;
-        letter-spacing: .02em; padding: 12px 24px; border-radius: 16px;
-        background: linear-gradient(135deg, rgba(18,24,20,.88), rgba(36,44,34,.8));
-        border: 1px solid rgba(255,248,224,.14);
-        box-shadow: 0 16px 48px rgba(0,0,0,.42), 0 0 0 1px rgba(203,220,119,.05);
-        backdrop-filter: blur(16px);
-      }
-      .caption.visible { opacity: 1; transform: translateY(0); }
-      .caption.dragged { left: auto; right: auto; margin: 0; bottom: auto; }
-      .caption.dragging { cursor: grabbing; transition: none; }
-      .caption::selection { background: rgba(203,220,119,.3); }
     </style>
     <div class="status" aria-live="polite"></div>
-    <div class="caption" aria-live="polite" hidden></div>
   `;
 
   const statusEl = shadow.querySelector(".status");
-  const captionEl = shadow.querySelector(".caption");
 
   let translateOn = false;
   let activeJobId = "";
@@ -60,8 +40,6 @@
   let lastSeenUrl = location.href;
   let lastPageReadyAt = 0;
   let lastAckAt = 0;
-  let captionHideTimer = null;
-  let latestSeq = 0;
 
   chrome.runtime.onMessage.addListener((message) => {
     // 扩展重载后，页面里可能残留旧版本脚本的监听器和定时器：
@@ -73,10 +51,7 @@
       ack(`state:${message.status}`, true);
       if (message.translate !== undefined) translateOn = Boolean(message.translate);
       const nextJobId = String(message.jobId || "");
-      if (nextJobId && nextJobId !== activeJobId) {
-        activeJobId = nextJobId;
-        resetCaption();
-      }
+      if (nextJobId && nextJobId !== activeJobId) activeJobId = nextJobId;
 
       if (message.status === "live") {
         hideStatus();
@@ -90,49 +65,8 @@
       return false;
     }
 
-    if (message.type === "LIVE_PARTIAL") {
-      if (!belongsToActiveSession(message)) return false;
-      try {
-        if (translateOn) return false; // 翻译模式下中间原文不显示，译文随后跟上
-        if (!acceptSeq(message.seq)) return false;
-        const text = lastLine(message.lines)?.text;
-        if (text) showCaption(text);
-      } catch (error) {
-        ack(`display-error:${String(error).slice(0, 60)}`, true);
-      }
-      return false;
-    }
-
-    if (message.type === "LIVE_SUBTITLES") {
-      if (!belongsToActiveSession(message)) return false;
-      try {
-        if (translateOn) return false;
-        if (!acceptSeq(message.seq)) return false;
-        const text = lastLine(message.lines)?.text;
-        if (text) showCaption(text);
-      } catch (error) {
-        ack(`display-error:${String(error).slice(0, 60)}`, true);
-      }
-      return false;
-    }
-
-    if (message.type === "LIVE_TRANSLATED") {
-      if (!belongsToActiveSession(message)) return false;
-      try {
-        if (!translateOn) return false;
-        if (!acceptSeq(message.seq)) return false;
-        const text = lastLine(message.lines)?.translated;
-        if (text) showCaption(text);
-      } catch (error) {
-        ack(`display-error:${String(error).slice(0, 60)}`, true);
-      }
-      return false;
-    }
-
     if (message.type === "LIVE_STOP") {
-      if (!belongsToActiveSession(message)) return false;
       hideStatus();
-      resetCaption();
       return false;
     }
     return false;
@@ -206,11 +140,11 @@
   wrapHistory("replaceState");
   window.addEventListener("popstate", handleUrlChange);
 
-  // 全屏时把 UI 挂进全屏元素，否则回到页面根
+  // 全屏时把状态提示挂进全屏元素，否则回到页面根
   document.addEventListener("fullscreenchange", syncFullscreen, true);
   document.addEventListener("webkitfullscreenchange", syncFullscreen, true);
   function syncFullscreen() {
-    if (window.__koeLoaded !== CONTENT_VERSION) return; // 旧副本：不得把旧字幕层重新挂回页面
+    if (window.__koeLoaded !== CONTENT_VERSION) return; // 旧副本：不得把旧状态层重新挂回页面
     const fs = document.fullscreenElement || document.webkitFullscreenElement || null;
     if (fs && fs !== host.parentElement) {
       fs.appendChild(host);
@@ -229,95 +163,6 @@
   function hideStatus() {
     statusEl.classList.remove("visible");
   }
-
-  // ===== 浮动字幕卡片（主显示）：玻璃质感、可拖拽、位置记忆 =====
-  function belongsToActiveSession(message) {
-    const jobId = String(message.jobId || "");
-    return !jobId || !activeJobId || jobId === activeJobId;
-  }
-
-  function lastLine(lines) {
-    return Array.isArray(lines) ? lines[lines.length - 1] : null;
-  }
-
-  function acceptSeq(seq) {
-    const value = Number(seq);
-    if (!Number.isFinite(value)) return true;
-    if (value <= latestSeq) return false;
-    latestSeq = value;
-    return true;
-  }
-
-  function showCaption(text) {
-    if (text === captionEl.textContent) {
-      // 内容没变：只续期自动隐藏计时，不做动画，避免“被覆盖”的闪烁
-      refreshCaptionHideTimer();
-      return;
-    }
-    const wasHidden = captionEl.hidden;
-    captionEl.textContent = text;
-    captionEl.hidden = false;
-    if (wasHidden) {
-      captionEl.classList.remove("visible");
-      requestAnimationFrame(() => captionEl.classList.add("visible"));
-    }
-    refreshCaptionHideTimer();
-  }
-
-  function refreshCaptionHideTimer() {
-    clearTimeout(captionHideTimer);
-    captionHideTimer = setTimeout(() => {
-      captionEl.classList.remove("visible");
-    }, 6_000);
-  }
-
-  function resetCaption() {
-    clearTimeout(captionHideTimer);
-    latestSeq = 0;
-    captionEl.textContent = "";
-    captionEl.classList.remove("visible");
-    captionEl.hidden = true;
-  }
-
-  // 拖拽：按住字幕卡片可移动到任意位置，位置保存在本地，下次沿用
-  (function initCaptionDrag() {
-    let dragging = false;
-    let offsetX = 0;
-    let offsetY = 0;
-
-    chrome.storage.local.get("koeCaptionPos").then(({ koeCaptionPos }) => {
-      if (koeCaptionPos && Number.isFinite(koeCaptionPos.left) && Number.isFinite(koeCaptionPos.top)) {
-        captionEl.classList.add("dragged");
-        captionEl.style.left = `${koeCaptionPos.left}px`;
-        captionEl.style.top = `${koeCaptionPos.top}px`;
-      }
-    }).catch(() => undefined);
-
-    captionEl.addEventListener("pointerdown", (event) => {
-      dragging = true;
-      captionEl.classList.add("dragging");
-      captionEl.setPointerCapture(event.pointerId);
-      const rect = captionEl.getBoundingClientRect();
-      offsetX = event.clientX - rect.left;
-      offsetY = event.clientY - rect.top;
-    });
-    captionEl.addEventListener("pointermove", (event) => {
-      if (!dragging) return;
-      captionEl.classList.add("dragged");
-      captionEl.style.left = `${Math.round(event.clientX - offsetX)}px`;
-      captionEl.style.top = `${Math.round(event.clientY - offsetY)}px`;
-    });
-    captionEl.addEventListener("pointerup", (event) => {
-      if (!dragging) return;
-      dragging = false;
-      captionEl.classList.remove("dragging");
-      const left = Number.parseFloat(captionEl.style.left);
-      const top = Number.parseFloat(captionEl.style.top);
-      if (Number.isFinite(left) && Number.isFinite(top)) {
-        chrome.storage.local.set({ koeCaptionPos: { left, top } }).catch(() => undefined);
-      }
-    });
-  })();
 
   function ack(stage, force = false) {
     const now = Date.now();
