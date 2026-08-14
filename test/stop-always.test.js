@@ -78,6 +78,18 @@ function makeCtx({ captureStarted = false } = {}) {
       `restoreStates 不发 CAPTURE_STOP（实际 ${JSON.stringify(h.sent.slice(before).map((m) => m.type))}）`);
     console.log("T3 restoreStates 不再杀会话 PASS");
   }
+  {
+    // 场景：tabStates 无此记录（SW 休眠后 captureTabId 内存丢失、状态未恢复）时，
+    // 点停止也必须发 CAPTURE_STOP——否则 offscreen 还在跑，停止失效
+    const h = makeCtx();
+    vm.runInContext(`tabStates.delete(1); captureTabId = null;`, h.ctx);
+    const before = h.sent.length;
+    await vm.runInContext(`stopCaptureForTab(1)`, h.ctx);
+    await flush();
+    check(h.sent.slice(before).some((m) => m.type === "CAPTURE_STOP"),
+      `无状态记录也必须发 CAPTURE_STOP（实际 ${JSON.stringify(h.sent.slice(before).map((m) => m.type))}）`);
+    console.log("T4 无状态记录停止仍发 CAPTURE_STOP PASS");
+  }
   console.log(fail === 0 ? "stop-always 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
 })().catch((err) => { console.error(err); process.exit(1); });

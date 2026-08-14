@@ -475,6 +475,14 @@ async function startCaptureForTab({ tabId, streamId, pageUrl = "" }) {
 async function stopCaptureForTab(tabId) {
   const id = Number(tabId);
   const state = tabStates.get(id);
+  // 无条件先通知 offscreen 停止（幂等，没在跑也无害）：
+  // SW 休眠后 captureTabId 内存丢失、GET_STATE 返回 idle、tabStates 可能无此记录，
+  // 若依赖 state 存在才发 CAPTURE_STOP，会出现"点停止但采集还在跑"。
+  try {
+    await chrome.runtime.sendMessage({ type: "CAPTURE_STOP" });
+  } catch {
+    // offscreen 未就绪时忽略
+  }
   if (!state) return { ok: true, state: publicState(state) };
   if (state.captureStarted) {
     await stopCapture(state);
@@ -483,14 +491,6 @@ async function stopCaptureForTab(tabId) {
     state.captureNeedsGesture = false;
     await pushState(state);
   } else {
-    // captureStarted 为 false（如 SW 休眠后从 session 恢复的状态固定为 false），
-    // 但 offscreen 采集页可能还在跑（它是独立文档，SW 休眠不影响它）——
-    // 必须无条件通知 offscreen 彻底停止，否则"点了停止还在采集"。
-    try {
-      await chrome.runtime.sendMessage({ type: "CAPTURE_STOP" });
-    } catch {
-      // 后台刚唤醒、offscreen 未就绪时忽略
-    }
     if (captureTabId === id) captureTabId = null;
     state.status = "idle";
     state.stageDetail = "";
@@ -808,12 +808,22 @@ function publicState(state) {
   };
 }
 
+// 追踪日志：按事件节流（同事件 2 秒内最多一次），避免每条字幕都发起一次
+// 网络请求；必须带 .catch，否则本地无服务时每次失败都会产生
+// unhandled promise rejection，污染 service worker。
+const lastTraceAt = {};
 function trace(tabId, event, extra = "") {
+  const key = `${tabId}:${event}`;
+  const now = Date.now();
+  if (now - (lastTraceAt[key] || 0) < 2_000) return;
+  lastTraceAt[key] = now;
   try {
     void fetch(`${SERVER_URL}/api/trace`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ tabId, event, extra })
+    }).catch(() => {
+      // 本地无追踪服务时静默失败
     });
   } catch {
     // 追踪日志失败不影响主流程
