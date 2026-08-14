@@ -782,13 +782,17 @@ function handleServerDraft(text) {
   // ② 词尾被换（公共前缀长、draft 不以 committedText 开头、draft 更长）→ revoke。
   const draftText = String(text || "").trim();
   if (committedText && lastEmittedUnitSeq && draftText && !draftText.startsWith(committedText)) {
-    const lcp = longestCommonPrefix(draftText, committedText);
-    const committedLen = codePoints(committedText).length;
-    const draftLen = codePoints(draftText).length;
-    const fullSwap = lcp < 3 && hasSharedWord(draftText, committedText);
-    const tailSwap = committedLen >= 8 && lcp >= 8 && draftLen > committedLen;
-    if (fullSwap || tailSwap) {
-      revokeCurrentSentence(`draft-swap new=${JSON.stringify(draftText.slice(0, 40))}`);
+    // 服务端草稿临时截短/回退（重识别中）：draft 是已提交文本的前缀时，
+    // 已上屏内容仍是正确前缀，绝不 revoke——否则会把已翻译的行连同译文一起删掉。
+    if (!committedText.startsWith(draftText)) {
+      const lcp = longestCommonPrefix(draftText, committedText);
+      const committedLen = codePoints(committedText).length;
+      const draftLen = codePoints(draftText).length;
+      const fullSwap = lcp < 3 && hasSharedWord(draftText, committedText);
+      const tailSwap = committedLen >= 8 && lcp >= 8 && draftLen > committedLen;
+      if (fullSwap || tailSwap) {
+        revokeCurrentSentence(`draft-swap new=${JSON.stringify(draftText.slice(0, 40))}`);
+      }
     }
   }
   const tail = updateDraft(text);

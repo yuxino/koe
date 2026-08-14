@@ -150,6 +150,39 @@ async function commitOnce(run) {
     );
     console.log("T4 长句不再切半句 PASS");
   }
+  {
+    // 场景：服务端草稿临时截短/回退（draft 是已提交文本的前缀）→ 不 revoke
+    // （日志 17:30:42 场景：已上屏 "...part of the Cash for Chunkers program."，
+    //  草稿回退成 "...to be pa"，旧逻辑误判词尾修正 → 把已翻译的行删掉）
+    const h = makeCtx();
+    const run = (code) => vm.runInContext(code, h.ctx);
+    await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope" }).catch(e => ({ok:false}))`);
+    await flush();
+    // 完整句上屏
+    run(`handleServerDraft("Are you ready? Yes? You have such a cute little accent. So you're ready to be part of the Cash for Chunkers program.")`);
+    await commitOnce(run);
+    await flush();
+    // 服务端草稿回退：draft 是已提交文本的前缀（截短）
+    run(`handleServerDraft("Are you ready? Yes? You have such a cute little accent. So you're ready to be pa")`);
+    await flush();
+    check(!h.sent.some((m) => m.type === "CAPTURE_REVOKE"), "草稿截短回退不 revoke（翻译不被删）");
+    console.log("T5 草稿截短回退不删翻译 PASS");
+  }
+  {
+    // 场景：真词尾修正（draft 比 committedText 长且词被换）仍 revoke
+    const h = makeCtx();
+    const run = (code) => vm.runInContext(code, h.ctx);
+    await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope" }).catch(e => ({ok:false}))`);
+    await flush();
+    run(`handleServerDraft("Wow, I can't believe her too.")`);
+    await commitOnce(run);
+    await flush();
+    // 真修正：tootties（draft 更长、词被换，不是截短）
+    run(`handleServerDraft("Wow, I can't believe her tootties are that big")`);
+    await flush();
+    check(h.sent.some((m) => m.type === "CAPTURE_REVOKE"), "真词尾修正仍 revoke");
+    console.log("T6 真修正仍 revoke PASS");
+  }
   console.log(fail === 0 ? "revoke 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
 })().catch((err) => { console.error(err); process.exit(1); });
