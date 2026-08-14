@@ -1,0 +1,49 @@
+:root {
+  --bg: #141a16;
+  --card: #1c241f;
+  --line: rgba(255, 248, 224, .12);
+  --text: #f3ecd6;
+  --muted: rgba(243, 236, 214, .55);
+  --accent: #cbdc77;
+  --danger: #ff7a6e;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  width: 280px;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.shell { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+
+.masthead { display: flex; align-items: center; gap: 10px; }
+.avatar { width: 34px; height: 34px; border-radius: 9px; }
+.titles { flex: 1; display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.titles h1 { font-size: 16px; }
+#version { font-size: 11px; color: var(--muted); }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: #8a938b; flex: none; }
+.dot.ok { background: #9ee17f; box-shadow: 0 0 0 3px rgba(158, 225, 127, .15); }
+.dot.busy { background: var(--accent); box-shadow: 0 0 0 3px rgba(203, 220, 119, .18); animation: pulse 1.2s ease-in-out infinite; }
+.dot.bad { background: var(--danger); box-shadow: 0 0 0 3px rgba(255, 122, 110, .15); }
+@keyframes pulse { 0%, 100% { opacity: .6; } 50% { opacity: 1; } }
+
+.start-button {
+  width: 100%;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #141a16;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 13px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.start-button:hover { filter: brightness(1.05); }
+.start-button.active { background: transparent; color: var(--accent); }
+.start-button:disabled { opacity: .55; cursor: wait; }
+
+.status { color: var(--muted); font-size: 12px; text-align: center; min-height: 18px; }
+.status.error { color: var(--danger); }

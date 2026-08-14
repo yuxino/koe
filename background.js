@@ -22,21 +22,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "koe-restore") void restoreStates();
 });
 
-// 点击工具栏图标 = Chrome 官方认可的授权手势（侧边栏里的点击不算）。
-// 一步完成：打开侧边栏 + 预取并暂存音频流授权 + 为当前标签页开启字幕。
-// 暂存的授权让之后面板里的「开启」按钮也能用，不再需要重复手势。
-chrome.action.onClicked.addListener(async (tab) => {
-  try {
-    await chrome.sidePanel.open({ windowId: tab.windowId });
-  } catch {
-    // 旧版 Chrome 不支持侧边栏时忽略
-  }
-  const state = tabStates.get(tab.id);
-  if (!state?.captureStarted) {
-    await stashStreamIdForTab(tab.id);
-    await ensureLiveCaptions({ tabId: tab.id, pageUrl: tab.url, forceReset: true });
-  }
-});
+// 点击工具栏图标现在打开弹窗（default_popup），弹窗里的按钮点击是
+// 本地实测唯一稳定有效的 tabCapture 授权手势；action.onClicked 不再触发，
+// 故入口只有：弹窗按钮、Alt+K 快捷键、右键菜单。
 
 // 右键菜单 = 另一个官方认可的授权手势，作为备用的点击式开启路径
 const CONTEXT_MENU_ID = "koe-capture-tab";
@@ -276,7 +264,7 @@ async function runCaptureAuthorization(state) {
         if (state.userStopped) return;
         state.captureNeedsGesture = true;
         state.status = "starting";
-        state.stageDetail = "点击 Koe 图标打开侧边栏（自动开启）或按 Alt+K";
+        state.stageDetail = "点击 Koe 图标（弹窗一键开启）或按 Alt+K";
         await pushState(state);
         return;
       }
@@ -579,7 +567,7 @@ async function restoreStates() {
       liveOnly: true,
       captureStarted: false,
       captureNeedsGesture: true,
-      stageDetail: "点击 Koe 图标打开侧边栏（自动开启）或按 Alt+K",
+      stageDetail: "点击 Koe 图标（弹窗一键开启）或按 Alt+K",
       startedAt: Date.now()
     });
   }

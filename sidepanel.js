@@ -325,7 +325,7 @@ async function startForTab() {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (/gesture|invocation|permission|user gesture/i.test(message)) {
-      elements.hint.textContent = "还没有暂存的音频授权：先点一次工具栏 Koe 图标（或按 Alt+K）。或把字幕模式切成麦克风，完全不需要手势。";
+      elements.hint.textContent = "需要先点一次工具栏 Koe 图标（弹窗里一键开启）或按 Alt+K 授权。也可以把字幕模式切成麦克风，完全不需要手势。";
     } else {
       elements.hint.textContent = `启动失败：${message}`;
     }

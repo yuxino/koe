@@ -54,7 +54,7 @@
       if (message.status === "live") {
         hideStatus();
       } else if (message.captureNeedsGesture) {
-        showStatus(message.stageDetail || "点击 Koe 图标打开侧边栏，开启实时字幕");
+        showStatus(message.stageDetail || "点击 Koe 图标（弹窗一键开启）或按 Alt+K，开启实时字幕");
       } else if (message.status === "error") {
         showStatus(message.stageDetail || "实时字幕已断开", true);
       } else if (message.stageDetail) {
