@@ -22,7 +22,7 @@ elements.startButton.addEventListener("click", () => {
   // 同步调用开面板：这次点击就是新的手势，必须在同一事件栈里发出
   fireAndForgetOpen();
   if (currentState.captureActive) void stop();
-  else void start();
+  else void startRecommended();
 });
 elements.openPanel.addEventListener("click", () => {
   fireAndForgetOpen();
@@ -39,7 +39,7 @@ async function init() {
   await refreshState();
   if (currentState.captureActive || currentState.status === "live") return; // 开完即关弹窗
   if (!opened) setStatus("侧边栏没开出来？点「打开字幕侧边栏」再试一次", true);
-  tryAutoStart();
+  void tryAutoStart();
 }
 
 function fireAndForgetOpen() {
@@ -90,19 +90,39 @@ async function refreshState() {
   render();
 }
 
-// 点图标打开弹窗时自动尝试开启一次（若后台已探明本页有正在播放的视频）；
-// 浏览器不认可这次手势时，按钮还在，点一下即可。
-function tryAutoStart() {
+// 点图标 = 全自动：自动选目标（本页在播用本页，否则跟随正在发声的标签页），
+// 自动授权、自动开启。只有实在没有声音来源时才让用户手动点。
+async function tryAutoStart() {
   if (autoStartTried) return;
   autoStartTried = true;
   if (!activeTab?.id) return;
   if (currentState.captureActive || currentState.status === "live") return;
-  if (!currentState.captureNeedsGesture) return;
-  void start();
+  await startRecommended();
 }
 
-async function start() {
+// 先问后台“该捕获谁”，再开：当前页没在播时自动跟随正在发声的标签页
+async function startRecommended() {
   if (!activeTab?.id) {
+    setStatus("没有定位到标签页，请切到视频标签页再试", true);
+    return;
+  }
+  let targetId = activeTab.id;
+  try {
+    const rec = await chrome.runtime.sendMessage({ type: "RECOMMEND_TAB", tabId: activeTab.id });
+    if (rec?.tabId) targetId = rec.tabId;
+  } catch {
+    // 后台暂不可用：仍按当前页尝试
+  }
+  await start(targetId);
+}
+
+async function start(targetIdOverride) {
+  // 目标可能不是当前激活页（跟随其他标签页的声音）：就地取目标信息
+  let tab = activeTab;
+  if (targetIdOverride && targetIdOverride !== tab?.id) {
+    tab = (await chrome.tabs.get(targetIdOverride).catch(() => null)) || tab;
+  }
+  if (!tab?.id) {
     setStatus("没有定位到标签页，请切到视频标签页再试", true);
     return;
   }
@@ -110,12 +130,12 @@ async function start() {
   setStatus("正在开启…");
   try {
     // 弹窗按钮点击 = 有效授权手势
-    const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: activeTab.id });
+    const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
     const response = await chrome.runtime.sendMessage({
       type: "START_CAPTURE",
-      tabId: activeTab.id,
+      tabId: tab.id,
       streamId,
-      pageUrl: activeTab.url
+      pageUrl: tab.url
     });
     if (!response?.ok) throw new Error(response?.error || "无法启动实时字幕。");
     currentState = response.state || { status: "live" };

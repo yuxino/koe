@@ -116,6 +116,7 @@ async function handle(message, sender) {
   if (message.type === "CAPTURE_TRANSLATED") return forwardCaptureLines(message, "LIVE_TRANSLATED");
   if (message.type === "CAPTURE_ERROR") return handleCaptureError(message);
   if (message.type === "START_CAPTURE") return startCaptureForTab(message);
+  if (message.type === "RECOMMEND_TAB") return recommendCaptureTab(Number(message.tabId));
   if (message.type === "STOP_CAPTURE") return stopCaptureForTab(Number(message.tabId));
   if (message.type === "SET_TRANSLATE") return setTranslate(tabId, Boolean(message.translate));
   if (message.type === "SET_CAPTURE") return setCaptureConfig(tabId);
@@ -379,6 +380,24 @@ async function stopCapture(state) {
     // 侧边栏未打开时忽略
   }
   await pushState(state);
+}
+
+// 点图标时后台决定“该捕获谁”：本页有正在播放的主视频 → 本页；
+// 否则跟随正在发声的标签页（优先当前窗口）；都没有 → tabId: null（弹窗给提示）
+async function recommendCaptureTab(tabId) {
+  // 麦克风模式不需要页面里有视频，直接推荐当前页即可
+  const { koeCaptureSource } = await chrome.storage.local.get("koeCaptureSource").catch(() => ({}));
+  if (koeCaptureSource === "mic") return { ok: true, tabId: tabId || null };
+  if (tabId) {
+    const source = await discoverVideoSource(tabId).catch(() => null);
+    if (source?.playing && source.sourceUrl && !isAdSource(source.sourceUrl)) {
+      return { ok: true, tabId };
+    }
+  }
+  const [active] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+  const audible = await chrome.tabs.query({ audible: true }).catch(() => []);
+  const pick = audible.find((tab) => tab.id === active?.id) || audible[0] || null;
+  return { ok: true, tabId: pick?.id || null };
 }
 
 async function startCaptureForTab({ tabId, streamId, pageUrl = "" }) {
