@@ -542,13 +542,26 @@ function firstCompleteSentence(text) {
   return "";
 }
 
-// 长尾强制切块也有限长：最多 16 字，英文尽量在单词边界切。
+// 判断文本以哪种语言为主：英文长尾可以多攒一会儿再切（单词长、切碎了译文也碎）
+function textLanguage(text) {
+  const points = codePoints(text);
+  let cjk = 0;
+  let latin = 0;
+  for (const ch of points) {
+    if (/[\u4e00-\u9fff]/.test(ch)) cjk += 1;
+    else if (/[A-Za-z]/.test(ch)) latin += 1;
+  }
+  return latin >= cjk ? "latin" : "cjk";
+}
+
+// 长尾强制切块也有限长：中文最多 16 字、英文最多 28 字符，英文尽量在单词边界切。
 // 剩下的继续留在待提交区，由下一个计时器再切。
 function firstLongChunk(text) {
   const points = codePoints(text);
-  if (points.length <= 16) return text;
-  let end = 16;
-  for (let index = 16; index >= 8; index -= 1) {
+  const maxLen = textLanguage(text) === "latin" ? 28 : 16;
+  if (points.length <= maxLen) return text;
+  let end = maxLen;
+  for (let index = maxLen; index >= Math.floor(maxLen / 2); index -= 1) {
     if (/\s/.test(points[index - 1])) {
       end = index;
       break;
@@ -580,7 +593,9 @@ function commitPendingDraft({ forceLongIncomplete = false } = {}) {
   }
   if (forceLongIncomplete) {
     const longChunk = firstLongChunk(pending);
-    if (codePoints(longChunk).length >= LONG_INCOMPLETE_THRESHOLD) {
+    // 触发阈值也按语言：中文 12 字、英文 20 字符（英文单词长，12 字符太容易误切）
+    const minLen = textLanguage(pending) === "latin" ? 20 : LONG_INCOMPLETE_THRESHOLD;
+    if (codePoints(longChunk).length >= minLen) {
       commitChunk(longChunk, pending);
       return longChunk;
     }

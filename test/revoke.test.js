@@ -67,25 +67,25 @@ async function commitOnce(run) {
 
 (async () => {
   {
-    // 场景：草稿积累 → 上屏错块 → 服务端整体修正 → 按范围撤回
+    // 场景：草稿积累 → 上屏错块 → 服务端整体修正 → 按范围撤回全部已上屏块
     const h = makeCtx();
     const run = (code) => vm.runInContext(code, h.ctx);
     await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope" }).catch(e => ({ok:false}))`);
     await flush();
     run(`handleServerDraft("Okayur assets and make good on the payments")`);
-    await commitOnce(run); // 切出 "Okayur assets"
-    await commitOnce(run); // 切出 "and make good"
-    await commitOnce(run); // 切出 "on the payments"
+    await commitOnce(run); // 强切（英文阈值下可能是一整块）
+    await commitOnce(run); // 若还有剩余，再切
     await flush();
     const emitted = h.sent.filter((m) => m.type === "CAPTURE_LINES");
-    check(emitted.length === 3, `三块碎块上屏（实际 ${emitted.length}）`);
+    check(emitted.length >= 1, `错块上屏（实际 ${emitted.length} 块）`);
     // 服务端修正：新草稿与已提交内容无公共前缀
     run(`handleServerDraft("Identify your assets and make good on the payments that are late")`);
     await flush();
     const revoke = h.sent.find((m) => m.type === "CAPTURE_REVOKE");
     check(Boolean(revoke), "修正触发 CAPTURE_REVOKE");
     check(revoke && revoke.fromSeq === emitted[0].seq, `撤回范围从第一块开始（from=${revoke?.fromSeq}, 期望 ${emitted[0].seq}）`);
-    check(revoke && revoke.toSeq === emitted[2].seq, `撤回范围到最后一块（to=${revoke?.toSeq}, 期望 ${emitted[2].seq}）`);
+    const lastSeq = emitted[emitted.length - 1].seq;
+    check(revoke && revoke.toSeq === lastSeq, `撤回范围覆盖最后一块（to=${revoke?.toSeq}, 期望 ${lastSeq}）`);
     // 修正后的文本继续正常累积上屏
     run(`handleServerDraft("Identify your assets and make good on the payments that are late")`);
     await commitOnce(run);
@@ -124,6 +124,23 @@ async function commitOnce(run) {
       `草稿翻译只译首句（实际 ${JSON.stringify(translated?.lines[0]?.text)}）`
     );
     console.log("T3 翻译对齐首句 PASS");
+  }
+  {
+    // 场景：英文长句强切整体出块（不再切成 "Look, it is not" 这种半句）
+    const h = makeCtx();
+    const run = (code) => vm.runInContext(code, h.ctx);
+    await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope" }).catch(e => ({ok:false}))`);
+    await flush();
+    run(`handleServerDraft("Look, it is not my fault that my husband decided to have an affair")`);
+    await commitOnce(run); // 2s 强切
+    await flush();
+    const chunks = h.sent.filter((m) => m.type === "CAPTURE_LINES").map((m) => m.lines[0].text);
+    check(chunks.length >= 1, `英文长句强切出块（实际 ${chunks.length} 块）`);
+    check(
+      chunks.some((c) => c.includes("Look, it is not my fault")),
+      `英文长句按 20 字符阈值切出完整开头（实际 ${JSON.stringify(chunks)}）`
+    );
+    console.log("T4 英文碎块减少 PASS");
   }
   console.log(fail === 0 ? "revoke 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
