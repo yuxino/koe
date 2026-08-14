@@ -29,6 +29,22 @@ let emitSeq = 0;
 let stopping = false;
 let captureGeneration = 0;
 
+// ===== 诊断日志：每条都带时间戳打点到后台（存环形缓冲，侧边栏可一键复制）=====
+function logEvent(event, detail = "") {
+  const line = `${new Date().toISOString().slice(11, 23)} ${event} ${detail}`;
+  try {
+    console.log(`[koe] ${line}`);
+  } catch {
+    // 控制台不可用时忽略
+  }
+  try {
+    void chrome.runtime.sendMessage({ type: "KOE_LOG", event, detail: String(detail), ts: Date.now() })
+      .catch(() => undefined);
+  } catch {
+    // 消息发不出不影响识别
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message.type !== "string") return false;
   if (message.type === "CAPTURE_START") {
@@ -36,7 +52,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
     });
     return true;
-  }
+  }  
   if (message.type === "CAPTURE_STOP") {
     // 停止只停识别：音频流和监听器保持存活，再次开启直接复用，
     // 避免“Cannot capture a tab with an active stream”冲突
@@ -85,6 +101,7 @@ async function runStartCapture({ streamId, translate, apiKey, source, engine }) 
   captureEngine = ["webspeech", "vosk-zh", "vosk-en"].includes(engine) ? engine : "dashscope";
   captureApiKey = String(apiKey || "").trim();
   captureTranslate = Boolean(translate);
+  logEvent("start", `source=${captureSource} engine=${captureEngine} translate=${captureTranslate}`);
 
   if (captureEngine === "webspeech") {
     // Chrome 内置语音识别：仅支持麦克风来源；免 Key、免手势（一次麦克风授权后永久生效）
@@ -93,6 +110,7 @@ async function runStartCapture({ streamId, translate, apiKey, source, engine }) 
     }
     await acquireStreamForSource("");
     startWebSpeech();
+    logEvent("started", "mode=webspeech");
     return { ok: true, mode: "webspeech" };
   }
 
@@ -105,12 +123,15 @@ async function runStartCapture({ streamId, translate, apiKey, source, engine }) 
     if (captureEngine.startsWith("vosk")) {
       await startVosk();
       flushFrames();
+      logEvent("started", `mode=vosk ${captureEngine}`);
       return { ok: true, mode: "vosk" };
     }
     await connectRealtime();
     flushFrames();
+    logEvent("started", "mode=direct");
     return { ok: true, mode: "direct" };
   } catch (error) {
+    logEvent("start-failed", String(error?.message || error));
     await stopCapture();
     throw error;
   }
@@ -410,6 +431,7 @@ async function connectRealtime() {
         taskReady = true;
         retryCount = 0;
         clearRetryTimer();
+        logEvent("ws-task-started", `task=${taskId}`);
         resolve();
         return;
       }
@@ -417,11 +439,13 @@ async function connectRealtime() {
     };
     socket.onerror = () => {
       clearTimeout(timer);
+      logEvent("ws-error", "");
       reject(new Error("无法连接 DashScope 实时识别。"));
     };
     socket.onclose = () => {
       clearTimeout(timer);
       taskReady = false;
+      logEvent("ws-closed", `stopping=${stopping}`);
       if (!stopping && stream) scheduleAutoReconnect();
     };
   });
@@ -438,7 +462,10 @@ function handleDashScopeMessage(message) {
     // 句子切换由服务端 final 重置 + pendingText 前缀判断兜底。
     const text = String(sentence.text || "").trim();
     if (!text) return;
-    if (sentence.sentence_end) {
+    const isFinal = Boolean(sentence.sentence_end);
+    logEvent(isFinal ? "asr-final" : "asr-draft",
+      `text=${JSON.stringify(text.slice(0, 80))} len=${Array.from(text).length}`);
+    if (isFinal) {
       handleServerFinal(text);
     } else {
       handleServerDraft(text);
@@ -447,6 +474,7 @@ function handleDashScopeMessage(message) {
   }
   if (event === "task-failed") {
     const error = message?.header?.error_message || "DashScope 实时识别失败";
+    logEvent("ws-task-failed", String(error).slice(0, 120));
     // 可重试的失败交给自动重连静默处理，重连耗尽时才上报——
     // 否则后台会立刻结束会话，而这边重连成功后字幕就成了没人接收的孤儿。
     if (isRetryable(error)) {
@@ -655,6 +683,7 @@ function handleServerDraft(text) {
   if (tail === lastEmittedTail) return;
   lastEmittedTail = tail;
   const seq = ++emitSeq;
+  logEvent("draft-emit", `seq=${seq} tail=${JSON.stringify(tail.slice(0, 60))}`);
   chrome.runtime.sendMessage({
     type: "CAPTURE_PARTIAL",
     lines: [{ text: tail }],
@@ -670,12 +699,15 @@ function handleServerFinal(text) {
 
   // 对账：final 与最近上屏的块完全相同，或只是其中一部分 → 已经显示过，跳过
   if (lastUnit && (lastUnitTexts.includes(finalText) || lastUnit.startsWith(finalText))) {
+    logEvent("final-dup", `final=${JSON.stringify(finalText.slice(0, 60))} lastUnit=${JSON.stringify(lastUnit.slice(0, 60))}`);
     dropQueuedDrafts();
     resetDraftCommitter();
     return;
   }
 
   const outcome = finishSentence(finalText);
+  logEvent(`final-${outcome.kind}`,
+    `final=${JSON.stringify(finalText.slice(0, 60))} out=${JSON.stringify(String(outcome.text || "").slice(0, 60))} committedLen=${Array.from(committedText).length}`);
   if (outcome.kind === "replaced" || outcome.kind === "appended") {
     let unitText = outcome.kind === "replaced" ? outcome.text : finalText;
     // 权威整句只是把最后上屏的块往后延长：只补发新增部分，
@@ -700,6 +732,7 @@ function emitUnit(text) {
   lastUnitTexts.push(unitText);
   if (lastUnitTexts.length > 3) lastUnitTexts.shift();
   const seq = ++emitSeq;
+  logEvent("unit-emit", `seq=${seq} text=${JSON.stringify(unitText.slice(0, 80))}`);
   chrome.runtime.sendMessage({
     type: "CAPTURE_LINES",
     lines: [{ text: unitText }],
@@ -790,6 +823,7 @@ async function runTranslationWorker() {
 
     // 限流冷却期内直接跳过草稿（字幕块仍会重试，稳定行不能断）
     if (item.kind === "draft" && Date.now() < throttleCooldownUntil) {
+      logEvent("translation-skip", "cooldown draft");
       inFlightItem = null;
       continue;
     }
@@ -800,6 +834,7 @@ async function runTranslationWorker() {
 
     // 草稿已被更新的草稿取代：省掉这次请求
     if (item.kind === "draft" && item.superseded) {
+      logEvent("translation-skip", "superseded draft");
       inFlightItem = null;
       continue;
     }
@@ -813,6 +848,7 @@ async function runTranslationWorker() {
     }
 
     let parts = [];
+    logEvent("translation-request", `kind=${item.kind} batch=${batch.length} text=${JSON.stringify(batch[0].text.slice(0, 40))}`);
     try {
       if (batch.length === 1) {
         parts = [await translateWithRetry(batch[0].text)];
@@ -822,6 +858,7 @@ async function runTranslationWorker() {
       }
     } catch {
       parts = [];
+      logEvent("translation-failed", `kind=${item.kind} text=${JSON.stringify(batch[0].text.slice(0, 40))}`);
     }
     lastTranslationAt = Date.now();
     inFlightItem = null;
@@ -832,6 +869,7 @@ async function runTranslationWorker() {
     if (item.kind === "draft" && item.superseded) continue; // 翻译期间被取代：丢弃结果
     batch.forEach((entry, index) => {
       const translated = parts[index] || "";
+      if (translated) logEvent("translation-ok", `kind=${entry.kind} seq=${entry.seq} out=${JSON.stringify(translated.slice(0, 40))}`);
       if (entry.kind === "unit") {
         // 彻底失败才退原文，保证稳定行不断
         chrome.runtime.sendMessage({
@@ -863,6 +901,7 @@ async function translateWithRetry(text) {
       if (/429|throttl|rate.?limit|quota/i.test(message)) {
         // 触发限流：进入冷却期，退避后重试一次
         throttleCooldownUntil = Date.now() + TRANSLATE_COOLDOWN_MS;
+        logEvent("translation-429", `cool=${TRANSLATE_COOLDOWN_MS}ms attempt=${attempt}`);
         await sleep(1_200 + attempt * 1_500);
         continue;
       }
@@ -959,6 +998,7 @@ function flushFrames() {
 
 async function resetSocket() {
   if (!stream) throw new Error("capture_not_running");
+  logEvent("ws-reconnect", `retry=${retryCount}`);
   closeSocket(false);
   frameQueue = [];
   pcmPending = new Uint8Array(0);
@@ -972,6 +1012,7 @@ async function resetSocket() {
 function scheduleAutoReconnect() {
   if (stopping || retryTimer) return;
   if (retryCount >= MAX_AUTO_RETRIES) {
+    logEvent("ws-reconnect-exhausted", `retries=${retryCount}`);
     chrome.runtime.sendMessage({
       type: "CAPTURE_ERROR",
       error: "DashScope 重连失败，请检查网络或 API Key。"
@@ -980,6 +1021,7 @@ function scheduleAutoReconnect() {
   }
   retryCount += 1;
   const delayMs = Math.min(4_000, 300 * 2 ** Math.max(0, retryCount - 1));
+  logEvent("ws-reconnect-scheduled", `retry=${retryCount} delay=${delayMs}ms`);
   retryTimer = setTimeout(() => {
     retryTimer = null;
     void resetSocket().catch(() => scheduleAutoReconnect());
@@ -1058,9 +1100,11 @@ async function stopRecognitionOnly() {
   lastUnitTexts.length = 0;
   resetDraftCommitter();
   // stream 与 monitorAudio 保留，供下次开启复用
+  logEvent("stopped", "recognition-only (stream kept)");
 }
 
 async function stopCapture() {
+  logEvent("stop", "full (stream released)");
   stopping = true;
   captureGeneration += 1;
   clearRetryTimer();

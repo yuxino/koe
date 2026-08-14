@@ -117,6 +117,8 @@ async function handle(message, sender) {
   if (message.type === "CAPTURE_ERROR") return handleCaptureError(message);
   if (message.type === "START_CAPTURE") return startCaptureForTab(message);
   if (message.type === "RECOMMEND_TAB") return recommendCaptureTab(Number(message.tabId));
+  if (message.type === "KOE_LOG") return appendLog(message);
+  if (message.type === "GET_LOGS") return getLogs();
   if (message.type === "STOP_CAPTURE") return stopCaptureForTab(Number(message.tabId));
   if (message.type === "SET_TRANSLATE") return setTranslate(tabId, Boolean(message.translate));
   if (message.type === "SET_CAPTURE") return setCaptureConfig(tabId);
@@ -384,6 +386,31 @@ async function stopCapture(state) {
 
 // 点图标时后台决定“该捕获谁”：本页有正在播放的主视频 → 本页；
 // 否则跟随正在发声的标签页（优先当前窗口）；都没有 → tabId: null（弹窗给提示）
+// 环形日志缓冲：offscreen 打点 → KOE_LOG 存这里（最多 600 条），
+// 侧边栏「复制日志」→ GET_LOGS 取走。
+const LOG_LIMIT = 600;
+async function appendLog({ event, detail = "", ts = Date.now() }) {
+  try {
+    const { koeLogs = [] } = await chrome.storage.local.get("koeLogs");
+    const entry = { ts: Number(ts) || Date.now(), event: String(event || ""), detail: String(detail || "") };
+    koeLogs.push(entry);
+    while (koeLogs.length > LOG_LIMIT) koeLogs.shift();
+    await chrome.storage.local.set({ koeLogs });
+  } catch {
+    // 日志存储失败不影响主流程
+  }
+  return { ok: true };
+}
+
+async function getLogs() {
+  try {
+    const { koeLogs = [] } = await chrome.storage.local.get("koeLogs");
+    return { ok: true, logs: koeLogs };
+  } catch {
+    return { ok: true, logs: [] };
+  }
+}
+
 async function recommendCaptureTab(tabId) {
   // 麦克风模式不需要页面里有视频，直接推荐当前页即可
   const { koeCaptureSource } = await chrome.storage.local.get("koeCaptureSource").catch(() => ({}));

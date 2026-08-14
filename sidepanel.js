@@ -38,6 +38,7 @@ const elements = {
   feed: document.querySelector("#feed"),
   copyAll: document.querySelector("#copy-all"),
   clearFeed: document.querySelector("#clear-feed"),
+  copyLogs: document.querySelector("#copy-logs"),
   scrollBottom: document.querySelector("#scroll-bottom")
 };
 
@@ -70,6 +71,7 @@ elements.clearFeed.addEventListener("click", () => {
   resetFeed();
   elements.hint.textContent = "字幕记录已清空";
 });
+elements.copyLogs.addEventListener("click", () => void copyDiagnosticLogs());
 elements.scrollBottom.addEventListener("click", () => smoothScrollToBottom());
 elements.feed.addEventListener("scroll", () => {
   const nearBottom = elements.feed.scrollTop + elements.feed.clientHeight >= elements.feed.scrollHeight - 48;
@@ -570,5 +572,26 @@ async function copyTranscript() {
     elements.hint.textContent = `已复制 ${lines.length} 条字幕`;
   } catch {
     elements.hint.textContent = "复制失败：请手动选中字幕记录";
+  }
+}
+
+// 复制诊断日志：offscreen 全链路打点（识别/提交/翻译/重连），存于后台环形缓冲。
+// 字幕“乱七八糟”时把这段日志发给开发者即可定位是识别、断句还是翻译的问题。
+async function copyDiagnosticLogs() {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "GET_LOGS" });
+    const logs = Array.isArray(response?.logs) ? response.logs : [];
+    if (logs.length === 0) {
+      elements.hint.textContent = "还没有日志：先开一会字幕再复制";
+      return;
+    }
+    const content = logs
+      .map((entry) => `${new Date(Number(entry.ts) || 0).toISOString().slice(11, 23)} ${entry.event} ${entry.detail}`)
+      .join("\n");
+    const withHeader = `Koe 诊断日志（${logs.length} 条）\n${content}`;
+    await navigator.clipboard.writeText(withHeader);
+    elements.hint.textContent = `已复制 ${logs.length} 条日志`;
+  } catch {
+    elements.hint.textContent = "获取日志失败，请重试";
   }
 }
