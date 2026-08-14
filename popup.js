@@ -10,6 +10,7 @@ const elements = {
   version: document.querySelector("#version"),
   statusDot: document.querySelector("#status-dot"),
   startButton: document.querySelector("#start-button"),
+  openPanel: document.querySelector("#open-panel"),
   statusText: document.querySelector("#status-text")
 };
 
@@ -18,12 +19,41 @@ elements.startButton.addEventListener("click", () => {
   if (currentState.captureActive) void stop();
   else void start();
 });
+elements.openPanel.addEventListener("click", () => { void openPanelAndClose(); });
 
 async function init() {
   if (elements.version) elements.version.textContent = `v${chrome.runtime.getManifest().version}`;
   await refreshActiveTab();
   await refreshState();
+  // 字幕正在跑：点图标 = 查看侧边栏（恢复旧版“点图标开侧边栏”的行为）。
+  // 否则用户想看字幕记录时只能看到一个小弹窗，侧边栏永远叫不出来。
+  if (currentState.captureActive || currentState.status === "live") {
+    await openPanelAndClose();
+    return;
+  }
   tryAutoStart();
+}
+
+async function openPanelAndClose() {
+  // 不依赖 init 时序：按钮被点时就地取一次标签页，避免点击早于 init 完成时静默失效
+  let tab = activeTab;
+  if (!tab?.windowId) {
+    try {
+      const [window] = await chrome.windows.getLastFocused().catch(() => []);
+      [tab] = window?.id
+        ? await chrome.tabs.query({ active: true, windowId: window.id })
+        : await chrome.tabs.query({ active: true, currentWindow: true });
+    } catch {
+      return;
+    }
+  }
+  if (!tab?.windowId) return;
+  try {
+    await chrome.sidePanel.open({ windowId: tab.windowId });
+  } catch {
+    // 旧版浏览器没有侧边栏 API，忽略即可
+  }
+  window.close();
 }
 
 async function refreshActiveTab() {

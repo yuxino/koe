@@ -45,5 +45,18 @@ body {
 .start-button.active { background: transparent; color: var(--accent); }
 .start-button:disabled { opacity: .55; cursor: wait; }
 
+.secondary-button {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 10px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.secondary-button:hover { border-color: rgba(255, 248, 224, .3); }
+
 .status { color: var(--muted); font-size: 12px; text-align: center; min-height: 18px; }
 .status.error { color: var(--danger); }
