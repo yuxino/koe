@@ -28,6 +28,8 @@ let frameQueue = [];
 let emitSeq = 0;
 let stopping = false;
 let captureGeneration = 0;
+// 高频草稿日志节流：asr-draft 至少间隔 300ms 才记一条
+let lastDraftLogAt = 0;
 
 // ===== 诊断日志：每条都带时间戳打点到后台（存环形缓冲，侧边栏可一键复制）=====
 function logEvent(event, detail = "") {
@@ -467,11 +469,20 @@ function handleDashScopeMessage(message) {
     const text = String(sentence.text || "").trim();
     if (!text) return;
     const isFinal = Boolean(sentence.sentence_end);
-    logEvent(isFinal ? "asr-final" : "asr-draft",
-      `text=${JSON.stringify(text.slice(0, 80))} len=${Array.from(text).length}`);
     if (isFinal) {
+      logEvent("asr-final",
+        `text=${JSON.stringify(text.slice(0, 80))} len=${Array.from(text).length}`);
       handleServerFinal(text);
     } else {
+      // 草稿是高频消息（每 100~300ms 一条）：日志节流到 300ms 一条，
+      // 避免 KOE_LOG 写入风暴拖慢后台、字幕消息被排队（"卡住"）。
+      // 识别与草稿显示不受影响，只少写日志。
+      const now = Date.now();
+      if (now - lastDraftLogAt >= 300) {
+        lastDraftLogAt = now;
+        logEvent("asr-draft",
+          `text=${JSON.stringify(text.slice(0, 80))} len=${Array.from(text).length}`);
+      }
       handleServerDraft(text);
     }
     return;
