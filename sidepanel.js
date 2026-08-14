@@ -42,6 +42,7 @@ const elements = {
   copyAll: document.querySelector("#copy-all"),
   clearFeed: document.querySelector("#clear-feed"),
   copyLogs: document.querySelector("#copy-logs"),
+  clearLogs: document.querySelector("#clear-logs"),
   scrollBottom: document.querySelector("#scroll-bottom")
 };
 
@@ -75,6 +76,7 @@ elements.clearFeed.addEventListener("click", () => {
   elements.hint.textContent = "字幕记录已清空";
 });
 elements.copyLogs.addEventListener("click", () => void copyDiagnosticLogs());
+elements.clearLogs.addEventListener("click", () => void clearDiagnosticLogs());
 elements.scrollBottom.addEventListener("click", () => smoothScrollToBottom());
 elements.feed.addEventListener("scroll", () => {
   const nearBottom = elements.feed.scrollTop + elements.feed.clientHeight >= elements.feed.scrollHeight - 48;
@@ -249,7 +251,11 @@ async function refreshState() {
   // 字幕捕获是全局单会话：按钮状态跟随“正在捕获的会话”，
   // 而不是当前标签页——否则字幕在别的标签页跑着，这里却显示“开启”。
   const captureStateResponse = await chrome.runtime.sendMessage({ type: "GET_STATE" }).catch(() => null);
-  const captureState = captureStateResponse?.state || { status: "idle" };
+  // 后台休眠唤醒的瞬态：GET_STATE 失败时直接跳过本次刷新，
+  // 绝不能当成 idle——否则 activeJobId 被清空、下一轮轮询误判会话变化，
+  // resetFeed 把整个字幕记录清掉（切 tab 丢字幕的根因）。
+  if (!captureStateResponse) return;
+  const captureState = captureStateResponse.state || { status: "idle" };
   currentState = captureState;
   const jobId = String(captureState.jobId || "");
   if (captureState.captureActive && jobId && jobId !== activeJobId) {
@@ -682,5 +688,15 @@ async function copyDiagnosticLogs() {
     elements.hint.textContent = `已复制 ${logs.length} 条日志`;
   } catch {
     elements.hint.textContent = "获取日志失败，请重试";
+  }
+}
+
+// 清空诊断日志：日志太多/太旧时从零开始记录，下次复制只含新内容
+async function clearDiagnosticLogs() {
+  try {
+    await chrome.runtime.sendMessage({ type: "CLEAR_LOGS" });
+    elements.hint.textContent = "日志已清空";
+  } catch {
+    elements.hint.textContent = "清空日志失败，请重试";
   }
 }

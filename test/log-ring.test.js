@@ -66,6 +66,11 @@ function makeCtx() {
   const after = await vm.runInContext(`getLogs()`, ctx);
   check(after.logs.length === 600, `环形缓冲上限 600（实际 ${after.logs.length}）`);
   check(after.logs[0].event === "bulk-6", "最早 5 条被挤出，新日志在最前");
+  // 清空日志：CLEAR_LOGS 后 getLogs 返回空
+  await vm.runInContext(`clearLogs()`, ctx);
+  await settle();
+  const cleared = await vm.runInContext(`getLogs()`, ctx);
+  check(cleared.logs.length === 0, "清空日志后为空");
   console.log(fail === 0 ? "log-ring 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
 })().catch((err) => { console.error(err); process.exit(1); });

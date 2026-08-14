@@ -120,6 +120,7 @@ async function handle(message, sender) {
   if (message.type === "RECOMMEND_TAB") return recommendCaptureTab(Number(message.tabId));
   if (message.type === "KOE_LOG") return appendLog(message);
   if (message.type === "GET_LOGS") return getLogs();
+  if (message.type === "CLEAR_LOGS") return clearLogs();
   if (message.type === "STOP_CAPTURE") return stopCaptureForTab(Number(message.tabId));
   if (message.type === "SET_TRANSLATE") return setTranslate(tabId, Boolean(message.translate));
   if (message.type === "SET_CAPTURE") return setCaptureConfig(tabId);
@@ -416,6 +417,15 @@ async function getLogs() {
   } catch {
     return { ok: true, logs: [] };
   }
+}
+
+async function clearLogs() {
+  try {
+    await chrome.storage.local.set({ koeLogs: [] });
+  } catch {
+    // 清空失败不影响主流程
+  }
+  return { ok: true };
 }
 
 async function recommendCaptureTab(tabId) {
