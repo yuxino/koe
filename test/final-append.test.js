@@ -187,6 +187,31 @@ function makeOffCtx() {
       `只补发新增句（实际 ${JSON.stringify(afterLines)}）`);
     console.log("T5 final 正常延伸只补发新增 PASS");
   }
+  {
+    // T6：多句已上屏后，final 只差一个标点（program. → program?）→ 不 revoke、不重发
+    // （日志 17:12:59 场景：revoke from=19 to=33 把 11 句全撤原样重发 = "字幕刷两遍"）
+    const h = makeOffCtx();
+    const run = (code) => vm.runInContext(code, h.ctx);
+    await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope" }).catch(e => ({ok:false}))`);
+    await flush();
+    // 客户端逐句上屏（多句）
+    run(`handleServerDraft("Well, here we are. Are you ready? I am. Yes? Yes. You have such a cute little accent. Thank you. So you're ready to be part of the cash for chunkers program. Yep.")`);
+    await run(`(() => { let c; let guard = 0; while ((c = commitPendingDraft({ forceLongIncomplete: false })) && guard < 20) { emitCommittedUnit(c); guard += 1; } return guard; })()`);
+    await flush();
+    const before = h.sent.filter((m) => m.type === "CAPTURE_LINES").length;
+    check(before >= 3, `多句先上屏（实际 ${before} 块）`);
+    // final：同样内容，但 program. → program?（仅标点差异）
+    run(`handleServerFinal("Well, here we are. Are you ready? I am. Yes? Yes. You have such a cute little accent. Thank you. So you're ready to be part of the cash for chunkers program? Yep. Yes? Yes. You want that stimulus check?")`);
+    await flush();
+    const revoke = h.sent.find((m) => m.type === "CAPTURE_REVOKE");
+    check(!revoke, "仅标点差异不触发 revoke");
+    const lines = h.sent.filter((m) => m.type === "CAPTURE_LINES").map((m) => m.lines[0].text);
+    check(lines.filter((l) => l === "Well, here we are.").length === 1,
+      `已上屏句子不重发（实际 ${JSON.stringify(lines)}）`);
+    check(lines.some((l) => l.includes("You want that stimulus check")),
+      `只补发差异部分（实际 ${JSON.stringify(lines.slice(-3))}）`);
+    console.log("T6 仅标点差异不重发 PASS");
+  }
   console.log(fail === 0 ? "final-append/log-race 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
 })().catch((err) => { console.error(err); process.exit(1); });

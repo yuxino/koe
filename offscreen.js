@@ -814,12 +814,25 @@ function handleServerFinal(text) {
   // 权威 final 修正了草稿内容（如 "her too" → "her titties"）：
   // 前缀高度重合但词尾被换（final 不以 committedText 开头）时，
   // 撤回当前句的全部字幕块，按句切块重发权威版，错行不再残留。
-  // 注意：final 以 committedText 开头（正常延伸）绝不 revoke——
-  // 客户端已上屏的是 final 的正确前缀，finishSentence 会只补发新增部分，
-  // revoke 整句重发反而造成"一片字幕删了重来"的大闪。
+  // 注意两种绝不 revoke 的情况：
+  // ① final 以 committedText 开头（正常延伸）——finishSentence 只补发新增；
+  // ② 最后上屏块是 committedText 的尾部、且仍出现在 final 中（差异只在它之后，
+  //    如 program. → program?）——已上屏内容没错，revoke 重发只会造成"字幕刷两遍"，
+  //    只补发最后一块之后的新内容。
   if (committedText && lastEmittedUnitSeq && finalText) {
     const isExtension = finalText.startsWith(committedText);
     if (!isExtension) {
+      const lastUnitIsTail = Boolean(lastUnit && committedText.endsWith(lastUnit) && finalText.includes(lastUnit));
+      if (lastUnitIsTail) {
+        // 只补发最后上屏块之后的新内容（按句切块），不重发已上屏部分
+        const index = finalText.indexOf(lastUnit);
+        const tail = finalText.slice(index + lastUnit.length).trim();
+        if (isMeaningful(tail)) emitFinalSentences(tail);
+        logEvent("final-tail-only", `after=${JSON.stringify(tail.slice(0, 40))}`);
+        dropQueuedDrafts();
+        resetDraftCommitter();
+        return;
+      }
       const lcp = longestCommonPrefix(finalText, committedText);
       const committedLen = codePoints(committedText).length;
       const finalLen = codePoints(finalText).length;
@@ -878,7 +891,11 @@ function emitUnit(text) {
   const seq = ++emitSeq;
   lastEmittedUnitSeq = seq;
   lastEmittedUnitText = unitText;
-  if (!currentSentenceStartSeq) currentSentenceStartSeq = seq;
+  // 完整句（以句末标点结尾）上屏后，当前句子已闭合：
+  // 之后若再修正，只影响下一句，revoke 范围从下一块开始。
+  // 无句号的强切块（长句中间态）仍在同一句内，revoke 从本块覆盖。
+  const isComplete = SENTENCE_DELIMITERS.includes(unitText[unitText.length - 1]);
+  currentSentenceStartSeq = isComplete ? 0 : (currentSentenceStartSeq || seq);
   logEvent("unit-emit", `seq=${seq} text=${JSON.stringify(unitText.slice(0, 80))}`);
   chrome.runtime.sendMessage({
     type: "CAPTURE_LINES",
