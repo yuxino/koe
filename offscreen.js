@@ -495,10 +495,11 @@ const SENTENCE_DELIMITERS = ["。", "！", "？", ".", "!", "?", "\n"];
 const LONG_INCOMPLETE_THRESHOLD = 12;
 const STABLE_DRAFT_DELAY = 700;
 const MAXIMUM_WAIT_DELAY = 4_000;
-// 长句兜底切块阈值：没有完整句时（说话人不停顿、无句号），
-// 英文攒到 48 字符、中文 24 字才切大块，避免"半句字幕"碎上屏。
-const LONG_CHUNK_LATIN = 48;
-const LONG_CHUNK_CJK = 24;
+// 长句兜底切块阈值：服务端 final 发得很勤（每句都发），客户端强切只做极端兜底。
+// 只有真正超长且无句号的长句（英文 120 字符 / 中文 60 字）才切，
+// 否则无句号的草稿块也会上屏又撤回，造成"中间字幕闪一下"。
+const LONG_CHUNK_LATIN = 120;
+const LONG_CHUNK_CJK = 60;
 
 let latestDraft = "";
 let committedText = "";
