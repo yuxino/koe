@@ -211,7 +211,9 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
     await persistStates();
     await pushState(state);
   } else if (forceReset || (sourceKey && sourceKey !== normalizeSourceKey(state.sourceUrl || "")) || state.source !== sourceMode || state.engine !== engineMode) {
-    state.userStopped = false;
+    // 只有 forceReset（Alt+K / 右键 / 手动按钮 = 用户明确要开）才清除 userStopped；
+    // 视频源变化（广告/CDN 换源等）绝不能重置——用户明确停止后，换视频也不能悄悄重开字幕。
+    if (forceReset) state.userStopped = false;
     state.frameId = source.frameId || state.frameId;
     state.pageUrl = pageUrl || source.pageUrl;
     state.sourceUrl = source.sourceUrl || "";
@@ -253,6 +255,11 @@ async function ensureCaptureAuthorized(state) {
 }
 
 async function runCaptureAuthorization(state) {
+  // 用户主动停止后绝不自动重开：
+  // content.js 每 3 秒发 PAGE_READY → ensureLiveCaptions → 这里。
+  // 点"停止"按钮本身就是用户手势（5 秒窗口），getMediaStreamId 会成功，
+  // 不在这里拦的话停止后字幕会悄悄又开起来（"根本停不下来"）。
+  if (state.userStopped) return;
   // 麦克风来源不需要 tabCapture 授权手势：直接启动
   if (state.source === "mic") {
     await startCapture(state, "");
@@ -447,14 +454,16 @@ async function recommendCaptureTab(tabId) {
 async function startCaptureForTab({ tabId, streamId, pageUrl = "" }) {
   const id = Number(tabId);
   if (!Number.isInteger(id)) return { ok: false, error: "没有找到当前标签页。" };
+  // 手动开启（弹窗/侧边栏按钮）= 用户明确意图：无论有没有 streamId
+  // （mic 模式无 streamId）都重置 userStopped，让后续授权能走通
+  const preState = tabStates.get(id);
+  if (preState) preState.userStopped = false;
   if (streamId) {
     captureStreamIds.set(id, streamId);
-    const state = tabStates.get(id);
-    if (state) {
-      state.userStopped = false;
-      state.captureNeedsGesture = false;
-      state.status = "starting";
-      state.stageDetail = "正在连接 DashScope…";
+    if (preState) {
+      preState.captureNeedsGesture = false;
+      preState.status = "starting";
+      preState.stageDetail = "正在连接 DashScope…";
     }
   }
   await ensureLiveCaptions({ tabId: id, pageUrl });

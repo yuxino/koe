@@ -90,6 +90,23 @@ function makeCtx({ captureStarted = false } = {}) {
       `无状态记录也必须发 CAPTURE_STOP（实际 ${JSON.stringify(h.sent.slice(before).map((m) => m.type))}）`);
     console.log("T4 无状态记录停止仍发 CAPTURE_STOP PASS");
   }
+  {
+    // 场景：用户主动停止（userStopped=true）后，自动授权（PAGE_READY 每 3 秒触发）
+    // 必须被拦——否则点停止的手势窗口内 getMediaStreamId 会成功，字幕悄悄重开
+    const h = makeCtx({ captureStarted: false });
+    vm.runInContext(`tabStates.set(1, { tabId: 1, captureStarted: false, userStopped: true, source: "tab", engine: "dashscope", liveOnly: true });`, h.ctx);
+    h.ctx.chrome.tabCapture.getMediaStreamId = async () => { throw new Error("should not be called"); };
+    // 模拟 content PAGE_READY 触发的 ensureLiveCaptions（视频在播）
+    h.ctx.chrome.scripting.executeScript = async () => ([{
+      frameId: 0,
+      result: [{ sourceUrl: "https://cdn.example/v.mp4", playing: true, muted: false, durationMs: 10000, width: 640, height: 360 }]
+    }]);
+    const r = await vm.runInContext(`ensureLiveCaptions({ tabId: 1, pageUrl: "https://youtu.be/x" })`, h.ctx);
+    await flush();
+    check(!h.sent.some((m) => m.type === "CAPTURE_START"), "userStopped 后自动授权不开字幕");
+    check(Boolean(r?.ok), "ensureLiveCaptions 正常返回");
+    console.log("T5 停止后自动授权被拦 PASS");
+  }
   console.log(fail === 0 ? "stop-always 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
 })().catch((err) => { console.error(err); process.exit(1); });
