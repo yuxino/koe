@@ -54,9 +54,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }  
   if (message.type === "CAPTURE_STOP") {
-    // 停止只停识别：音频流和监听器保持存活，再次开启直接复用，
-    // 避免“Cannot capture a tab with an active stream”冲突
-    stopRecognitionOnly().then(() => sendResponse({ ok: true })).catch((error) => {
+    // 用户主动停止 = 彻底释放：停识别 + 释放音频流 + 停监听器。
+    // 之前为了"再开不冲突"只停识别、保留流，导致点停止后标签页仍显示在捕获、
+    // 声音仍走 Koe 通道，感觉"关不掉"。同类软件（Mimi/YouTube 实时字幕）
+    // 停止即彻底释放。重新开启时 popup 点击会拿新的流，不受影响。
+    stopCapture().then(() => sendResponse({ ok: true })).catch((error) => {
       sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
     });
     return true;

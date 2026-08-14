@@ -463,7 +463,8 @@ async function startCaptureForTab({ tabId, streamId, pageUrl = "" }) {
 }
 
 async function stopCaptureForTab(tabId) {
-  const state = tabStates.get(Number(tabId));
+  const id = Number(tabId);
+  const state = tabStates.get(id);
   if (!state) return { ok: true, state: publicState(state) };
   if (state.captureStarted) {
     await stopCapture(state);
@@ -472,9 +473,11 @@ async function stopCaptureForTab(tabId) {
     state.captureNeedsGesture = false;
     await pushState(state);
   }
+  // 主动停止 = 彻底释放：清掉缓存的音频流 id（流已释放，旧 id 不应残留）
+  captureStreamIds.delete(id);
   // 主动停止 = 不再打扰：本页不再弹“点击开启”，直到切换视频或手动再开
   state.userStopped = true;
-  return { ok: true, state: publicState(tabStates.get(Number(tabId))) };
+  return { ok: true, state: publicState(tabStates.get(id)) };
 }
 
 // 识别修正撤回：offscreen 发现服务端把已上屏的句子整体换词时，
