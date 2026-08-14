@@ -158,6 +158,21 @@ body {
   0%, 100% { border-left-color: rgba(203, 220, 119, .9); }
   50% { border-left-color: rgba(203, 220, 119, .25); }
 }
+/* 原文草稿：弱化显示，明确“这是正在识别的临时内容”，译文到达后会替换 */
+.row.draft[data-kind="raw"] {
+  color: rgba(243, 236, 214, .52);
+  font-size: 12.5px;
+  font-style: italic;
+  background: rgba(203, 220, 119, .04);
+}
+/* 识别修正过渡：服务端换词时草稿淡入，避免硬跳闪动 */
+.row.draft.correcting {
+  animation: draftCorrect .3s ease;
+}
+@keyframes draftCorrect {
+  from { opacity: .25; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 
 .scroll-bottom {
   position: absolute;

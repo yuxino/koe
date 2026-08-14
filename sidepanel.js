@@ -11,6 +11,9 @@ let captureEnded = false;
 let lastUnitSeq = 0;
 let lastDraftSeq = 0;
 let draftEl = null;
+// 草稿行当前形态："raw"（原文草稿，弱化显示）| "translated"（译文草稿）
+let draftKind = "";
+let draftTranslatedAt = 0;
 let lastStatusHint = "";
 const MAX_ROWS = 120;
 
@@ -103,10 +106,18 @@ chrome.runtime.onMessage.addListener((message) => {
       return false;
     }
     if (message.type === "LIVE_PARTIAL") {
-      if (translateOn()) return false;
-      if (!acceptDraftSeq(message.seq)) return false;
       const text = lastLine(message.lines)?.text;
-      if (text) setDraft(text);
+      if (!text) return false;
+      if (translateOn()) {
+        // 翻译模式：先显示弱化的原文草稿做即时反馈，译文到达后替换。
+        // 原文不占 seq 门控（译文同 seq 由 LIVE_TRANSLATED 负责），
+        // 译文展示期间原文不打扰（5 秒内不覆盖），避免原文/译文来回闪。
+        if (draftKind === "translated" && Date.now() - draftTranslatedAt < 5_000) return false;
+        setDraft(text, "raw");
+      } else {
+        if (!acceptDraftSeq(message.seq)) return false;
+        setDraft(text, "raw");
+      }
     } else if (message.type === "LIVE_SUBTITLES") {
       if (translateOn()) return false;
       if (!acceptUnitSeq(message.seq)) return false;
@@ -121,7 +132,7 @@ chrome.runtime.onMessage.addListener((message) => {
         promoteDraftOrAppend(text, message.seq);
       } else {
         if (!acceptDraftSeq(message.seq)) return false;
-        setDraft(text);
+        setDraft(text, "translated");
       }
     }
   } catch {
@@ -527,13 +538,14 @@ function revokeRow(fromSeq, toSeq) {
   }
 }
 
-function setDraft(text) {
+function setDraft(text, kind = "raw") {
   elements.feed.querySelectorAll(".placeholder").forEach((node) => node.remove());
   // 草稿只显示最新两段，避免草稿行越长越高
   const value = String(text);
   const parts = segments(value, subtitleMaxChars(value)).slice(-2);
   const joined = parts.join(isCjkText(value) ? "" : " ");
-  if (!draftEl || !draftEl.isConnected) {
+  const existed = Boolean(draftEl && draftEl.isConnected);
+  if (!existed) {
     draftEl = document.createElement("div");
     draftEl.className = "row draft";
     const timeEl = document.createElement("span");
@@ -545,7 +557,22 @@ function setDraft(text) {
     draftEl.appendChild(textEl);
     elements.feed.appendChild(draftEl);
   }
-  draftEl.querySelector(".text").textContent = joined;
+  const textEl = draftEl.querySelector(".text");
+  const oldText = textEl ? textEl.textContent : "";
+  // 识别修正过渡：新文本与旧文本互不包含（服务端整句换词）时，
+  // 先做一次淡入动画，避免草稿行“硬跳”造成的闪动感
+  if (existed && oldText && !value.includes(oldText) && !oldText.includes(value)) {
+    draftEl.classList.remove("correcting");
+    void draftEl.offsetWidth; // 强制重排，确保动画重新触发
+    draftEl.classList.add("correcting");
+    window.setTimeout(() => {
+      if (draftEl && draftEl.classList) draftEl.classList.remove("correcting");
+    }, 320);
+  }
+  draftEl.dataset.kind = kind;
+  draftKind = kind;
+  if (kind === "translated") draftTranslatedAt = Date.now();
+  if (textEl) textEl.textContent = joined;
   smoothScrollToBottom();
 }
 
@@ -554,6 +581,8 @@ function clearDraft() {
     draftEl.remove();
     draftEl = null;
   }
+  draftKind = "";
+  draftTranslatedAt = 0;
 }
 
 // 字幕块提交时把草稿行原地“转正”：同一句话在记录里只出现一次，
@@ -567,6 +596,8 @@ function promoteDraftOrAppend(text, seq = "") {
     const textEl = draftEl.querySelector(".text");
     if (textEl) textEl.textContent = value;
     draftEl = null;
+    draftKind = "";
+    draftTranslatedAt = 0;
     smoothScrollToBottom();
     return;
   }
