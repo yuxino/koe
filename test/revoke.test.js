@@ -169,7 +169,8 @@ async function commitOnce(run) {
     console.log("T5 草稿截短回退不删翻译 PASS");
   }
   {
-    // 场景：真词尾修正（draft 比 committedText 长且词被换）仍 revoke
+    // 场景：真词尾修正（her too → her titties）——草稿阶段不 revoke（避免覆盖字幕），
+    // final 权威到达时 revoke 重发
     const h = makeCtx();
     const run = (code) => vm.runInContext(code, h.ctx);
     await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope" }).catch(e => ({ok:false}))`);
@@ -177,11 +178,15 @@ async function commitOnce(run) {
     run(`handleServerDraft("Wow, I can't believe her too.")`);
     await commitOnce(run);
     await flush();
-    // 真修正：tootties（draft 更长、词被换，不是截短）
+    // 草稿阶段词尾震荡（tootties）→ 不 revoke（不删已上屏行）
     run(`handleServerDraft("Wow, I can't believe her tootties are that big")`);
     await flush();
-    check(h.sent.some((m) => m.type === "CAPTURE_REVOKE"), "真词尾修正仍 revoke");
-    console.log("T6 真修正仍 revoke PASS");
+    check(!h.sent.some((m) => m.type === "CAPTURE_REVOKE"), "草稿阶段词尾震荡不 revoke（字幕不被覆盖）");
+    // final 权威修正 → revoke 重发
+    run(`handleServerFinal("Wow, I can't believe her titties are that big.")`);
+    await flush();
+    check(h.sent.some((m) => m.type === "CAPTURE_REVOKE"), "final 权威修正仍 revoke");
+    console.log("T6 词尾修正推迟到 final 阶段 PASS");
   }
   console.log(fail === 0 ? "revoke 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);

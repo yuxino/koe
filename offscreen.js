@@ -776,21 +776,19 @@ function hasSharedWord(left, right) {
 }
 
 function handleServerDraft(text) {
-  // 识别修正检测：服务端把已上屏的内容换词/换尾时（如 "Okayur assets" → "Identify your assets"、
-  // "levitateght" → "levitate"），撤回当前句的字幕块，让修正后的文本重新累积。
-  // 两种情况：① 整句换词（公共前缀极短，但保留尾词）→ revoke；
-  // ② 词尾被换（公共前缀长、draft 不以 committedText 开头、draft 更长）→ revoke。
+  // 识别修正检测：服务端把已上屏的**整句换词**时（如 "Okayur assets" → "Identify your assets"，
+  // 公共前缀极短但保留尾词），撤回当前句的字幕块，让修正后的文本重新累积。
+  // 注意：词尾微调（"All right." → "All right, there's..."、way → weight、perfectright → perfect）
+  // **绝不**在草稿阶段 revoke——服务端草稿在词尾震荡是常态，revoke 会把刚上屏的
+  // 行连同译文一起删掉（"一开始字幕一直覆盖"）。词尾真修正交给 final 权威阶段处理。
   const draftText = String(text || "").trim();
   if (committedText && lastEmittedUnitSeq && draftText && !draftText.startsWith(committedText)) {
     // 服务端草稿临时截短/回退（重识别中）：draft 是已提交文本的前缀时，
-    // 已上屏内容仍是正确前缀，绝不 revoke——否则会把已翻译的行连同译文一起删掉。
+    // 已上屏内容仍是正确前缀，绝不 revoke。
     if (!committedText.startsWith(draftText)) {
       const lcp = longestCommonPrefix(draftText, committedText);
-      const committedLen = codePoints(committedText).length;
-      const draftLen = codePoints(draftText).length;
       const fullSwap = lcp < 3 && hasSharedWord(draftText, committedText);
-      const tailSwap = committedLen >= 8 && lcp >= 8 && draftLen > committedLen;
-      if (fullSwap || tailSwap) {
+      if (fullSwap) {
         revokeCurrentSentence(`draft-swap new=${JSON.stringify(draftText.slice(0, 40))}`);
       }
     }

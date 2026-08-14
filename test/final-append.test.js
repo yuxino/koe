@@ -129,14 +129,15 @@ function makeOffCtx() {
     run(`handleServerDraft("Wow, I can't believe her too.")`);
     await run(`(() => { const c = commitPendingDraft({ forceLongIncomplete: true }); if (c) emitCommittedUnit(c); return c; })()`);
     await flush();
-    // 草稿尾修正（tootties → titties）：draft 阶段应触发 revoke（词尾修正）
+    // 草稿阶段词尾震荡（tootties）→ 不 revoke（v1.6.23：草稿阶段不再因词尾微调删行）
     run(`handleServerDraft("Wow, I can't believe her tootties are that big")`);
     await flush();
-    const revoke = h.sent.find((m) => m.type === "CAPTURE_REVOKE");
-    check(Boolean(revoke), "词尾修正触发 CAPTURE_REVOKE");
-    // 服务端 final 权威版到达 → 切块上屏
+    check(!h.sent.some((m) => m.type === "CAPTURE_REVOKE"), "草稿阶段词尾震荡不 revoke");
+    // 服务端 final 权威版到达 → final-fix revoke + 切块上屏
     run(`handleServerFinal("Wow, I can't believe her titties are that big.")`);
     await flush();
+    const revoke = h.sent.find((m) => m.type === "CAPTURE_REVOKE");
+    check(Boolean(revoke), "final 权威修正触发 CAPTURE_REVOKE");
     const lines = h.sent.filter((m) => m.type === "CAPTURE_LINES").map((m) => m.lines[0].text);
     check(lines.some((l) => l === "Wow, I can't believe her titties are that big."),
       `权威修正版重新上屏（实际 ${JSON.stringify(lines)}）`);
