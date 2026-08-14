@@ -442,10 +442,12 @@ async function connectRealtime() {
       logEvent("ws-error", "");
       reject(new Error("无法连接 DashScope 实时识别。"));
     };
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       clearTimeout(timer);
       taskReady = false;
-      logEvent("ws-closed", `stopping=${stopping}`);
+      // close code 能区分断连原因：1000/1001 = 服务端/主动关闭，1006 = 网络断，
+      // 4000+ = 服务端业务错误（如认证失败、配额）
+      logEvent("ws-closed", `code=${event?.code ?? "?"} reason=${JSON.stringify(String(event?.reason || "").slice(0, 60))} stopping=${stopping}`);
       if (!stopping && stream) scheduleAutoReconnect();
     };
   });
