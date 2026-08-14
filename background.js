@@ -390,16 +390,22 @@ async function stopCapture(state) {
 // 环形日志缓冲：offscreen 打点 → KOE_LOG 存这里（最多 600 条），
 // 侧边栏「复制日志」→ GET_LOGS 取走。
 const LOG_LIMIT = 600;
-async function appendLog({ event, detail = "", ts = Date.now() }) {
-  try {
-    const { koeLogs = [] } = await chrome.storage.local.get("koeLogs");
-    const entry = { ts: Number(ts) || Date.now(), event: String(event || ""), detail: String(detail || "") };
-    koeLogs.push(entry);
-    while (koeLogs.length > LOG_LIMIT) koeLogs.shift();
-    await chrome.storage.local.set({ koeLogs });
-  } catch {
-    // 日志存储失败不影响主流程
-  }
+// 日志写入串行化：并发 appendLog 各自 get→set 会互相覆盖丢日志
+// （同一时刻多条 KOE_LOG 到达时，前一条被后一条的读取结果覆盖）。
+// 用 promise 链把写入排成队列，保证每条都落盘。
+let logWriteChain = Promise.resolve();
+function appendLog({ event, detail = "", ts = Date.now() }) {
+  const entry = { ts: Number(ts) || Date.now(), event: String(event || ""), detail: String(detail || "") };
+  logWriteChain = logWriteChain
+    .then(async () => {
+      const { koeLogs = [] } = await chrome.storage.local.get("koeLogs");
+      koeLogs.push(entry);
+      while (koeLogs.length > LOG_LIMIT) koeLogs.shift();
+      await chrome.storage.local.set({ koeLogs });
+    })
+    .catch(() => {
+      // 日志存储失败不影响主流程
+    });
   return { ok: true };
 }
 

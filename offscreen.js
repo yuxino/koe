@@ -772,9 +772,10 @@ function handleServerFinal(text) {
   logEvent(`final-${outcome.kind}`,
     `final=${JSON.stringify(finalText.slice(0, 60))} out=${JSON.stringify(String(outcome.text || "").slice(0, 60))} committedLen=${Array.from(committedText).length}`);
   if (outcome.kind === "replaced" || outcome.kind === "appended") {
-    let unitText = outcome.kind === "replaced" ? outcome.text : finalText;
-    // 权威整句只是把最后上屏的块往后延长：只补发新增部分，
-    // 否则整句会再上一次屏，看起来就像字幕在重复
+    // appended：final 只是把已上屏内容往后延长 → 只补发新增后缀，
+    // 否则整段（含已显示的部分）会再上一次屏，看起来就是字幕重复。
+    // replaced：整句换词 → 发替换后的文本；若权威整句以最后上屏块开头，也只补发新增部分。
+    let unitText = outcome.kind === "replaced" ? outcome.text : (outcome.text || finalText);
     if (outcome.kind === "replaced" && lastUnit && finalText.startsWith(lastUnit)) {
       unitText = finalText.slice(lastUnit.length).trim();
     }

@@ -45,18 +45,24 @@ function makeCtx() {
 
 (async () => {
   const ctx = makeCtx();
+  // appendLog 现在同步返回、内部 promise 链串行写：写入后等链落盘再断言
+  const settle = async () => {
+    for (let i = 0; i < 5; i += 1) await new Promise((r) => setImmediate(r));
+  };
   // 写入 5 条，取回应一致且有序
   for (let i = 1; i <= 5; i += 1) {
-    await vm.runInContext(`appendLog({ event: "evt-${i}", detail: "d-${i}", ts: ${1000 + i} })`, ctx);
+    vm.runInContext(`appendLog({ event: "evt-${i}", detail: "d-${i}", ts: ${1000 + i} })`, ctx);
   }
+  await settle();
   const got = await vm.runInContext(`getLogs()`, ctx);
   check(got.logs.length === 5, "5 条日志可取出");
   check(got.logs[0].event === "evt-1" && got.logs[4].event === "evt-5", "日志顺序保持");
   check(got.logs[2].detail === "d-3", "日志内容完整");
   // 超出上限截断：写 605 条 → 只剩 600 条，最早的 5 条被挤出
   for (let i = 6; i <= 605; i += 1) {
-    await vm.runInContext(`appendLog({ event: "bulk-${i}", detail: "", ts: ${i} })`, ctx);
+    vm.runInContext(`appendLog({ event: "bulk-${i}", detail: "", ts: ${i} })`, ctx);
   }
+  await settle();
   const after = await vm.runInContext(`getLogs()`, ctx);
   check(after.logs.length === 600, `环形缓冲上限 600（实际 ${after.logs.length}）`);
   check(after.logs[0].event === "bulk-6", "最早 5 条被挤出，新日志在最前");
