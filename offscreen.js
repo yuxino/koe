@@ -803,6 +803,30 @@ function revokeCurrentSentence(reason) {
   cancelDraftTimers();
 }
 
+// 词尾修正的精细化撤回：只撤"最后一块被替换"的那一块（如 "I am." → "Yes? Yes."），
+// 并把 committedText 截断到与最新草稿的公共前缀——已确认的前缀（"Are you ready? "）
+// 保留不动，待提交区从新草稿继续，避免整句重新提交造成字幕重复。
+function revokeLastUnitForDrift(draftText, lcp) {
+  if (!lastEmittedUnitSeq) return;
+  logEvent("revoke-tail", `from=${lastEmittedUnitSeq} to=${lastEmittedUnitSeq} old=${JSON.stringify(lastEmittedUnitText.slice(0, 40))} new=${JSON.stringify(draftText.slice(0, 40))}`);
+  chrome.runtime.sendMessage({
+    type: "CAPTURE_REVOKE",
+    fromSeq: lastEmittedUnitSeq,
+    toSeq: lastEmittedUnitSeq,
+    text: lastEmittedUnitText
+  }).catch(() => undefined);
+  lastUnitTexts.pop();
+  lastEmittedUnitSeq = 0;
+  lastEmittedUnitText = "";
+  currentSentenceStartSeq = 0;
+  // 截断到公共前缀（保留已确认部分），待提交区从 draft.slice(lcp) 继续
+  committedText = codePoints(committedText).slice(0, lcp).join("");
+  lastCommittedChunk = "";
+  lastCommitProvisional = false;
+  lastEmittedTail = "";
+  cancelDraftTimers();
+}
+
 // 判断两段文本是否共享词（同一句话的修正通常保留尾词，换句则无关）
 function hasSharedWord(left, right) {
   const words = new Set(String(left || "").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean));
@@ -811,11 +835,14 @@ function hasSharedWord(left, right) {
 }
 
 function handleServerDraft(text) {
-  // 识别修正检测：服务端把已上屏的**整句换词**时（如 "Okayur assets" → "Identify your assets"，
-  // 公共前缀极短但保留尾词），撤回当前句的字幕块，让修正后的文本重新累积。
-  // 注意：词尾微调（"All right." → "All right, there's..."、way → weight、perfectright → perfect）
-  // **绝不**在草稿阶段 revoke——服务端草稿在词尾震荡是常态，revoke 会把刚上屏的
-  // 行连同译文一起删掉（"一开始字幕一直覆盖"）。词尾真修正交给 final 权威阶段处理。
+  // 识别修正检测：
+  // ① 整句换词（"Okayur assets" → "Identify your assets"，公共前缀极短但保留尾词）
+  //    → 撤回整句重来；
+  // ② 词尾修正（"I am." → "Yes? Yes."，最后上屏块被替换、不再出现在新草稿中）
+  //    → 只撤回最后一块 + 把 committedText 对齐到公共前缀，保留已确认部分，
+  //      避免整句重新提交造成重复（日志里 "Are you ready?" 上屏 3 次的根因）。
+  // 词尾震荡（"All right." → "All right, there's..."，最后一块仍是新草稿的前缀）
+  // 不 revoke，等 final 权威修正。
   const draftText = String(text || "").trim();
   if (committedText && lastEmittedUnitSeq && draftText && !draftText.startsWith(committedText)) {
     // 服务端草稿临时截短/回退（重识别中）：draft 是已提交文本的前缀时，
@@ -825,6 +852,16 @@ function handleServerDraft(text) {
       const fullSwap = lcp < 3 && hasSharedWord(draftText, committedText);
       if (fullSwap) {
         revokeCurrentSentence(`draft-swap new=${JSON.stringify(draftText.slice(0, 40))}`);
+      } else if (lcp >= 4 && lastEmittedUnitText) {
+        // 词尾修正判定：最后上屏块的开头（去尾标点）不再出现在新草稿中
+        // （"I am." 被替换成 "Yes? Yes."）→ 该块已失效，撤回它并对齐前缀。
+        // 词尾震荡（"All right." → "All right, there's..."）时最后一块仍是前缀，
+        // 不会被误判。
+        const unitHead = codePoints(lastEmittedUnitText).slice(0, 10).join("")
+          .replace(/[\s\p{P}\p{S}]+$/u, "");
+        if (unitHead.length >= 3 && !draftText.includes(unitHead)) {
+          revokeLastUnitForDrift(draftText, lcp);
+        }
       }
     }
   }

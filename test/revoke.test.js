@@ -210,6 +210,29 @@ async function commitOnce(run) {
     check(afterCount === 1, `草稿回退不重复提交（实际 ${afterCount} 块）`);
     console.log("T7 草稿回退前缀不重复提交 PASS");
   }
+  {
+    // 场景：词尾修正（"I am." → "Yes? Yes."）→ 只撤最后一块，
+    // 已确认的 "Are you ready?" 不再重复提交（日志 08:14:31 场景：seq=7 与 seq=11 重复）
+    const h = makeCtx();
+    const run = (code) => vm.runInContext(code, h.ctx);
+    await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope" }).catch(e => ({ok:false}))`);
+    await flush();
+    // 逐句上屏 "Are you ready?" + "I am."
+    run(`handleServerDraft("Are you ready? I am. Yes. yes. He was such")`);
+    await run(`(() => { let c; let guard = 0; while ((c = commitPendingDraft({ forceLongIncomplete: false })) && guard < 10) { emitCommittedUnit(c); guard += 1; } return guard; })()`);
+    await flush();
+    // 服务端修正：I am → Yes? Yes（最后一块 "I am." 被替换）
+    run(`handleServerDraft("Are you ready? Yes? Yes. You have such a cute little accent")`);
+    await flush();
+    const revoke = h.sent.find((m) => m.type === "CAPTURE_REVOKE");
+    check(Boolean(revoke), "词尾修正触发 CAPTURE_REVOKE");
+    check(revoke && revoke.fromSeq === revoke.toSeq, `只撤最后一块（from=${revoke?.fromSeq} to=${revoke?.toSeq}）`);
+    // "Are you ready?" 只上屏一次，不再重复提交
+    const lines = h.sent.filter((m) => m.type === "CAPTURE_LINES").map((m) => m.lines[0].text);
+    check(lines.filter((l) => l.includes("Are you ready?")).length <= 2,
+      `Are you ready? 不重复提交（实际 ${JSON.stringify(lines)}）`);
+    console.log("T8 词尾修正只撤最后一块不重复 PASS");
+  }
   console.log(fail === 0 ? "revoke 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
 })().catch((err) => { console.error(err); process.exit(1); });
