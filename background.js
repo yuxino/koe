@@ -121,6 +121,7 @@ async function handle(message, sender) {
   if (message.type === "KOE_LOG") return appendLog(message);
   if (message.type === "GET_LOGS") return getLogs();
   if (message.type === "CLEAR_LOGS") return clearLogs();
+  if (message.type === "GET_TRANSCRIPT") return getTranscript();
   if (message.type === "STOP_CAPTURE") return stopCaptureForTab(Number(message.tabId));
   if (message.type === "SET_TRANSLATE") return setTranslate(tabId, Boolean(message.translate));
   if (message.type === "SET_CAPTURE") return setCaptureConfig(tabId);
@@ -332,6 +333,13 @@ async function startCapture(state, streamId) {
   }
   await pushState(state);
   await persistStates();
+  // 新会话开始：清空字幕记录（切 tab 后新面板实例拉取的是本次会话的历史）
+  transcriptCache = [];
+  try {
+    await chrome.storage.session.set({ koeTranscript: [] });
+  } catch {
+    // 存储不可用时忽略
+  }
   trace(state.tabId, "capture-started", `${response.mode || "pcm"} frame=${state.frameId || 0} src=${String(state.sourceUrl || "").slice(0, 60)}`);
 }
 
@@ -433,6 +441,30 @@ async function clearLogs() {
     // 清空失败不影响主流程
   }
   return { ok: true };
+}
+
+// ===== 字幕记录持久化（侧边栏每 tab 一实例，切 tab 时恢复历史）=====
+// 存 session（SW 休眠不丢、不落盘），最近 300 行。
+const TRANSCRIPT_LIMIT = 300;
+let transcriptWriteChain = Promise.resolve();
+let transcriptCache = [];
+function recordTranscript(entry) {
+  transcriptCache.push(entry);
+  while (transcriptCache.length > TRANSCRIPT_LIMIT) transcriptCache.shift();
+  transcriptWriteChain = transcriptWriteChain
+    .then(async () => {
+      await chrome.storage.session.set({ koeTranscript: transcriptCache });
+    })
+    .catch(() => {});
+}
+
+async function getTranscript() {
+  try {
+    const { koeTranscript = [] } = await chrome.storage.session.get("koeTranscript");
+    return { ok: true, rows: koeTranscript };
+  } catch {
+    return { ok: true, rows: [] };
+  }
 }
 
 async function recommendCaptureTab(tabId) {
@@ -543,6 +575,13 @@ async function forwardCaptureLines(message, type) {
   const state = tabId ? tabStates.get(tabId) : null;
   if (!state?.captureStarted || !state.jobId) return { ok: true, ignored: true };
   const lines = Array.isArray(message.lines) ? message.lines : [];
+  // 字幕记录持久化：侧边栏是"每 tab 一个实例"，切 tab 时面板重新加载、
+  // 历史清空。把最近的字幕行存到后台（session），新实例接管时拉回恢复。
+  if (type === "LIVE_SUBTITLES") {
+    recordTranscript({ seq: message.seq, text: lines[0]?.text });
+  } else if (type === "LIVE_TRANSLATED") {
+    recordTranscript({ seq: message.seq, translated: lines[0]?.translated });
+  }
   const payload = {
     type,
     jobId: state.jobId,

@@ -284,6 +284,9 @@ async function refreshState() {
     activeJobId = jobId;
     captureEnded = false;
     resetFeed();
+    // 侧边栏是"每 tab 一个实例"：切 tab 后新实例接管会话时，
+    // 从后台拉回本次会话已上屏的字幕历史（避免记录清空）
+    void restoreTranscript();
   } else if (!captureState.captureActive && activeJobId) {
     // 捕获已结束：停止接收该会话的字幕，保留已有历史
     captureEnded = true;
@@ -513,6 +516,30 @@ function resetFeed() {
   draftEl = null;
   lastUnitSeq = 0;
   lastDraftSeq = 0;
+}
+
+// 切 tab 后新面板实例接管会话：从后台拉回本次会话已上屏的字幕历史。
+// 只恢复 unit 行（原文或译文按当前翻译开关显示），草稿行不恢复。
+async function restoreTranscript() {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "GET_TRANSCRIPT" });
+    const rows = Array.isArray(response?.rows) ? response.rows : [];
+    if (rows.length === 0) return;
+    const translate = translateOn();
+    let maxSeq = 0;
+    for (const row of rows) {
+      const display = translate && row.translated ? row.translated : row.text;
+      if (!display) continue;
+      appendRow(display, "", row.seq);
+      const seq = Number(row.seq) || 0;
+      if (seq > maxSeq) maxSeq = seq;
+    }
+    // 恢复的历史已消耗这些 seq：门控前移，避免新字幕被 seq 门控误拒
+    if (maxSeq > lastUnitSeq) lastUnitSeq = maxSeq;
+    elements.feed.querySelectorAll(".placeholder").forEach((node) => node.remove());
+  } catch {
+    // 后台暂不可用时跳过恢复
+  }
 }
 
 function appendRow(text, className = "", seq = "") {
