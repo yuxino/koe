@@ -4,7 +4,27 @@
 const DASHSCOPE_WS = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/";
 const TRANSLATE_ENDPOINT = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation";
 const ASR_MODEL = "qwen-audio-3.0-asr-flash-streaming";
-const TRANSLATE_MODEL = "qwen-mt-turbo";
+const TRANSLATE_MODEL_DRAFT = "qwen-mt-flash";
+const TRANSLATE_MODEL_FINAL = "qwen-mt-plus";
+// 字幕风格提示（移植 Mimi）：让译文像影视剧字幕、保留语气词，更流畅自然
+const TRANSLATE_DOMAIN_HINT =
+  "Use concise, idiomatic Simplified Chinese, like subtitles for a TV drama, " +
+  "and keep every natural particle: 嗯、啊、呢、吧、嘛、哦、唉. " +
+  "Render English fillers (um, uh, oh, hmm, yeah) with their natural Chinese " +
+  "equivalents; never drop a meaningful filler.";
+// 翻译记忆：最近 9 条 源→译 对照，final 翻译时传入 tm_list，
+// 保持术语一致（如 "Cash for Chunkers program" 每次都译成同一个说法）
+const translationMemory = [];
+function rememberTranslation(source, target) {
+  for (let index = translationMemory.length - 1; index >= 0; index -= 1) {
+    if (translationMemory[index].source === source) translationMemory.splice(index, 1);
+  }
+  translationMemory.push({ source, target });
+  while (translationMemory.length > 9) translationMemory.shift();
+}
+function recentTranslationMemory() {
+  return translationMemory.slice(-5);
+}
 const PCM_FRAME_BYTES = 3_200; // 100 ms, 16 kHz mono int16
 const MAX_AUTO_RETRIES = 5;
 
@@ -948,10 +968,29 @@ let inFlightItem = null; // 正在处理的请求；草稿被更新的草稿取�
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function translateText(text) {
+async function translateText(text, { model = TRANSLATE_MODEL_FINAL, memory = [] } = {}) {
   if (isAlreadyChinese(text)) return text;
   const apiKey = captureApiKey;
   if (!apiKey) return "";
+  const body = {
+    model,
+    // 官方文档要求：qwen-mt 只接受一条 user 消息，不支持 system 消息——
+    // 之前靠 system 提示词指定目标语言是无效的，模型会自己猜方向，
+    // 译文语言完全随机。必须用 translation_options 显式指定目标语言。
+    input: {
+      messages: [{ role: "user", content: text }]
+    },
+    parameters: {
+      result_format: "message",
+      translation_options: {
+        source_lang: "auto",
+        target_lang: "Chinese",
+        // 字幕风格提示（domains）+ 翻译记忆（tm_list）：移植 Mimi 的参数
+        domains: TRANSLATE_DOMAIN_HINT,
+        tm_list: memory.length > 0 ? memory : undefined
+      }
+    }
+  };
   const response = await fetch(TRANSLATE_ENDPOINT, {
     method: "POST",
     headers: {
@@ -959,27 +998,12 @@ async function translateText(text) {
       "content-type": "application/json",
       "X-DashScope-SSE": "disable"
     },
-    body: JSON.stringify({
-      model: TRANSLATE_MODEL,
-      // 官方文档要求：qwen-mt 只接受一条 user 消息，不支持 system 消息——
-      // 之前靠 system 提示词指定目标语言是无效的，模型会自己猜方向，
-      // 译文语言完全随机。必须用 translation_options 显式指定目标语言。
-      input: {
-        messages: [{ role: "user", content: text }]
-      },
-      parameters: {
-        result_format: "message",
-        translation_options: {
-          source_lang: "auto",
-          target_lang: "Simplified Chinese"
-        }
-      }
-    })
+    body: JSON.stringify(body)
   });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body?.message || `translate_failed:${response.status}`);
+  const bodyJson = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(bodyJson?.message || `translate_failed:${response.status}`);
   return String(
-    body?.output?.choices?.[0]?.message?.content || body?.output?.text || ""
+    bodyJson?.output?.choices?.[0]?.message?.content || bodyJson?.output?.text || ""
   ).trim();
 }
 
@@ -1038,13 +1062,18 @@ async function runTranslationWorker() {
     }
 
     let parts = [];
-    logEvent("translation-request", `kind=${item.kind} batch=${batch.length} text=${JSON.stringify(batch[0].text.slice(0, 40))}`);
+    // 双模型分工（移植 Mimi）：草稿翻译用 flash（快、及时），
+    // 权威 final 翻译用 plus（准、流畅）+ 翻译记忆保持术语一致
+    const isDraft = item.kind === "draft";
+    const model = isDraft ? TRANSLATE_MODEL_DRAFT : TRANSLATE_MODEL_FINAL;
+    const memory = isDraft ? [] : recentTranslationMemory();
+    logEvent("translation-request", `kind=${item.kind} model=${model} batch=${batch.length} text=${JSON.stringify(batch[0].text.slice(0, 40))}`);
     try {
       if (batch.length === 1) {
-        parts = [await translateWithRetry(batch[0].text)];
+        parts = [await translateWithRetry(batch[0].text, { model, memory })];
       } else {
         const numbered = batch.map((entry, index) => `${index + 1}. ${entry.text}`).join("\n");
-        parts = parseNumberedTranslations(await translateWithRetry(numbered), batch.length);
+        parts = parseNumberedTranslations(await translateWithRetry(numbered, { model, memory }), batch.length);
       }
     } catch {
       parts = [];
@@ -1061,10 +1090,13 @@ async function runTranslationWorker() {
       const translated = parts[index] || "";
       if (translated) logEvent("translation-ok", `kind=${entry.kind} seq=${entry.seq} out=${JSON.stringify(translated.slice(0, 40))}`);
       if (entry.kind === "unit") {
+        if (translated) rememberTranslation(entry.text, translated);
         // 彻底失败才退原文，保证稳定行不断
         chrome.runtime.sendMessage({
           type: "CAPTURE_TRANSLATED",
-          lines: [{ text: entry.text, translated: translated || entry.text }],
+          // 失败时发空译文（translated=""），侧边栏会跳过该句——
+          // 不把原文混进译文历史（移植 Mimi：宁缺毋滥，避免"字幕变英文"）
+          lines: [{ text: entry.text, translated }],
           seq: entry.seq,
           unit: true
         }).catch(() => undefined);
@@ -1080,11 +1112,11 @@ async function runTranslationWorker() {
   translatorRunning = false;
 }
 
-async function translateWithRetry(text) {
+async function translateWithRetry(text, options = {}) {
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      return await translateText(text);
+      return await translateText(text, options);
     } catch (error) {
       lastError = error;
       const message = String(error?.message || error || "");
@@ -1098,6 +1130,12 @@ async function translateWithRetry(text) {
       if (attempt === 0 && /5\d\d|timeout|network|fetch/i.test(message)) {
         await sleep(700);
         continue;
+      }
+      // 新模型（qwen-mt-flash/plus）未开通时回退到 turbo，避免翻译全挂
+      if (attempt === 0 && options.model && options.model !== "qwen-mt-turbo"
+        && /model|not.?found|invalid|unsupported|permission/i.test(message)) {
+        logEvent("translation-model-fallback", `from=${options.model} to=turbo err=${String(message).slice(0, 60)}`);
+        return await translateText(text, { ...options, model: "qwen-mt-turbo" });
       }
       break;
     }
