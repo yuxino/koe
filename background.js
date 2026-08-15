@@ -59,23 +59,26 @@ async function stashStreamIdForTab(tabId) {
   }
 }
 
-// 快捷键 = 一次用户手势：优先捕获“正在发声”的标签页（含后台播放的视频），
-// 没有发声标签页时退回当前激活页；同时自动打开侧边栏，免去手动打开。
+// 快捷键 Alt+K：Chrome 的 command 事件不是可靠的 tabCapture 手势
+// （sidePanel.open / getMediaStreamId 会因"not a user gesture"失败——SO 77213045）。
+// 正确做法：打开弹窗——弹窗是验证过的手势源，打开后会自动为当前/发声标签页
+// 开启字幕并打开侧边栏，一条链路全部走通。
 chrome.commands.onCommand.addListener(async (command) => {
   if (command !== "capture-tab") return;
-  const [active] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
-  if (active?.windowId) {
-    try {
-      await chrome.sidePanel.open({ windowId: active.windowId });
-    } catch {
-      // 无手势或版本不支持时忽略
+  try {
+    await chrome.action.openPopup();
+  } catch {
+    // 老版本 Chrome 不支持 openPopup：退回原逻辑（尽力开侧边栏 + 提示）
+    const [active] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+    if (active?.windowId) {
+      try {
+        await chrome.sidePanel.open({ windowId: active.windowId });
+      } catch {
+        // 无手势或版本不支持时忽略
+      }
     }
   }
-  const tab = await pickCaptureTarget();
-  if (tab?.id) {
-    await stashStreamIdForTab(tab.id);
-    await ensureLiveCaptions({ tabId: tab.id, pageUrl: tab.url, forceReset: true });
-  }
+  // 弹窗打开后会自动开启字幕；这里不再直接尝试 getMediaStreamId（无手势必失败）
 });
 
 async function pickCaptureTarget() {
