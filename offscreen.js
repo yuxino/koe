@@ -374,7 +374,6 @@ function handleDashScopeMessage(message) {
 // - 服务端 final 到达时去重：已提交过的丢弃，延伸了本地块的用整句替换。
 // 翻译因此永远拿到的是短文本，不会等整段独白。
 const SENTENCE_DELIMITERS = ["。", "！", "？", ".", "!", "?", "\n"];
-const LONG_INCOMPLETE_THRESHOLD = 12;
 const STABLE_DRAFT_DELAY = 700;
 const MAXIMUM_WAIT_DELAY = 4_000;
 // 长句兜底切块阈值：服务端 final 发得很勤（每句都发），客户端强切只做极端兜底。
