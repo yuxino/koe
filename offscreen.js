@@ -613,6 +613,10 @@ function firstLongChunk(text) {
 function pendingText() {
   const draft = latestDraft.trim();
   if (!committedText) return draft;
+  // 服务端草稿回退到已提交内容的前缀（重新识别中）：此时草稿里没有新内容，
+  // 返回空——否则整句会被当新内容重新提交，同一句上屏两次（日志里
+  // seq=36 与 seq=56 都是 "I do, and I want to lose the weight."）。
+  if (committedText.startsWith(draft)) return "";
   if (!draft.startsWith(committedText)) return draft;
   // 去掉紧贴已提交内容的标点/空白，避免草稿和切块以 "." 之类开头
   return draft.slice(committedText.length).replace(/^[\s\p{P}\p{S}]+/u, "").trim();

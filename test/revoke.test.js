@@ -188,6 +188,28 @@ async function commitOnce(run) {
     check(h.sent.some((m) => m.type === "CAPTURE_REVOKE"), "final 权威修正仍 revoke");
     console.log("T6 词尾修正推迟到 final 阶段 PASS");
   }
+  {
+    // 场景：服务端草稿回退到已提交内容的前缀（重新识别中）→ 不重复提交整句
+    // （日志 08:11:02 场景：seq=36 与 seq=56 同一句 "I do, and I want to lose the weight."
+    //  上屏两次）
+    const h = makeCtx();
+    const run = (code) => vm.runInContext(code, h.ctx);
+    await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope" }).catch(e => ({ok:false}))`);
+    await flush();
+    // 完整句上屏
+    run(`handleServerDraft("I do, and I want to lose the weight. It's going to take a lot of work. I know. We just don't give it away.")`);
+    await commitOnce(run);
+    await flush();
+    const beforeCount = h.sent.filter((m) => m.type === "CAPTURE_LINES").length;
+    check(beforeCount === 1, `第一句先上屏（实际 ${beforeCount} 块）`);
+    // 草稿回退到已提交内容的前缀 → pendingText 为空，不重复提交
+    run(`handleServerDraft("I do, and I want to lose the weight.")`);
+    await commitOnce(run);
+    await flush();
+    const afterCount = h.sent.filter((m) => m.type === "CAPTURE_LINES").length;
+    check(afterCount === 1, `草稿回退不重复提交（实际 ${afterCount} 块）`);
+    console.log("T7 草稿回退前缀不重复提交 PASS");
+  }
   console.log(fail === 0 ? "revoke 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
 })().catch((err) => { console.error(err); process.exit(1); });
