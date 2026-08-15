@@ -26,7 +26,7 @@ No video downloads, ffmpeg, Node.js, or localhost helper.
 ## Setup
 
 1. Open `chrome://extensions` and enable **Developer mode**.
-2. Choose **Load unpacked** and select this repository (it bundles ~95MB of offline models, so loading takes a few seconds).
+2. Choose **Load unpacked** and select this repository (it bundles ~80MB of offline Vosk models; the first load takes a few seconds while the gzip archives are unpacked).
 3. Click the Koe toolbar icon; the popup starts captions for the current tab (or follows the audible tab) and opens the side panel. Pick a caption mode under Settings; microphone + offline model works with zero configuration.
 4. DashScope modes require a saved DashScope API Key.
 
