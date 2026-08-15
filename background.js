@@ -164,7 +164,7 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
     }
   }
   const sourceMode = captureSource === "mic" ? "mic" : "tab";
-  const engineMode = ["webspeech", "vosk-zh", "vosk-en"].includes(captureEngine) ? captureEngine : "dashscope";
+  const engineMode = ["webspeech"].includes(captureEngine) ? captureEngine : "dashscope";
 
   // 麦克风模式：不需要标签页授权手势，也不需要页面里有视频
   let source;
@@ -303,8 +303,8 @@ async function startCapture(state, streamId) {
   await ensureContentScript(state.tabId, state.frameId || 0);
   const { koeApiKey } = await chrome.storage.local.get("koeApiKey");
   const apiKey = String(koeApiKey || "").trim();
-  // 内置识别 / 本地离线模型不需要 DashScope Key；其余引擎需要
-  const keyless = state.engine === "webspeech" || String(state.engine || "").startsWith("vosk");
+  // 内置识别（Chrome 内置）不需要 DashScope Key；其余引擎需要
+  const keyless = state.engine === "webspeech";
   if (!keyless && !apiKey) {
     throw new Error("请先在 Koe 中保存 DashScope API Key。");
   }
@@ -647,7 +647,7 @@ async function setCaptureConfig(tabId) {
   try {
     const { koeCaptureSource, koeAsrEngine } = await chrome.storage.local.get(["koeCaptureSource", "koeAsrEngine"]);
     state.source = koeCaptureSource === "mic" ? "mic" : "tab";
-    state.engine = ["webspeech", "vosk-zh", "vosk-en"].includes(koeAsrEngine) ? koeAsrEngine : "dashscope";
+    state.engine = ["webspeech"].includes(koeAsrEngine) ? koeAsrEngine : "dashscope";
   } catch {
     // 读取失败时保持原配置
   }

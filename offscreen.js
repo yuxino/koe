@@ -39,7 +39,7 @@ let taskReady = false;
 let captureTranslate = false;
 let captureApiKey = "";
 let captureSource = "tab"; // "tab" | "mic"
-let captureEngine = "dashscope"; // "dashscope" | "webspeech" | "vosk-zh" | "vosk-en"
+let captureEngine = "dashscope"; // "dashscope" | "webspeech"
 let recognition = null;
 let retryCount = 0;
 let retryTimer = null;
@@ -89,12 +89,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     captureTranslate = Boolean(message.translate);
     if (message.source) captureSource = message.source === "mic" ? "mic" : "tab";
     if (message.engine) captureEngine = String(message.engine);
-    // 内置识别/本地模型不需要重连 WebSocket：重启识别会话即可
+    // 内置识别不需要重连 WebSocket：重启识别会话即可
     const restart = captureEngine === "webspeech"
       ? restartWebSpeech()
-      : captureEngine.startsWith("vosk")
-        ? restartVosk()
-        : resetSocket();
+      : resetSocket();
     restart.then(() => sendResponse({ ok: true })).catch((error) => {
       sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
     });
@@ -122,7 +120,7 @@ async function runStartCapture({ streamId, translate, apiKey, source, engine }) 
   await stopRecognitionOnly();
   stopping = false;
   captureSource = source === "mic" ? "mic" : "tab";
-  captureEngine = ["webspeech", "vosk-zh", "vosk-en"].includes(engine) ? engine : "dashscope";
+  captureEngine = ["webspeech"].includes(engine) ? engine : "dashscope";
   captureApiKey = String(apiKey || "").trim();
   captureTranslate = Boolean(translate);
   logEvent("start", `source=${captureSource} engine=${captureEngine} translate=${captureTranslate}`);
@@ -144,12 +142,6 @@ async function runStartCapture({ streamId, translate, apiKey, source, engine }) 
     // 先开始采集再连接识别会话：连接期间的音频先排队，连上后立即补发，开播头几秒不丢
     const started = await startPcmCapture();
     if (!started) throw new Error("浏览器不支持 16kHz 音频采集。");
-    if (captureEngine.startsWith("vosk")) {
-      await startVosk();
-      flushFrames();
-      logEvent("started", `mode=vosk ${captureEngine}`);
-      return { ok: true, mode: "vosk" };
-    }
     await connectRealtime();
     flushFrames();
     logEvent("started", "mode=direct");
@@ -271,151 +263,6 @@ async function restartWebSpeech() {
   startWebSpeech();
 }
 
-// ===== 本地离线识别（Vosk，WASM，运行在沙箱页里）=====
-// MV3 扩展页 CSP 不允许 eval/Function，而 Vosk 的 Emscripten 运行时需要它们；
-// 因此模型与识别器跑在 sandbox.html（manifest 里声明，自带宽松 CSP）的 iframe 中，
-// 离屏页通过 postMessage 驱动它：加载模型、创建识别器、喂 PCM、回收识别结果。
-// 结果复用断句器与翻译管线：partial 当草稿，final 当服务端 final。
-const VOSK_MODEL_FILES = {
-  "vosk-zh": "models/vosk-model-small-cn-0.22.tar.gz",
-  "vosk-en": "models/vosk-model-small-en-us-0.15.tar.gz"
-};
-
-let voskFrame = null;
-let voskReady = false;
-let voskRecognizerId = 0;
-let voskRecognizerIdCounter = 0;
-
-// 沙箱识别结果的常驻监听（partial → 草稿、final → 字幕块、错误 → 上报）
-window.addEventListener("message", (event) => {
-  if (event.source !== voskFrame?.contentWindow) return;
-  const message = event.data;
-  if (!message || typeof message.type !== "string") return;
-  if (message.type === "vosk-partial") {
-    const text = String(message.text || "").trim();
-    if (text) handleServerDraft(text);
-  } else if (message.type === "vosk-result") {
-    const text = String(message.text || "").trim();
-    if (text) handleServerFinal(text);
-  } else if (message.type === "vosk-error") {
-    chrome.runtime.sendMessage({
-      type: "CAPTURE_ERROR",
-      error: `本地识别错误：${message.error || "未知"}`
-    }).catch(() => undefined);
-  }
-});
-
-function postToVosk(message) {
-  if (!voskFrame) {
-    voskFrame = document.createElement("iframe");
-    voskFrame.style.display = "none";
-    voskFrame.src = chrome.runtime.getURL("sandbox.html");
-    document.body.appendChild(voskFrame);
-  }
-  voskFrame.contentWindow.postMessage(message, "*");
-}
-
-// 等待某个沙箱消息：加载模型最多等 60 秒（首次解压较慢），
-// 超时必须报错而不是永远挂起——之前按钮"像死了一样"就是因为挂起无超时。
-function waitForVosk(predicate, timeoutMs, timeoutMessage) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      window.removeEventListener("message", handler);
-      reject(new Error(timeoutMessage));
-    }, timeoutMs);
-    const handler = (event) => {
-      if (event.source !== voskFrame?.contentWindow) return;
-      const message = event.data;
-      if (!message || typeof message.type !== "string") return;
-      if (message.type === "vosk-error") {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        window.removeEventListener("message", handler);
-        reject(new Error(message.error || "本地识别初始化失败"));
-        return;
-      }
-      if (predicate(message)) {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        window.removeEventListener("message", handler);
-        resolve(message);
-      }
-    };
-    window.addEventListener("message", handler);
-  });
-}
-
-async function startVosk() {
-  const modelFile = VOSK_MODEL_FILES[captureEngine];
-  if (!modelFile) throw new Error("未知的本地模型配置。");
-  if (!voskReady) {
-    const modelUrl = chrome.runtime.getURL(modelFile);
-    postToVosk({ type: "load-model", url: modelUrl });
-    await waitForVosk(
-      (message) => message.type === "model-ready",
-      60_000,
-      "本地模型加载超时，请重试或改用其他模式。"
-    );
-    voskReady = true;
-  }
-  const recognizerId = ++voskRecognizerIdCounter;
-  postToVosk({ type: "create-recognizer", recognizerId, sampleRate: 16_000 });
-  await waitForVosk(
-    (message) => message.type === "recognizer-ready" && message.recognizerId === recognizerId,
-    20_000,
-    "本地识别器创建超时，请重试。"
-  );
-  voskRecognizerId = recognizerId;
-}
-
-async function restartVosk() {
-  stopVoskRecognizer();
-  resetDraftCommitter();
-  if (captureSource === "mic") {
-    await acquireStreamForSource("");
-  } else if (!stream) {
-    throw new Error("capture_not_running");
-  }
-  await startVosk();
-}
-
-function stopVoskRecognizer() {
-  if (voskRecognizerId && voskFrame) {
-    try {
-      voskFrame.contentWindow.postMessage(
-        { type: "remove-recognizer", recognizerId: voskRecognizerId },
-        "*"
-      );
-    } catch { /* ignore */ }
-  }
-  voskRecognizerId = 0;
-}
-
-function flushVoskFrames() {
-  if (!voskReady || !voskRecognizerId) return;
-  while (frameQueue.length > 0) {
-    const frame = frameQueue.shift();
-    const samples = new Float32Array(frame.length / 2);
-    const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
-    for (let index = 0; index < samples.length; index += 1) {
-      samples[index] = view.getInt16(index * 2, true) / 32768;
-    }
-    try {
-      voskFrame.contentWindow.postMessage(
-        { type: "audio-chunk", recognizerId: voskRecognizerId, data: samples },
-        "*"
-      );
-    } catch {
-      // 沙箱异常时停止投喂，等待错误路径处理
-      return;
-    }
-  }
-}
 
 async function connectRealtime() {
   taskReady = false;
@@ -1249,10 +1096,6 @@ function enqueueSamples(samples) {
 }
 
 function flushFrames() {
-  if (captureEngine.startsWith("vosk")) {
-    flushVoskFrames();
-    return;
-  }
   if (!taskReady || !socket || socket.readyState !== WebSocket.OPEN) return;
   while (frameQueue.length > 0) {
     const frame = frameQueue.shift();
@@ -1357,7 +1200,6 @@ async function stopRecognitionOnly() {
     } catch { /* ignore */ }
     recognition = null;
   }
-  stopVoskRecognizer();
   await stopPcmCapture();
   closeSocket(true);
   taskId = "";
@@ -1386,7 +1228,6 @@ async function stopCapture() {
     } catch { /* ignore */ }
     recognition = null;
   }
-  stopVoskRecognizer();
   await stopPcmCapture();
   releaseStream();
   closeSocket(true);

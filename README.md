@@ -13,8 +13,7 @@ No video downloads, ffmpeg, Node.js, or localhost helper.
 
 - **Side-panel subtitle feed** — confirmed sentences accumulate one per row; the live draft previews the current line; server finals are committed sentence by sentence, so subtitles grow only and never flash-reset.
 - **Dual-model Chinese translation** — draft lines are translated quickly with `qwen-mt-flash`, authoritative finals with `qwen-mt-plus`. Subtitling style hints and a rolling translation memory keep output natural and terminology consistent.
-- **Multiple caption modes** — tab audio or microphone × DashScope / fully-offline Vosk models (Chinese & English) / Chrome's built-in recognition (no API key).
-- **Offline recognition** — bundled Vosk models in `models/`; once loaded, subtitles keep working without any network, and microphone mode needs no gesture and no key.
+- **Multiple caption modes** — tab audio or microphone × DashScope / Chrome's built-in recognition (no API key).
 - **Recognition-correction handling** — when the server rewrites a line, only the affected row is replaced; duplicates are suppressed at the source.
 - **Automatic recovery** — reconnects after short WebSocket interruptions.
 - **Shortcut** — **Alt+K** (**Option+K** on macOS) starts captions and follows whichever tab is currently audible, including background playback.
@@ -26,8 +25,8 @@ No video downloads, ffmpeg, Node.js, or localhost helper.
 ## Setup
 
 1. Open `chrome://extensions` and enable **Developer mode**.
-2. Choose **Load unpacked** and select this repository (it bundles ~80MB of offline Vosk models; the first load takes a few seconds while the gzip archives are unpacked).
-3. Click the Koe toolbar icon; the popup starts captions for the current tab (or follows the audible tab) and opens the side panel. Pick a caption mode under Settings; microphone + offline model works with zero configuration.
+2. Choose **Load unpacked** and select this repository.
+3. Click the Koe toolbar icon; the popup starts captions for the current tab (or follows the audible tab) and opens the side panel. Pick a caption mode under Settings; microphone + Chrome built-in recognition works with zero configuration.
 4. DashScope modes require a saved DashScope API Key.
 
 The API Key is stored in `chrome.storage.local` on your browser profile and is only used for direct DashScope requests.
@@ -36,6 +35,6 @@ The API Key is stored in `chrome.storage.local` on your browser profile and is o
 
 The runtime is plain Manifest V3 JavaScript. Reload the extension from `chrome://extensions` after changing the source.
 
-Main pieces: `background.js` coordinates sessions, state, and the subtitle record; `offscreen.js` captures audio and runs recognition (DashScope / Chrome built-in / bundled Vosk models); `content.js` detects videos and shows status toasts; `popup.*` is the gesture-based start surface; `sidepanel.*` renders the side panel and scrolling subtitle feed; `vosk.js` / `vosk-worker.js` / `models/` power offline recognition.
+Main pieces: `background.js` coordinates sessions, state, and the subtitle record; `offscreen.js` captures audio and runs recognition (DashScope / Chrome built-in); `content.js` detects videos and shows status toasts; `popup.*` is the gesture-based start surface; `sidepanel.*` renders the side panel and scrolling subtitle feed.
 
 [MIT](LICENSE) © 2026 yuxino

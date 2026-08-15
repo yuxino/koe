@@ -23,8 +23,6 @@ const MAX_ROWS = 120;
 const CAPTURE_MODES = {
   "tab-dashscope": { source: "tab", engine: "dashscope" },
   "mic-dashscope": { source: "mic", engine: "dashscope" },
-  "mic-vosk-zh": { source: "mic", engine: "vosk-zh" },
-  "mic-vosk-en": { source: "mic", engine: "vosk-en" },
   "mic-webspeech": { source: "mic", engine: "webspeech" }
 };
 
@@ -160,7 +158,7 @@ async function initPrefs() {
   const { koeTranslate, koeApiKey, koeCaptureSource, koeAsrEngine } = await chrome.storage.local.get(["koeTranslate", "koeApiKey", "koeCaptureSource", "koeAsrEngine"]);
   elements.translateToggle.checked = koeTranslate !== undefined ? Boolean(koeTranslate) : true;
   const sourceValue = koeCaptureSource === "mic" ? "mic" : "tab";
-  const engineValue = ["webspeech", "vosk-zh", "vosk-en"].includes(koeAsrEngine) ? koeAsrEngine : "dashscope";
+  const engineValue = ["webspeech"].includes(koeAsrEngine) ? koeAsrEngine : "dashscope";
   const modeKey = Object.keys(CAPTURE_MODES)
     .find((key) => CAPTURE_MODES[key].source === sourceValue && CAPTURE_MODES[key].engine === engineValue)
     || "tab-dashscope";
@@ -345,7 +343,7 @@ async function startForTab() {
     const keyless = mode.engine !== "dashscope";
     if (!keyless && !apiKey) {
       elements.settings.open = true;
-      elements.hint.textContent = "② DashScope 模式需要 API Key；或把字幕模式切换为「本地离线」/「Chrome 内置」。";
+      elements.hint.textContent = "② DashScope 模式需要 API Key；或把字幕模式切换为「Chrome 内置」。";
       elements.apiKey.focus();
       return;
     }
