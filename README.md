@@ -15,6 +15,7 @@ No video downloads, ffmpeg, Node.js, or localhost helper.
 - **Media-timeline protection** — seeking, switching videos, or reconnecting recognition cannot replay stale captions or translations over the new scene.
 - **Optional subtitle history** — the side panel keeps confirmed lines, the current draft, and scroll-back history; recognition corrections replace only the affected row.
 - **Immediate streaming Chinese** — drafts and confirmed lines both use incremental `qwen-mt-flash`; the first Chinese chunk appears without a fixed wait, confirmed lines preempt stale drafts, and rolling translation memory improves the first visible result instead of correcting it after the scene has passed.
+- **Readable continuous speech** — long monologues split at natural pauses with hard two-line limits; burst results keep source and translation paired and give each confirmed line time to be read instead of flashing over one another.
 - **Multiple caption modes** — tab audio or microphone × DashScope / Chrome's built-in recognition (no API key).
 - **Recognition-correction handling** — when the server rewrites a line, only the affected row is replaced; duplicates are suppressed at the source.
 - **Low-latency audio path** — AudioWorklet capture and bounded weak-network buffering keep the feed current; short WebSocket interruptions reconnect automatically.

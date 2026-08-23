@@ -61,17 +61,19 @@ function makeOffCtx() {
     await flush();
     const before = h.sent.filter((m) => m.type === "CAPTURE_LINES").length;
     check(before === 1, `客户端块先上屏（实际 ${before} 块）`);
-    // 服务端 final 整段到达（含已上屏部分 + 更多）→ 按句切块，已上屏的跳过
+    // 服务端 final 整段到达（含已上屏部分 + 更多）→ 按字幕宽度切块，已上屏的跳过
     run(`handleServerFinal("Oh shit, she's coming. Yeah. Yeah. No, you wait, see you later. Okay. Okay. Bye.")`);
     await flush();
     const units = h.sent.filter((m) => m.type === "CAPTURE_LINES").map((m) => m.lines[0].text);
-    // 已上屏的 "Oh shit, she's coming." 不重复；其余按句切块逐条上屏
+    // 已上屏的 "Oh shit, she's coming." 不重复；相邻短句合并，避免同毫秒刷多块
     check(units.filter((u) => u.includes("Oh shit, she's coming")).length === 1,
       `已上屏部分不重复（实际 ${JSON.stringify(units)}）`);
-    check(units.some((u) => u === "Yeah."), "新增部分按句切块（Yeah.）");
-    check(units.some((u) => u.includes("see you later")), "新增部分包含后续句");
-    check(units.some((u) => u === "Bye."), "结尾句单独成块（Bye.）");
-    console.log("T1 final 按句切块 + 不重复 PASS");
+    const appended = units.slice(1).join(" ");
+    check(appended.includes("Yeah."), "新增部分保留短句（Yeah.）");
+    check(appended.includes("see you later"), "新增部分包含后续句");
+    check(appended.includes("Bye."), "结尾短句保留（Bye.）");
+    check(units.every((unit) => Array.from(unit).length <= 64), "final 每块不超过字幕宽度");
+    console.log("T1 final 字幕宽度切块 + 不重复 PASS");
   }
   {
     // T2：并发 appendLog 不丢日志
@@ -236,7 +238,7 @@ function makeOffCtx() {
     check(lines.filter((l) => l === "All right.").length === 1,
       `已上屏句子不重发（实际 ${JSON.stringify(lines)}）`);
     check(lines.filter((l) => l === "Two.").length === 1, "数字句不重发");
-    check(lines.some((l) => l === "Very nice.") && lines.some((l) => l === "Four."),
+    check(lines.some((l) => l.includes("Very nice.") && l.includes("Four.")),
       `只补发新增尾巴（实际 ${JSON.stringify(lines.slice(-4))}）`);
     console.log("T7 整体前缀延伸只补发尾巴 PASS");
   }

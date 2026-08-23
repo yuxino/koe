@@ -127,26 +127,26 @@ async function commitOnce(run) {
   }
   {
     // 场景：长句不再切半句（旧版 20 字符阈值会切出 "Look, it is not"），
-    // 只有真正超长（词边界 ≥48 字符）才切大块
+    // 达到 36 字符可翻译下限后，按词边界切成不超过 64 字符的字幕块
     const h = makeCtx();
     const run = (code) => vm.runInContext(code, h.ctx);
     await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope" }).catch(e => ({ok:false}))`);
     await flush();
-    // 21 字符短长句：< 48 → 不切（等 final）
+    // 21 字符短长句：< 36 → 不切（等 final）
     run(`handleServerDraft("Look, it is not my fault")`);
     await commitOnce(run);
     await flush();
     let chunks = h.sent.filter((m) => m.type === "CAPTURE_LINES").map((m) => m.lines[0].text);
     check(chunks.length === 0, `21 字符短长句不切半句（实际 ${JSON.stringify(chunks)}）`);
-    // 120 字符超长句：词边界 ≥48 → 切出大块（≥40 字符，不是半句）
+    // 129 字符超长句：按词边界切出 36–64 字符的大块
     run(`handleServerDraft("Look, it is not my fault that my husband decided to have an affair with our real estate agent who lives across the street from us")`);
     await commitOnce(run);
     await flush();
     chunks = h.sent.filter((m) => m.type === "CAPTURE_LINES").map((m) => m.lines[0].text);
     check(chunks.length >= 1, `超长句切出大块（实际 ${chunks.length} 块）`);
     check(
-      chunks.every((c) => Array.from(c).length >= 40),
-      `切出的是大块而非半句（实际 ${JSON.stringify(chunks.map((c) => Array.from(c).length))}）`
+      chunks.every((c) => Array.from(c).length >= 36 && Array.from(c).length <= 64),
+      `切出的是可读大块而非半句（实际 ${JSON.stringify(chunks.map((c) => Array.from(c).length))}）`
     );
     console.log("T4 长句不再切半句 PASS");
   }

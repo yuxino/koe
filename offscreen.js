@@ -484,20 +484,22 @@ function handleDashScopeMessage(message) {
   }
 }
 
-// ===== 客户端断句器（移植 Mimi 的 ASRDraftCommitter，Turbo 参数）=====
+// ===== 客户端断句器（移植 Mimi 的 ASRDraftCommitter，字幕阅读参数）=====
 // 服务端只提供“权威结果”，节奏由客户端掌握：
-// - 草稿稳定 500ms → 按句末标点结句，立即作为字幕块提交；
-// - 最长 2s 强制提交（长尾 ≥ 12 字也切），说话人一直不停顿也每 2s 出一块；
-// - 服务端 final 到达时去重：已提交过的丢弃，延伸了本地块的用整句替换。
-// 翻译因此永远拿到的是短文本，不会等整段独白。
+// - 草稿持续流式翻译，不人为等待；
+// - 完整句稳定 700ms 后提交，但单块仍受字幕宽度上限约束；
+// - 连续无停顿讲话最多等待 2.2s，达到可翻译的最小长度便在自然边界切块；
+// - 服务端 final 到达时去重，并用同一宽度策略切块。
 const SENTENCE_DELIMITERS = ["。", "！", "？", ".", "!", "?", "\n"];
+const PAUSE_DELIMITERS = new Set(["，", "、", ",", "；", ";", "：", ":", "—", "–", "-"]);
 const STABLE_DRAFT_DELAY = 700;
-const MAXIMUM_WAIT_DELAY = 4_000;
-// 长句兜底切块阈值：服务端 final 发得很勤（每句都发），客户端强切只做极端兜底。
-// 只有真正超长且无句号的长句（英文 120 字符 / 中文 60 字）才切，
-// 否则无句号的草稿块也会上屏又撤回，造成"中间字幕闪一下"。
-const LONG_CHUNK_LATIN = 120;
-const LONG_CHUNK_CJK = 60;
+const MAXIMUM_WAIT_DELAY = 2_200;
+// 64 个拉丁字符 / 28 个 CJK 字符约等于视频字幕的两行上限。
+// 最小值保证强切块仍有足够上下文，不把翻译切成三四个词的碎片。
+const SUBTITLE_LIMITS = Object.freeze({
+  latin: Object.freeze({ minimum: 36, maximum: 64 }),
+  cjk: Object.freeze({ minimum: 14, maximum: 28 })
+});
 
 let latestDraft = "";
 let committedText = "";
@@ -551,25 +553,39 @@ function textLanguage(text) {
   let cjk = 0;
   let latin = 0;
   for (const ch of points) {
-    if (/[\u4e00-\u9fff]/.test(ch)) cjk += 1;
+    if (/[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(ch)) cjk += 1;
     else if (/[A-Za-z]/.test(ch)) latin += 1;
   }
   return latin >= cjk ? "latin" : "cjk";
 }
 
-// 长尾强制切块也有限长：英文最多 48 字符、中文最多 24 字，英文尽量在单词边界切。
-// 剩下的继续留在待提交区，由下一个计时器再切。
+function subtitleLimits(text) {
+  return SUBTITLE_LIMITS[textLanguage(text)];
+}
+
+// 取第一块字幕宽度内的文本。优先在逗号/分号等停顿处切，其次在词边界切；
+// CJK 没有空格时直接按字数硬切。剩余文本留给下一块。
 function firstLongChunk(text) {
   const points = codePoints(text);
-  const maxLen = textLanguage(text) === "latin" ? LONG_CHUNK_LATIN : LONG_CHUNK_CJK;
-  if (points.length <= maxLen) return text;
-  let end = maxLen;
-  for (let index = maxLen; index >= Math.floor(maxLen / 2); index -= 1) {
-    if (/\s/.test(points[index - 1])) {
-      end = index;
+  const { minimum, maximum } = subtitleLimits(text);
+  if (points.length <= maximum) return String(text).trim();
+  const floor = Math.max(1, Math.min(minimum, Math.floor(maximum * 0.58)));
+  let end = -1;
+  for (let index = maximum - 1; index >= floor; index -= 1) {
+    if (PAUSE_DELIMITERS.has(points[index])) {
+      end = index + 1;
       break;
     }
   }
+  if (end < 0) {
+    for (let index = maximum; index >= floor; index -= 1) {
+      if (/\s/.test(points[index - 1])) {
+        end = index;
+        break;
+      }
+    }
+  }
+  if (end < 0) end = maximum;
   return points.slice(0, end).join("").trim();
 }
 
@@ -593,19 +609,18 @@ function updateDraft(text) {
 function commitPendingDraft({ forceLongIncomplete = false } = {}) {
   const pending = pendingText();
   if (!isMeaningful(pending)) return null;
-  // 一句一块：只提交第一个完整句，其余留待下一次计时器继续切
+  // 一次提交一个语义块。完整句超过字幕宽度时也在自然边界切，避免句号很晚
+  // 才出现时把整段独白作为一个 unit 上屏。
   const firstSentence = firstCompleteSentence(pending);
   if (isMeaningful(firstSentence)) {
-    commitChunk(firstSentence, pending);
-    return firstSentence;
+    const chunk = firstLongChunk(firstSentence);
+    commitChunk(chunk, pending);
+    return chunk;
   }
   if (forceLongIncomplete) {
     const longChunk = firstLongChunk(pending);
-    // 触发阈值也按语言：英文攒够 48 字符、中文 24 字才切，避免半句碎上屏。
-    // 词边界切不满阈值时（长单词把边界顶到 40-47），只要待提交总量达阈值也切——
-    // 否则超长句会一直卡在待提交区，字幕永远出不来。
-    const minLen = textLanguage(pending) === "latin" ? LONG_CHUNK_LATIN : LONG_CHUNK_CJK;
-    if (codePoints(longChunk).length >= minLen || codePoints(pending).length >= minLen) {
+    const { minimum } = subtitleLimits(pending);
+    if (codePoints(pending).length >= minimum) {
       commitChunk(longChunk, pending);
       return longChunk;
     }
@@ -686,11 +701,8 @@ function suffixOverlap(text, prefix) {
   return 0;
 }
 
-// 计时器采用 Mimi 的锚定方式：待提交文本出现时各创建一个计时器，
-// 后续草稿更新不重置它们（所以说话中途出现的句号，最迟 ~500ms 后就被提交）。
-// 与 Mimi 不同的是：稳定计时器不取消兜底计时器——连续不停顿的独白
-// 每 2s 仍会被强制切一块（≥12 字长尾，最多 16 字）。
-// 每次提交后若还有完整句在排队，就继续武装稳定计时器，一句一块按节奏出。
+// 计时器采用 Mimi 的锚定方式：待提交文本出现时各创建一个计时器，后续草稿更新
+// 不重置它们。稳定计时器不取消兜底计时器，连续独白也会按字幕块持续提交。
 function scheduleDraftTimers() {
   if (!stableTimer) {
     stableTimer = setTimeout(() => {
@@ -741,6 +753,38 @@ function splitSentences(text) {
   }
   const tail = points.slice(start).join("").trim();
   if (tail) result.push(tail);
+  return result;
+}
+
+// 权威 final 可能一次返回整段。先把超长句拆到字幕宽度内，再把相邻短句尽量
+// 合并到同一块：既没有超长字幕，也不会在同一毫秒连发多个本来放得下的小句。
+function splitSubtitleUnits(text) {
+  const bounded = [];
+  for (const sentence of splitSentences(text)) {
+    let remaining = String(sentence).trim();
+    while (isMeaningful(remaining)) {
+      const chunk = firstLongChunk(remaining);
+      if (!isMeaningful(chunk)) break;
+      bounded.push(chunk);
+      const consumed = codePoints(chunk).length;
+      remaining = codePoints(remaining).slice(consumed).join("").trim();
+    }
+  }
+
+  const result = [];
+  let current = "";
+  for (const chunk of bounded) {
+    const separator = current && textLanguage(`${current}${chunk}`) === "latin" ? " " : "";
+    const candidate = `${current}${separator}${chunk}`.trim();
+    const { maximum } = subtitleLimits(candidate);
+    if (current && codePoints(candidate).length > maximum) {
+      result.push(current);
+      current = chunk;
+    } else {
+      current = candidate;
+    }
+  }
+  if (isMeaningful(current)) result.push(current);
   return result;
 }
 
@@ -842,9 +886,9 @@ function handleServerDraft(text, timing = activeTiming) {
     seq
   }, timing).catch(() => undefined);
   if (captureTranslate) {
-    // 翻译只译“即将上屏的那一句”，与字幕块对齐——译整段待提交文本
-    // 会让译文比字幕多出后续内容，图文对不上。
-    const first = firstCompleteSentence(tail) || tail;
+    // 草稿仍然立即翻译，但输入也限制在下一块字幕宽度内：长独白不会把持续增长的
+    // 200 多字符反复送去翻译，首块更稳，且草稿译文与随后提交的 unit 对齐。
+    const first = firstLongChunk(firstCompleteSentence(tail) || tail);
     scheduleDraftTranslation(first, seq, timing);
   }
 }
@@ -921,13 +965,13 @@ function handleServerFinal(text, timing = activeTiming) {
   resetDraftCommitter();
 }
 
-// final 文本按句切块逐条上屏；已上屏过的块跳过（防重复）
+// final 文本按字幕宽度切块；已上屏过的块跳过（防重复）
 function emitFinalSentences(text, timing = activeTiming) {
-  const sentences = splitSentences(text);
-  for (const sentence of sentences) {
-    if (lastUnitTexts.includes(sentence)) continue;
-    if (!isMeaningful(sentence)) continue;
-    emitUnit(sentence, timing);
+  const units = splitSubtitleUnits(text);
+  for (const unit of units) {
+    if (lastUnitTexts.includes(unit)) continue;
+    if (!isMeaningful(unit)) continue;
+    emitUnit(unit, timing);
   }
 }
 

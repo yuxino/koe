@@ -41,6 +41,32 @@ function makeElement(tag = "div") {
 (async () => {
   const messageListeners = [];
   const documentListeners = {};
+  let now = 10_000;
+  let nextTimerId = 1;
+  const timers = new Map();
+  const setTimer = (callback, delay = 0) => {
+    const id = nextTimerId++;
+    timers.set(id, { callback, due: now + Number(delay || 0) });
+    return id;
+  };
+  const clearTimer = (id) => timers.delete(id);
+  const advance = (milliseconds) => {
+    const end = now + milliseconds;
+    while (true) {
+      const pending = [...timers.entries()]
+        .filter(([, timer]) => timer.due <= end)
+        .sort((left, right) => left[1].due - right[1].due)[0];
+      if (!pending) break;
+      const [id, timer] = pending;
+      timers.delete(id);
+      now = timer.due;
+      timer.callback();
+    }
+    now = end;
+  };
+  class FakeDate extends Date {
+    static now() { return now; }
+  }
   const root = makeElement("html");
   root.isConnected = true;
   root.clientWidth = 1280;
@@ -57,7 +83,7 @@ function makeElement(tag = "div") {
     addEventListener: (type, listener) => { documentListeners[type] = listener; }
   };
   const ctx = {
-    console, Date, JSON, String, Number, Boolean, Promise, Math, URL, Array,
+    console, Date: FakeDate, JSON, String, Number, Boolean, Promise, Math, URL, Array,
     location: { href: "https://example.test/watch" },
     history: { pushState() {}, replaceState() {} },
     HTMLVideoElement,
@@ -68,8 +94,8 @@ function makeElement(tag = "div") {
       innerHeight: 800,
       addEventListener() {},
       setInterval: () => 0,
-      setTimeout: () => 1,
-      clearTimeout() {}
+      setTimeout: setTimer,
+      clearTimeout: clearTimer
     },
     chrome: {
       runtime: {
@@ -94,6 +120,31 @@ function makeElement(tag = "div") {
   check(overlay.shadowRoot.querySelector(".translation").textContent === "", "stale epoch translation rejected");
   send({ type: "LIVE_TRANSLATED", jobId: "job-1", mediaEpoch: 3, seq: 1, unit: true, lines: [{ translated: "当前字幕" }] });
   check(overlay.shadowRoot.querySelector(".translation").textContent === "当前字幕", "current translation renders");
+
+  const longDraft = "This draft keeps growing while somebody speaks continuously and it should become a rolling readable viewport instead of filling the video with several lines of source text.";
+  send({ type: "LIVE_PARTIAL", jobId: "job-1", mediaEpoch: 3, seq: 2, lines: [{ text: longDraft }] });
+  check(
+    Array.from(overlay.shadowRoot.querySelector(".original").textContent).length <= 64,
+    "long source draft is fitted to the readable overlay viewport"
+  );
+
+  send({ type: "LIVE_SUBTITLES", jobId: "job-1", mediaEpoch: 3, seq: 3, unit: true, lines: [{ text: "Second final unit" }] });
+  check(
+    overlay.shadowRoot.querySelector(".original").textContent !== "Second final unit",
+    "an immediate second unit does not erase the visible unit"
+  );
+  send({ type: "LIVE_TRANSLATED", jobId: "job-1", mediaEpoch: 3, seq: 3, unit: true, lines: [{ translated: "第二条字幕" }] });
+  check(
+    overlay.shadowRoot.querySelector(".translation").textContent !== "第二条字幕",
+    "translation for a queued unit waits with its source"
+  );
+  advance(1_100);
+  check(overlay.shadowRoot.querySelector(".original").textContent === "Second final unit", "queued unit is promoted after the minimum reading interval");
+  check(overlay.shadowRoot.querySelector(".translation").textContent === "第二条字幕", "queued translation stays paired with its source");
+
+  advance(1_200);
+  send({ type: "LIVE_SUBTITLES", jobId: "job-1", mediaEpoch: 3, seq: 4, unit: true, lines: [{ text: "Normally timed unit" }] });
+  check(overlay.shadowRoot.querySelector(".original").textContent === "Normally timed unit", "normally timed units still render immediately");
 
   const fullscreenRoot = makeElement("fullscreen");
   document.fullscreenElement = fullscreenRoot;

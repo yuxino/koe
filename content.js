@@ -29,8 +29,15 @@
   let lastUnitSeq = 0;
   let finalOriginal = "";
   let draftOriginal = "";
-  let translatedText = "";
+  let finalTranslatedText = "";
+  let draftTranslatedText = "";
   let translatedSeq = 0;
+  let visibleUnitSeq = 0;
+  let visibleUnitShownAt = 0;
+  let unitAdvanceTimer = null;
+  const queuedUnits = [];
+  const pendingUnitTranslations = new Map();
+  const MINIMUM_UNIT_DISPLAY_MS = 1_000;
 
   try {
     chrome.runtime.onMessage.addListener((message) => {
@@ -182,7 +189,8 @@
     if (message.type === "LIVE_REVOKE") {
       const from = Number(message.fromSeq) || 0;
       const to = Number(message.toSeq) || from;
-      if ((lastUnitSeq >= from && lastUnitSeq <= to) || (translatedSeq >= from && translatedSeq <= to)) {
+      const queuedRevoked = queuedUnits.some((item) => item.seq >= from && item.seq <= to);
+      if ((visibleUnitSeq >= from && visibleUnitSeq <= to) || queuedRevoked || (translatedSeq >= from && translatedSeq <= to)) {
         clearOverlayText();
       }
       return;
@@ -194,24 +202,83 @@
       if (seq && seq < lastDraftSeq) return;
       lastDraftSeq = Math.max(lastDraftSeq, seq);
       draftOriginal = String(line.text || "").trim();
+      draftTranslatedText = "";
       showOverlay(3_600);
     } else if (message.type === "LIVE_SUBTITLES") {
       if (seq && seq < lastUnitSeq) return;
       lastUnitSeq = Math.max(lastUnitSeq, seq);
-      finalOriginal = String(line.text || "").trim();
-      draftOriginal = "";
-      if (translatedSeq < seq) translatedText = "";
-      showOverlay(5_200);
+      queueOrShowUnit({
+        seq,
+        original: String(line.text || "").trim(),
+        translated: pendingUnitTranslations.get(seq) || ""
+      });
+      pendingUnitTranslations.delete(seq);
     } else if (message.type === "LIVE_TRANSLATED") {
       const value = String(line.translated || "").trim();
       if (!value) return;
-      if (message.unit && seq < lastUnitSeq) return;
-      if (!message.unit && seq < lastDraftSeq) return;
       translatedSeq = Math.max(translatedSeq, seq);
-      translatedText = value;
-      showOverlay(message.unit ? 5_200 : 3_600);
+      if (message.unit) {
+        if (seq === visibleUnitSeq) {
+          finalTranslatedText = value;
+          if (!draftOriginal) showOverlay(5_200);
+        } else {
+          const queued = queuedUnits.find((item) => item.seq === seq);
+          if (queued) queued.translated = value;
+          else if (seq >= visibleUnitSeq) pendingUnitTranslations.set(seq, value);
+        }
+      } else {
+        if (seq < lastDraftSeq) return;
+        draftTranslatedText = value;
+        showOverlay(3_600);
+      }
     }
     renderOverlay();
+  }
+
+  function queueOrShowUnit(item) {
+    if (!item.original) return;
+    const elapsed = Date.now() - visibleUnitShownAt;
+    if (!visibleUnitSeq || elapsed >= MINIMUM_UNIT_DISPLAY_MS) {
+      showUnit(item);
+      return;
+    }
+    const existing = queuedUnits.find((queued) => queued.seq === item.seq);
+    if (existing) Object.assign(existing, item);
+    else queuedUnits.push(item);
+    scheduleQueuedUnit();
+  }
+
+  function showUnit(item) {
+    visibleUnitSeq = Number(item.seq) || visibleUnitSeq;
+    visibleUnitShownAt = Date.now();
+    finalOriginal = String(item.original || "").trim();
+    finalTranslatedText = String(item.translated || "").trim();
+    draftOriginal = "";
+    draftTranslatedText = "";
+    showOverlay(5_200);
+    renderOverlay();
+    scheduleQueuedUnit();
+  }
+
+  function scheduleQueuedUnit() {
+    if (unitAdvanceTimer) window.clearTimeout(unitAdvanceTimer);
+    unitAdvanceTimer = null;
+    if (queuedUnits.length === 0) return;
+    const delay = Math.max(0, MINIMUM_UNIT_DISPLAY_MS - (Date.now() - visibleUnitShownAt));
+    unitAdvanceTimer = window.setTimeout(() => {
+      unitAdvanceTimer = null;
+      const next = queuedUnits.shift();
+      if (next) showUnit(next);
+    }, delay);
+  }
+
+  function clearUnitQueue() {
+    if (unitAdvanceTimer) window.clearTimeout(unitAdvanceTimer);
+    unitAdvanceTimer = null;
+    queuedUnits.length = 0;
+    pendingUnitTranslations.clear();
+    visibleUnitSeq = 0;
+    visibleUnitShownAt = 0;
   }
 
   function acceptLiveMessage(message) {
@@ -284,8 +351,13 @@
           line-height: 1.28;
           text-shadow: 0 1px 2px #000, 0 0 12px rgba(0,0,0,.88);
           overflow-wrap: anywhere;
+          overflow: hidden;
         }
-        .line:not(:empty) { display: block; }
+        .line:not(:empty) {
+          display: -webkit-box;
+          -webkit-box-orient: vertical;
+          -webkit-line-clamp: 2;
+        }
         .translation {
           order: 2;
           font-size: calc(clamp(22px, 2.35vw, 36px) * var(--koe-scale));
@@ -374,10 +446,28 @@
   function renderOverlay() {
     if (!overlayOriginal || !overlayTranslation) return;
     const original = draftOriginal || finalOriginal;
-    overlayOriginal.textContent = original;
-    overlayTranslation.textContent = activeSession?.translate ? translatedText : "";
+    const translation = draftOriginal ? draftTranslatedText : finalTranslatedText;
+    overlayOriginal.textContent = fitOverlayText(original);
+    overlayTranslation.textContent = activeSession?.translate ? fitOverlayText(translation) : "";
     overlayOriginal.classList.toggle("solo", !overlayTranslation.textContent);
     positionOverlay();
+  }
+
+  function fitOverlayText(text) {
+    const value = String(text || "").trim();
+    const points = Array.from(value);
+    const isCjk = /[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(value);
+    const maximum = isCjk ? 28 : 64;
+    if (points.length <= maximum) return value;
+    let tail = points.slice(points.length - maximum);
+    const searchEnd = Math.min(tail.length - 1, Math.floor(maximum * 0.34));
+    for (let index = 0; index <= searchEnd; index += 1) {
+      if (/\s/.test(tail[index]) || /[，、,；;：:—–-]/.test(tail[index])) {
+        tail = tail.slice(index + 1);
+        break;
+      }
+    }
+    return tail.join("").trim();
   }
 
   function clearOverlayText() {
@@ -387,8 +477,10 @@
     lastUnitSeq = 0;
     finalOriginal = "";
     draftOriginal = "";
-    translatedText = "";
+    finalTranslatedText = "";
+    draftTranslatedText = "";
     translatedSeq = 0;
+    clearUnitQueue();
     if (overlayOriginal) overlayOriginal.textContent = "";
     if (overlayTranslation) overlayTranslation.textContent = "";
     overlayHost?.shadowRoot?.querySelector(".stage")?.classList.remove("visible");
