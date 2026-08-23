@@ -18,11 +18,9 @@
   let lastSeenSource = "";
   let lastSeenUrl = location.href;
   let lastPageReadyAt = 0;
-  let lastAckAt = 0;
 
   // 页面加载即通知后台；加载慢则每 3 秒重试（最多 10 次）
   safeSend({ type: "PAGE_READY" });
-  ack("ready", true);
   let pageReadyAttempts = 0;
   window.setInterval(() => {
     if (window.__koeLoaded !== CONTENT_VERSION) return; // 旧副本：停止工作
@@ -53,7 +51,7 @@
   function trackVideoSource() {
     if (window.__koeLoaded !== CONTENT_VERSION) return; // 旧副本：停止工作
     handleUrlChange();
-    const video = currentVideo();
+    const video = findVideo();
     const source = video ? (video.currentSrc || video.src || "") : "";
     if (source && source !== lastSeenSource) {
       lastSeenSource = source;
@@ -87,17 +85,6 @@
   wrapHistory("pushState");
   wrapHistory("replaceState");
   window.addEventListener("popstate", handleUrlChange);
-
-  function ack(stage, force = false) {
-    const now = Date.now();
-    if (!force && now - lastAckAt < 3_000) return;
-    lastAckAt = now;
-    safeSend({ type: "CONTENT_ACK", stage });
-  }
-
-  function currentVideo() {
-    return findVideo();
-  }
 
   function findVideo() {
     const videos = [...document.querySelectorAll("video")];

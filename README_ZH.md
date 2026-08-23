@@ -11,7 +11,7 @@ Koe（こえ / 声）捕获标签页声音或麦克风，实时识别成字幕�
 
 ## 功能
 
-- **侧边栏滚动字幕流** — 已确认的句子逐行累积、草稿实时预览；服务端权威结果按句落定，字幕只增不减、不闪回。
+- **侧边栏滚动字幕流** — 已确认的句子逐行累积、草稿实时预览；识别结果发生修正时，只替换受影响的那一行。
 - **双模型中文翻译** — 草稿用 `qwen-mt-flash` 快译、权威句用 `qwen-mt-plus` 精译；配合字幕风格提示与滚动翻译记忆，译文自然、术语译法一致。
 - **多种字幕模式** — 标签页声音或麦克风 × DashScope / Chrome 内置识别（免 Key）。
 - **识别修正处理** — 服务端改写句子时只替换受影响的那一行，重复在源头被抑制。
@@ -35,6 +35,6 @@ API Key 只保存在当前浏览器配置的 `chrome.storage.local` 中，Koe �
 
 运行时是纯 Manifest V3 JavaScript。修改代码后在 `chrome://extensions` 重新加载扩展即可。
 
-主要模块：`background.js` 负责会话调度、状态与字幕记录；`offscreen.js` 负责音频采集与识别（DashScope / Chrome 内置）；`content.js` 负责视频探测与状态提示；`popup.*` 是手势入口弹窗；`sidepanel.*` 负责侧边栏 UI 与滚动字幕流。
+主要模块：`background.js` 负责会话调度、状态与字幕记录；`offscreen.js` 负责音频采集与识别（DashScope / Chrome 内置）；`content.js` 负责视频与页面变化探测；`popup.*` 是手势入口弹窗；`sidepanel.*` 负责侧边栏 UI 与滚动字幕流。
 
-[MIT](LICENSE) © 2026 yuxino
+© 2026 yuxino

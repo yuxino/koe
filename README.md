@@ -11,7 +11,7 @@ No video downloads, ffmpeg, Node.js, or localhost helper.
 
 ## Features
 
-- **Side-panel subtitle feed** — confirmed sentences accumulate one per row; the live draft previews the current line; server finals are committed sentence by sentence, so subtitles grow only and never flash-reset.
+- **Side-panel subtitle feed** — confirmed sentences accumulate one per row while the live draft previews the current line; recognition corrections replace only the affected row.
 - **Dual-model Chinese translation** — draft lines are translated quickly with `qwen-mt-flash`, authoritative finals with `qwen-mt-plus`. Subtitling style hints and a rolling translation memory keep output natural and terminology consistent.
 - **Multiple caption modes** — tab audio or microphone × DashScope / Chrome's built-in recognition (no API key).
 - **Recognition-correction handling** — when the server rewrites a line, only the affected row is replaced; duplicates are suppressed at the source.
@@ -35,6 +35,6 @@ The API Key is stored in `chrome.storage.local` on your browser profile and is o
 
 The runtime is plain Manifest V3 JavaScript. Reload the extension from `chrome://extensions` after changing the source.
 
-Main pieces: `background.js` coordinates sessions, state, and the subtitle record; `offscreen.js` captures audio and runs recognition (DashScope / Chrome built-in); `content.js` detects videos and shows status toasts; `popup.*` is the gesture-based start surface; `sidepanel.*` renders the side panel and scrolling subtitle feed.
+Main pieces: `background.js` coordinates sessions, state, and the subtitle record; `offscreen.js` captures audio and runs recognition (DashScope / Chrome built-in); `content.js` detects videos and page changes; `popup.*` is the gesture-based start surface; `sidepanel.*` renders the side panel and scrolling subtitle feed.
 
-[MIT](LICENSE) © 2026 yuxino
+© 2026 yuxino

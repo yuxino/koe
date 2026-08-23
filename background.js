@@ -2,7 +2,6 @@
 // 交给 DashScope 实时识别 + 翻译，再显示成字幕。
 // 不下载视频、不需要本地助手、没有“分析中 x%”的进度任务。
 
-const SERVER_URL = "http://127.0.0.1:8787";
 const AUTH_RULE_ID = 9001;
 const tabStates = new Map();
 const captureStreamIds = new Map();
@@ -81,18 +80,6 @@ chrome.commands.onCommand.addListener(async (command) => {
   // 弹窗打开后会自动开启字幕；这里不再直接尝试 getMediaStreamId（无手势必失败）
 });
 
-async function pickCaptureTarget() {
-  // 扩展无法捕获“整个 Chrome 的混音”（tabCapture 一次一个标签页、desktopCapture 无声音），
-  // 用“跟随发声标签页”作为近似：优先激活页（若在发声），否则第一个发声的标签页。
-  const audible = await chrome.tabs.query({ audible: true }).catch(() => []);
-  if (audible.length === 0) {
-    const [active] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
-    return active || null;
-  }
-  const [active] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
-  return audible.find((tab) => tab.id === active?.id) || audible[0] || null;
-}
-
 chrome.tabs.onRemoved.addListener((tabId) => cleanupTab(tabId));
 
 async function boot() {
@@ -128,10 +115,6 @@ async function handle(message, sender) {
   if (message.type === "STOP_CAPTURE") return stopCaptureForTab(Number(message.tabId));
   if (message.type === "SET_TRANSLATE") return setTranslate(tabId, Boolean(message.translate));
   if (message.type === "SET_CAPTURE") return setCaptureConfig(tabId);
-  if (message.type === "CONTENT_ACK") {
-    trace(tabId, "content-ack", `${String(message.stage || "")} frame=${sender?.frameId ?? ""}`);
-    return { ok: true };
-  }
   return { ok: true };
 }
 
@@ -186,7 +169,7 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
   const sourceKey = source?.sourceUrl ? normalizeSourceKey(source.sourceUrl) : "";
   let state = tabStates.get(tabId);
 
-  if (sourceMode !== "mic" && (!source?.hasVideo || !isLiveAllowed(source, pageUrl))) {
+  if (sourceMode !== "mic" && (!source?.hasVideo || !isLiveAllowed(source))) {
     // 没有正在播放的主视频，或只是静音/广告/背景视频：不打扰，也不清掉已有会话
     return { ok: true, skipped: true };
   }
@@ -213,7 +196,6 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
     };
     tabStates.set(tabId, state);
     await persistStates();
-    await pushState(state);
   } else if (forceReset || (sourceKey && sourceKey !== normalizeSourceKey(state.sourceUrl || "")) || state.source !== sourceMode || state.engine !== engineMode) {
     // 只有 forceReset（Alt+K / 右键 / 手动按钮 = 用户明确要开）才清除 userStopped；
     // 视频源变化（广告/CDN 换源等）绝不能重置——用户明确停止后，换视频也不能悄悄重开字幕。
@@ -226,7 +208,6 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
     state.translate = translate !== undefined ? Boolean(translate) : state.translate;
     // 换来源/换视频：保持已授权的音频流不断，只重连识别会话
     if (state.captureStarted) await resetCaptureSession(state);
-    else await pushState(state);
   }
 
   state = tabStates.get(tabId);
@@ -235,7 +216,7 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
   return { ok: true };
 }
 
-function isLiveAllowed(source, pageUrl) {
+function isLiveAllowed(source) {
   if (!source?.playing) return false;
   if (isAdSource(source.sourceUrl || "")) return false;
   // 静音播放器没有声音可采，等用户取消静音后再开始
@@ -281,7 +262,6 @@ async function runCaptureAuthorization(state) {
         state.captureNeedsGesture = true;
         state.status = "starting";
         state.stageDetail = "点击 Koe 图标（弹窗一键开启）或按 Alt+K";
-        await pushState(state);
         return;
       }
       throw error;
@@ -296,13 +276,10 @@ async function runCaptureAuthorization(state) {
     state.captureNeedsGesture = false;
     state.status = "error";
     state.stageDetail = message || "无法开始采集标签页声音。";
-    trace(state.tabId, "capture-start-failed", state.stageDetail);
-    await pushState(state);
   }
 }
 async function startCapture(state, streamId) {
-  // 扩展重载后已打开的页面可能没有内容脚本，先把字幕显示脚本注入进去，
-  // 否则识别通道通了、字幕却没地方显示
+  // 扩展重载后已打开的页面可能没有内容脚本，先补上视频探测脚本。
   await ensureContentScript(state.tabId, state.frameId || 0);
   const { koeApiKey } = await chrome.storage.local.get("koeApiKey");
   const apiKey = String(koeApiKey || "").trim();
@@ -317,7 +294,6 @@ async function startCapture(state, streamId) {
     type: "CAPTURE_START",
     streamId: streamId || "",
     apiKey,
-    serverUrl: SERVER_URL,
     translate: state.translate,
     source: state.source || "tab",
     engine: state.engine || "dashscope"
@@ -334,7 +310,6 @@ async function startCapture(state, streamId) {
   } catch {
     // 无手势或版本不支持时忽略
   }
-  await pushState(state);
   await persistStates();
   // 新会话开始：清空字幕记录（切 tab 后新面板实例拉取的是本次会话的历史）
   transcriptCache = [];
@@ -343,7 +318,6 @@ async function startCapture(state, streamId) {
   } catch {
     // 存储不可用时忽略
   }
-  trace(state.tabId, "capture-started", `${response.mode || "pcm"} frame=${state.frameId || 0} src=${String(state.sourceUrl || "").slice(0, 60)}`);
 }
 
 async function syncAuthorizationRule(apiKey) {
@@ -368,7 +342,6 @@ async function resetCaptureSession(state) {
   try {
     const response = await chrome.runtime.sendMessage({
       type: "CAPTURE_RESET",
-      serverUrl: SERVER_URL,
       translate: state.translate
     });
     if (!response?.ok) throw new Error(response?.error || "capture_reset_failed");
@@ -395,13 +368,11 @@ async function stopCapture(state) {
   } catch {
     // 后台可能刚唤醒，离屏采集页尚未就绪
   }
-  await forwardToTab(state.tabId, { type: "LIVE_STOP", jobId: state.jobId }, state.frameId);
   try {
     await chrome.runtime.sendMessage({ type: "LIVE_STOP", jobId: state.jobId });
   } catch {
     // 侧边栏未打开时忽略
   }
-  await pushState(state);
 }
 
 // 点图标时后台决定“该捕获谁”：本页有正在播放的主视频 → 本页；
@@ -533,7 +504,6 @@ async function stopCaptureForTab(tabId) {
     state.status = "idle";
     state.stageDetail = "";
     state.captureNeedsGesture = false;
-    await pushState(state);
   } else {
     if (captureTabId === id) captureTabId = null;
     state.status = "idle";
@@ -565,11 +535,6 @@ async function forwardRevoke({ fromSeq = 0, toSeq = 0, text = "" }) {
   } catch {
     // 侧边栏未打开时忽略
   }
-  try {
-    await forwardToTab(tabId, payload, state.frameId);
-  } catch {
-    // 页面内容脚本缺失时忽略
-  }
   return { ok: true };
 }
 
@@ -592,27 +557,16 @@ async function forwardCaptureLines(message, type) {
     seq: message.seq,
     unit: message.unit
   };
-  // 字幕流同时发给侧边栏（历史滚动）与页面内容脚本（单行迷你字幕兜底）
+  // 字幕流发给侧边栏；页面内容脚本只负责视频探测。
   try {
     await chrome.runtime.sendMessage(payload);
   } catch {
     // 侧边栏未打开时忽略
   }
-  try {
-    await forwardToTab(tabId, payload, state.frameId);
-  } catch {
-    // 页面内容脚本缺失时忽略
-  }
-  const eventName = type === "LIVE_SUBTITLES"
-    ? "capture-lines"
-    : type === "LIVE_TRANSLATED"
-      ? "capture-translated"
-      : "capture-partial";
-  trace(tabId, eventName, `n=${lines.length}`);
   return { ok: true };
 }
 
-async function handleCaptureError({ error }) {
+async function handleCaptureError() {
   const tabId = captureTabId;
   const state = tabId ? tabStates.get(tabId) : null;
   captureTabId = null;
@@ -622,14 +576,11 @@ async function handleCaptureError({ error }) {
   state.captureNeedsGesture = true;
   state.stageDetail = "实时字幕已断开 · 点击 Koe 图标或按 Alt+K 重试";
   captureStreamIds.delete(tabId);
-  trace(tabId, "capture-error", String(error || ""));
-  await forwardToTab(tabId, { type: "LIVE_STOP", jobId: state.jobId }, state.frameId);
   try {
     await chrome.runtime.sendMessage({ type: "LIVE_STOP", jobId: state.jobId });
   } catch {
     // 侧边栏未打开时忽略
   }
-  await pushState(state);
   return { ok: true };
 }
 
@@ -639,7 +590,6 @@ async function setTranslate(tabId, translate) {
   state.translate = Boolean(translate);
   // 重连识别会话，让之后推送的字幕带/不带翻译
   if (state.captureStarted) await resetCaptureSession(state);
-  await pushState(state);
   return { ok: true };
 }
 
@@ -655,7 +605,6 @@ async function setCaptureConfig(tabId) {
     // 读取失败时保持原配置
   }
   if (state.captureStarted) await resetCaptureSession(state);
-  await pushState(state);
   return { ok: true };
 }
 
@@ -709,7 +658,7 @@ async function restoreStates() {
     return;
   }
   for (const entry of entries || []) {
-    // 只恢复新版实时字幕状态；旧版残留的下载任务状态直接丢弃
+    // 只恢复有效的实时字幕状态。
     if (!String(entry.jobId || "").startsWith("live-") || entry.liveOnly !== true) continue;
     if (tabStates.has(entry.tabId)) continue;
     tabStates.set(entry.tabId, {
@@ -727,11 +676,7 @@ async function restoreStates() {
       startedAt: Date.now()
     });
   }
-  // 注意：绝不在 restoreStates 里发 CAPTURE_STOP！
-  // 该函数被 koe-restore 闹钟每 30 秒调用一次，之前加的无条件 CAPTURE_STOP
-  // 会每 30 秒把正在运行的识别会话杀掉（日志里 stop full 每 30 秒一次、
-  // "切 tab 丢字幕/卡住"的根源）。offscreen 是独立文档，SW 休眠不影响它；
-  // 用户主动停止走 stopCaptureForTab，那里已无条件发 CAPTURE_STOP。
+  // 定时恢复只重建状态；停止采集只能由明确的 STOP_CAPTURE 触发。
 }
 
 // ===== 找正在播放的主视频（只用来判断该不该开、有没有切视频） =====
@@ -768,7 +713,7 @@ async function discoverVideoSource(tabId, pageUrl) {
 function videoScore(video) {
   if (isAdSource(video.sourceUrl || "")) return -1_000_000_000_000;
   // 大画面、正在播放、未静音的主播放器优先；
-  // 之前评分太平均，可能选中小广告/隐藏预览，字幕被送到看不见的 frame
+  // 小广告和隐藏预览必须明显降权，避免选错 frame。
   let score = Number(video.width || 0) * Number(video.height || 0);
   if (Number(video.width) > 0 && (Number(video.width) < 320 || Number(video.height) < 180)) {
     score -= 500_000_000;
@@ -819,31 +764,7 @@ function normalizeSourceKey(value) {
 }
 
 async function ensureContentScript(tabId, frameId = 0) {
-  try {
-    await chrome.tabs.sendMessage(tabId, { type: "PING" }, { frameId });
-  } catch {
-    await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, files: ["content.js"] });
-  }
-}
-
-async function forwardToTab(tabId, message, frameId = 0) {
-  try {
-    return await chrome.tabs.sendMessage(tabId, message, { frameId: Number(frameId) || 0 });
-  } catch {
-    return { ok: false, ignored: true };
-  }
-}
-
-async function pushState(state) {
-  await forwardToTab(state.tabId, {
-    type: "LIVE_STATE",
-    jobId: state.jobId,
-    translate: state.translate,
-    status: state.status,
-    captureActive: Boolean(state.captureStarted),
-    captureNeedsGesture: Boolean(state.captureNeedsGesture),
-    stageDetail: state.stageDetail
-  }, state.frameId);
+  await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, files: ["content.js"] });
 }
 
 function publicState(state) {
@@ -857,26 +778,4 @@ function publicState(state) {
     stageDetail: state.stageDetail,
     tabId: state.tabId
   };
-}
-
-// 追踪日志：按事件节流（同事件 2 秒内最多一次），避免每条字幕都发起一次
-// 网络请求；必须带 .catch，否则本地无服务时每次失败都会产生
-// unhandled promise rejection，污染 service worker。
-const lastTraceAt = {};
-function trace(tabId, event, extra = "") {
-  const key = `${tabId}:${event}`;
-  const now = Date.now();
-  if (now - (lastTraceAt[key] || 0) < 2_000) return;
-  lastTraceAt[key] = now;
-  try {
-    void fetch(`${SERVER_URL}/api/trace`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ tabId, event, extra })
-    }).catch(() => {
-      // 本地无追踪服务时静默失败
-    });
-  } catch {
-    // 追踪日志失败不影响主流程
-  }
 }
