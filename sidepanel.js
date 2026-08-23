@@ -156,7 +156,7 @@ chrome.runtime.onMessage.addListener((message) => {
       } else {
         const text = lastLine(message.lines)?.translated;
         if (!text) return false;
-        if (!acceptDraftSeq(message.seq)) return false;
+        if (!acceptDraftSeq(message.seq, { allowEqual: Boolean(message.streaming) })) return false;
         setDraft(text, "translated");
       }
     }
@@ -528,11 +528,11 @@ function acceptUnitSeq(seq) {
   return true;
 }
 
-function acceptDraftSeq(seq) {
+function acceptDraftSeq(seq, { allowEqual = false } = {}) {
   const value = Number(seq);
   if (!Number.isFinite(value)) return true;
-  if (value <= lastDraftSeq) return false;
-  lastDraftSeq = value;
+  if (value < lastDraftSeq || (!allowEqual && value === lastDraftSeq)) return false;
+  lastDraftSeq = Math.max(lastDraftSeq, value);
   return true;
 }
 

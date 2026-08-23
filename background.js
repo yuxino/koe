@@ -695,7 +695,7 @@ async function forwardCaptureLines(message, type) {
       endTimeMs: message.endTimeMs,
       sentenceId: message.sentenceId
     });
-  } else if (type === "LIVE_TRANSLATED") {
+  } else if (type === "LIVE_TRANSLATED" && !message.streaming) {
     recordTranscript({
       seq: message.seq,
       translated: lines[0]?.translated,
@@ -711,6 +711,7 @@ async function forwardCaptureLines(message, type) {
     lines,
     seq: message.seq,
     unit: message.unit,
+    streaming: Boolean(message.streaming),
     mediaEpoch: Number(message.mediaEpoch) || 0,
     beginTimeMs: message.beginTimeMs,
     endTimeMs: message.endTimeMs,

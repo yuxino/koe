@@ -177,6 +177,20 @@ const WAIT = 380;
     check(rowText.includes("Translation failed"), "空译文稳定回退原文，不丢句");
     console.log("T5 翻译失败稳定回退原文 PASS");
   }
+  {
+    // 场景：同一稳定句的流式中文可原地增长，完整响应到达后才转成稳定行。
+    const h = makeCtx();
+    h.els["#translate-toggle"].checked = true;
+    sendMessage(h, { type: "LIVE_SUBTITLES", jobId: "live-6", seq: 2, unit: true, lines: [{ text: "Hello there." }] });
+    sendMessage(h, { type: "LIVE_TRANSLATED", jobId: "live-6", seq: 2, streaming: true, lines: [{ translated: "你" }] });
+    sendMessage(h, { type: "LIVE_TRANSLATED", jobId: "live-6", seq: 2, streaming: true, lines: [{ translated: "你好" }] });
+    check(draftText(h.feed) === "你好", `同 seq 流式译文原地增长（实际 ${JSON.stringify(draftText(h.feed))}）`);
+    sendMessage(h, { type: "LIVE_TRANSLATED", jobId: "live-6", seq: 2, unit: true, streaming: false, lines: [{ translated: "你好啊" }] });
+    const row = h.feed.children[0];
+    const text = row?.children.find((child) => child.className === "text")?.textContent || "";
+    check(row?.className === "row" && text === "你好啊", "完整译文到达后冻结为稳定行");
+    console.log("T6 流式译文同 seq 更新并冻结 PASS");
+  }
   console.log(fail === 0 ? "sidepanel-draft 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
 })().catch((err) => { console.error(err); process.exit(1); });

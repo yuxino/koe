@@ -14,7 +14,7 @@ No video downloads, ffmpeg, Node.js, or localhost helper.
 - **In-video captions** — captions sit near the bottom of the main player, with distinct original and Chinese lines, three text sizes, and fullscreen support.
 - **Media-timeline protection** — seeking, switching videos, or reconnecting recognition cannot replay stale captions or translations over the new scene.
 - **Optional subtitle history** — the side panel keeps confirmed lines, the current draft, and scroll-back history; recognition corrections replace only the affected row.
-- **Dual-model Chinese translation** — draft lines are translated quickly with `qwen-mt-flash`, authoritative finals with `qwen-mt-plus`. Subtitling style hints and a rolling translation memory keep output natural and terminology consistent.
+- **Immediate streaming Chinese** — drafts and confirmed lines both use incremental `qwen-mt-flash`; the first Chinese chunk appears without a fixed wait, confirmed lines preempt stale drafts, and rolling translation memory improves the first visible result instead of correcting it after the scene has passed.
 - **Multiple caption modes** — tab audio or microphone × DashScope / Chrome's built-in recognition (no API key).
 - **Recognition-correction handling** — when the server rewrites a line, only the affected row is replaced; duplicates are suppressed at the source.
 - **Low-latency audio path** — AudioWorklet capture and bounded weak-network buffering keep the feed current; short WebSocket interruptions reconnect automatically.

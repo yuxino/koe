@@ -133,6 +133,45 @@ captureSource = "tab"; captureEngine = "dashscope"; currentStreamSource = ""; st
     check(run(`globalThis.__micCalls`) >= 1, "mic stream acquired after source switch");
     console.log("T5 source switch PASS");
   }
+  {
+    // 旧连接晚于新连接触发 open 时，只能关闭自己，不能向仍 CONNECTING 的新 socket 发消息。
+    const h = makeOffCtx({ tabGetUserMedia: async () => fakeTabStream() });
+    const run = (code) => vm.runInContext(code, h.ctx);
+    const sockets = [];
+    let invalidSends = 0;
+    h.ctx.WebSocket = function () {
+      const self = this;
+      sockets.push(this);
+      this.readyState = 0;
+      this.binaryType = "";
+      this.onopen = null; this.onmessage = null; this.onerror = null; this.onclose = null;
+      this.send = (payload) => {
+        if (this.readyState !== 1) {
+          invalidSends += 1;
+          throw new Error("send while connecting");
+        }
+        const parsed = JSON.parse(payload);
+        if (parsed.header?.action === "run-task") {
+          realSetTimeout(() => self.onmessage?.({
+            data: JSON.stringify({ header: { event: "task-started", task_id: parsed.header.task_id }, payload: {} })
+          }), 0);
+        }
+      };
+      this.close = () => { this.readyState = 3; };
+    };
+    h.ctx.WebSocket.OPEN = 1;
+    run(`stopping = false; captureEngine = "dashscope"; captureClockStartedAt = 0;`);
+    const first = run(`connectRealtime()`);
+    const second = run(`connectRealtime()`);
+    check(sockets.length === 2, "two overlapping sockets created");
+    sockets[0].readyState = 1;
+    sockets[0].onopen();
+    sockets[1].readyState = 1;
+    sockets[1].onopen();
+    await Promise.all([first, second]);
+    check(invalidSends === 0, "superseded socket never sends through the connecting replacement");
+    console.log("T6 overlapping WebSocket open race PASS");
+  }
   console.log(fail === 0 ? "ALL stream-reuse suites PASS" : `FAILURES: ${fail}`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

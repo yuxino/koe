@@ -4,16 +4,15 @@
 const DASHSCOPE_WS = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/";
 const TRANSLATE_ENDPOINT = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation";
 const ASR_MODEL = "qwen-audio-3.0-asr-flash-streaming";
-const TRANSLATE_MODEL_DRAFT = "qwen-mt-flash";
-const TRANSLATE_MODEL_FINAL = "qwen-mt-plus";
+const TRANSLATE_MODEL = "qwen-mt-flash";
 // 字幕风格提示（移植 Mimi）：让译文像影视剧字幕、保留语气词，更流畅自然
 const TRANSLATE_DOMAIN_HINT =
   "Use concise, idiomatic Simplified Chinese, like subtitles for a TV drama, " +
   "and keep every natural particle: 嗯、啊、呢、吧、嘛、哦、唉. " +
   "Render English fillers (um, uh, oh, hmm, yeah) with their natural Chinese " +
   "equivalents; never drop a meaningful filler.";
-// 翻译记忆：最近 9 条 源→译 对照，final 翻译时传入 tm_list，
-// 保持术语一致（如 "Cash for Chunkers program" 每次都译成同一个说法）
+// 翻译记忆：最近 9 条 源→译 对照，首轮 flash 翻译直接传入 tm_list，
+// 在第一次可见结果里保持术语一致，不再依赖迟到的二次精修。
 const translationMemory = [];
 function rememberTranslation(source, target) {
   for (let index = translationMemory.length - 1; index >= 0; index -= 1) {
@@ -331,16 +330,30 @@ async function restartWebSpeech() {
 
 async function connectRealtime() {
   taskReady = false;
-  taskId = randomTaskId();
+  const nextTaskId = randomTaskId();
+  taskId = nextTaskId;
   taskAudioOffsetMs = audioPositionMs();
-  socket = new WebSocket(DASHSCOPE_WS);
-  socket.binaryType = "arraybuffer";
+  const nextSocket = new WebSocket(DASHSCOPE_WS);
+  socket = nextSocket;
+  nextSocket.binaryType = "arraybuffer";
 
   await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("DashScope 连接超时。")), 20_000);
-    socket.onopen = () => {
-      socket.send(JSON.stringify({
-        header: { action: "run-task", task_id: taskId, streaming: "duplex" },
+    const timer = setTimeout(() => {
+      if (socket === nextSocket) socket = null;
+      try { nextSocket.close(1000, "timeout"); } catch { /* ignore */ }
+      reject(new Error("DashScope 连接超时。"));
+    }, 20_000);
+    nextSocket.onopen = () => {
+      // 旧连接可能比替代它的新连接更晚触发 open；绝不能借用全局 socket
+      // 把 run-task 发给仍处于 CONNECTING 的新实例。
+      if (socket !== nextSocket || stopping) {
+        clearTimeout(timer);
+        try { nextSocket.close(1000, "superseded"); } catch { /* ignore */ }
+        resolve(false);
+        return;
+      }
+      nextSocket.send(JSON.stringify({
+        header: { action: "run-task", task_id: nextTaskId, streaming: "duplex" },
         payload: {
           task_group: "audio",
           task: "asr",
@@ -359,7 +372,8 @@ async function connectRealtime() {
         }
       }));
     };
-    socket.onmessage = (event) => {
+    nextSocket.onmessage = (event) => {
+      if (socket !== nextSocket) return;
       const message = parseJson(event.data);
       if (!message) return;
       const type = message?.header?.event || "";
@@ -368,7 +382,7 @@ async function connectRealtime() {
         taskReady = true;
         retryCount = 0;
         clearRetryTimer();
-        logEvent("ws-task-started", `task=${taskId}`);
+        logEvent("ws-task-started", `task=${nextTaskId}`);
         resolve();
         return;
       }
@@ -382,18 +396,31 @@ async function connectRealtime() {
       }
       handleDashScopeMessage(message);
     };
-    socket.onerror = () => {
+    nextSocket.onerror = () => {
       clearTimeout(timer);
+      if (socket !== nextSocket) {
+        resolve(false);
+        return;
+      }
       logEvent("ws-error", "");
       reject(new Error("无法连接 DashScope 实时识别。"));
     };
-    socket.onclose = (event) => {
+    nextSocket.onclose = (event) => {
       clearTimeout(timer);
+      if (socket !== nextSocket) {
+        resolve(false);
+        return;
+      }
+      const wasReady = taskReady;
       taskReady = false;
+      socket = null;
       // close code 能区分断连原因：1000/1001 = 服务端/主动关闭，1006 = 网络断，
       // 4000+ = 服务端业务错误（如认证失败、配额）
       logEvent("ws-closed", `code=${event?.code ?? "?"} reason=${JSON.stringify(String(event?.reason || "").slice(0, 60))} stopping=${stopping}`);
-      if (!stopping && stream) scheduleAutoReconnect();
+      if (!stopping && stream) {
+        scheduleAutoReconnect();
+        if (!wasReady) reject(new Error("DashScope 连接在启动前关闭。"));
+      }
     };
   });
 }
@@ -931,40 +958,97 @@ function emitUnit(text, timing = activeTiming) {
   if (captureTranslate) scheduleUnitTranslation(unitText, seq, timing);
 }
 
-// ===== 翻译调度：单队列串行 + 统一限速 =====
-// 之前两条翻译管线（字幕块队列 + 草稿链）并行发请求，短块变多后请求频率
-// 翻倍，容易触发 DashScope 限流（429）→ 全部翻译失败退原文。
-// 现在合并成一条串行队列：字幕块优先，草稿尾只保留最新一条补位；
-// 请求至少间隔 700ms；限流后进入冷却期，冷却期内跳过草稿；
-// 积压时一次请求批量译 2 个字幕块，把请求频率压回配额内。
-const MIN_TRANSLATION_INTERVAL = 700;
+// ===== 翻译调度：flash 增量流 + 稳定句抢占 =====
+// 原文草稿到达后立即发起一次 qwen-mt-flash 增量翻译，首个中文块直接上屏。
+// 队列里的草稿始终只保留最新一条；稳定字幕块会中止正在执行的旧草稿并
+// 插到所有草稿前面。正常路径不做固定等待、不批量，避免人为增加首字延迟。
 const TRANSLATE_COOLDOWN_MS = 20_000;
 const translationQueue = []; // { kind: "unit" | "draft", text, seq }
 let translatorRunning = false;
-let lastTranslationAt = 0;
 let throttleCooldownUntil = 0;
-let inFlightItem = null; // 正在处理的请求；草稿被更新的草稿取代时标记 superseded
+let inFlightItem = null;
+let inFlightController = null;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function translateText(text, { model = TRANSLATE_MODEL_FINAL, memory = [] } = {}) {
-  if (isAlreadyChinese(text)) return text;
+function translationContent(payload) {
+  return String(
+    payload?.output?.choices?.[0]?.message?.content || payload?.output?.text || ""
+  );
+}
+
+function mergeTranslationChunk(current, chunk) {
+  const previous = String(current || "");
+  const next = String(chunk || "");
+  if (!next) return previous;
+  // incremental_output 通常返回增量块；兼容网关偶尔返回累计全文。
+  if (next.startsWith(previous)) return next;
+  if (previous.endsWith(next)) return previous;
+  return previous + next;
+}
+
+async function readTranslationStream(response, onUpdate) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let translated = "";
+
+  const consumeEvent = (eventText) => {
+    const data = eventText
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n")
+      .trim();
+    if (!data || data === "[DONE]") return;
+    const payload = parseJson(data);
+    if (!payload) return;
+    if (payload.code || payload?.header?.event === "task-failed") {
+      throw new Error(payload.message || payload?.header?.error_message || "translate_stream_failed");
+    }
+    const next = mergeTranslationChunk(translated, translationContent(payload));
+    if (next === translated) return;
+    translated = next;
+    if (typeof onUpdate === "function") onUpdate(translated.trim());
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(0), { stream: !done });
+    const events = buffer.split(/\r?\n\r?\n/);
+    buffer = events.pop() || "";
+    for (const eventText of events) consumeEvent(eventText);
+    if (done) break;
+  }
+  if (buffer.trim()) consumeEvent(buffer);
+  return translated.trim();
+}
+
+async function translateText(text, {
+  model = TRANSLATE_MODEL,
+  memory = [],
+  signal,
+  onUpdate
+} = {}) {
+  if (isAlreadyChinese(text)) {
+    if (typeof onUpdate === "function") onUpdate(text);
+    return text;
+  }
   const apiKey = captureApiKey;
   if (!apiKey) return "";
+  const incremental = model === TRANSLATE_MODEL;
   const body = {
     model,
-    // 官方文档要求：qwen-mt 只接受一条 user 消息，不支持 system 消息——
-    // 之前靠 system 提示词指定目标语言是无效的，模型会自己猜方向，
-    // 译文语言完全随机。必须用 translation_options 显式指定目标语言。
+    // qwen-mt 只接受一条 user 消息；目标语言必须由 translation_options 指定。
     input: {
       messages: [{ role: "user", content: text }]
     },
     parameters: {
       result_format: "message",
+      incremental_output: incremental ? true : undefined,
       translation_options: {
         source_lang: "auto",
         target_lang: "Chinese",
-        // 字幕风格提示（domains）+ 翻译记忆（tm_list）：移植 Mimi 的参数
         domains: TRANSLATE_DOMAIN_HINT,
         tm_list: memory.length > 0 ? memory : undefined
       }
@@ -975,35 +1059,77 @@ async function translateText(text, { model = TRANSLATE_MODEL_FINAL, memory = [] 
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "content-type": "application/json",
-      "X-DashScope-SSE": "disable"
+      "X-DashScope-SSE": incremental ? "enable" : "disable"
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal
   });
+  if (!response.ok) {
+    const bodyJson = await response.json().catch(() => ({}));
+    throw new Error(bodyJson?.message || `translate_failed:${response.status}`);
+  }
+  if (incremental && response.body && typeof response.body.getReader === "function") {
+    return readTranslationStream(response, onUpdate);
+  }
   const bodyJson = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(bodyJson?.message || `translate_failed:${response.status}`);
-  return String(
-    bodyJson?.output?.choices?.[0]?.message?.content || bodyJson?.output?.text || ""
-  ).trim();
+  const translated = translationContent(bodyJson).trim();
+  if (translated && typeof onUpdate === "function") onUpdate(translated);
+  return translated;
 }
 
 function scheduleUnitTranslation(text, seq, timing = activeTiming) {
-  translationQueue.push({ kind: "unit", text, seq, timing: { ...timing } });
+  // 稳定句是当前最可信文本：中止旧草稿，把稳定句插到所有草稿前。
+  dropQueuedDrafts({ abortInFlight: true });
+  const item = { kind: "unit", text, seq, timing: { ...timing } };
+  const firstDraft = translationQueue.findIndex((entry) => entry.kind === "draft");
+  if (firstDraft < 0) translationQueue.push(item);
+  else translationQueue.splice(firstDraft, 0, item);
   void runTranslationWorker();
 }
 
 function scheduleDraftTranslation(text, seq, timing = activeTiming) {
-  // 合并：队列里只保留最新一条草稿，避免草稿翻译堆积挤占字幕块
-  dropQueuedDrafts();
+  // 不为每次 ASR 微调中止网络请求；旧结果立即失效，请求结束后只处理最新草稿。
+  dropQueuedDrafts({ abortInFlight: false });
   translationQueue.push({ kind: "draft", text, seq, timing: { ...timing } });
   void runTranslationWorker();
 }
 
-function dropQueuedDrafts() {
-  // 队列里只保留最新一条草稿；正在翻译的草稿也标记作废（完成后直接丢弃）
-  if (inFlightItem && inFlightItem.kind === "draft") inFlightItem.superseded = true;
+function dropQueuedDrafts({ abortInFlight = true } = {}) {
+  if (inFlightItem && inFlightItem.kind === "draft") {
+    inFlightItem.superseded = true;
+    if (abortInFlight && inFlightController) inFlightController.abort();
+  }
   for (let index = translationQueue.length - 1; index >= 0; index -= 1) {
     if (translationQueue[index].kind === "draft") translationQueue.splice(index, 1);
   }
+}
+
+function cancelTranslationWork() {
+  translationQueue.length = 0;
+  if (inFlightItem) inFlightItem.superseded = true;
+  if (inFlightController) inFlightController.abort();
+}
+
+function emitTranslatedItem(item, translated, { streaming = false } = {}) {
+  if (!translated) return;
+  sendCaptureMessage({
+    type: "CAPTURE_TRANSLATED",
+    lines: [{ text: item.text, translated }],
+    seq: item.seq,
+    // 流式块先更新当前草稿；完整响应到达后才把稳定句冻结成 unit。
+    unit: !streaming && item.kind === "unit",
+    streaming
+  }, item.timing).catch(() => undefined);
+}
+
+function createTranslationController() {
+  if (typeof AbortController === "function") return new AbortController();
+  // 仅供旧测试/旧运行环境兜底；现代 Chrome 始终使用原生 AbortController。
+  const signal = { aborted: false, addEventListener: () => undefined };
+  return {
+    signal,
+    abort() { signal.aborted = true; }
+  };
 }
 
 async function runTranslationWorker() {
@@ -1012,81 +1138,76 @@ async function runTranslationWorker() {
   while (translationQueue.length > 0) {
     const item = translationQueue.shift();
     inFlightItem = item;
+    inFlightController = createTranslationController();
+    const controller = inFlightController;
     const generation = captureGeneration;
 
-    // 限流冷却期内直接跳过草稿（字幕块仍会重试，稳定行不能断）
     if (item.kind === "draft" && Date.now() < throttleCooldownUntil) {
       logEvent("translation-skip", "cooldown draft");
       inFlightItem = null;
+      inFlightController = null;
       continue;
     }
-
-    // 与上一请求至少间隔 700ms，避免请求频率触顶
-    const waitMs = lastTranslationAt + MIN_TRANSLATION_INTERVAL - Date.now();
-    if (waitMs > 0) await sleep(waitMs);
-
-    // 草稿已被更新的草稿取代：省掉这次请求
     if (item.kind === "draft" && item.superseded) {
       logEvent("translation-skip", "superseded draft");
       inFlightItem = null;
+      inFlightController = null;
       continue;
     }
 
-    // 积压时相邻两个字幕块合并成一次编号翻译
-    const batch = [item];
-    if (item.kind === "unit") {
-      while (batch.length < 2 && translationQueue.length > 0 && translationQueue[0].kind === "unit") {
-        batch.push(translationQueue.shift());
-      }
-    }
-
-    let parts = [];
-    // 双模型分工（移植 Mimi）：草稿翻译用 flash（快、及时），
-    // 权威 final 翻译用 plus（准、流畅）+ 翻译记忆保持术语一致
-    const isDraft = item.kind === "draft";
-    const model = isDraft ? TRANSLATE_MODEL_DRAFT : TRANSLATE_MODEL_FINAL;
-    const memory = isDraft ? [] : recentTranslationMemory();
-    logEvent("translation-request", `kind=${item.kind} model=${model} batch=${batch.length} chars=${Array.from(batch[0].text).length}`);
+    let translated = "";
+    let lastStreamed = "";
+    let firstOutputLogged = false;
+    const startedAt = monotonicNow();
+    logEvent("translation-request", `kind=${item.kind} model=${TRANSLATE_MODEL} chars=${Array.from(item.text).length}`);
     try {
-      if (batch.length === 1) {
-        parts = [await translateWithRetry(batch[0].text, { model, memory })];
-      } else {
-        const numbered = batch.map((entry, index) => `${index + 1}. ${entry.text}`).join("\n");
-        parts = parseNumberedTranslations(await translateWithRetry(numbered, { model, memory }), batch.length);
+      translated = await translateWithRetry(item.text, {
+        model: TRANSLATE_MODEL,
+        memory: recentTranslationMemory(),
+        signal: controller.signal,
+        onUpdate: (value) => {
+          const current = String(value || "").trim();
+          if (!current || current === lastStreamed) return;
+          if (generation !== captureGeneration || item.superseded || controller.signal.aborted) return;
+          lastStreamed = current;
+          if (!firstOutputLogged) {
+            firstOutputLogged = true;
+            logEvent("translation-first", `kind=${item.kind} seq=${item.seq} ms=${Math.round(monotonicNow() - startedAt)}`);
+          }
+          emitTranslatedItem(item, current, { streaming: true });
+        }
+      });
+    } catch (error) {
+      if (error?.name !== "AbortError" && !item.superseded) {
+        logEvent("translation-failed", `kind=${item.kind} chars=${Array.from(item.text).length}`);
       }
-    } catch {
-      parts = [];
-      logEvent("translation-failed", `kind=${item.kind} chars=${Array.from(batch[0].text).length}`);
+      translated = lastStreamed;
     }
-    lastTranslationAt = Date.now();
+    const finishedAt = monotonicNow();
     inFlightItem = null;
+    inFlightController = null;
     if (generation !== captureGeneration) {
       translationQueue.length = 0;
       break;
     }
-    if (item.kind === "draft" && item.superseded) continue; // 翻译期间被取代：丢弃结果
-    batch.forEach((entry, index) => {
-      const translated = parts[index] || "";
-      if (translated) logEvent("translation-ok", `kind=${entry.kind} seq=${entry.seq} chars=${Array.from(translated).length}`);
-      if (entry.kind === "unit") {
-        if (translated) rememberTranslation(entry.text, translated);
-        // 彻底失败才退原文，保证稳定行不断
-        sendCaptureMessage({
-          type: "CAPTURE_TRANSLATED",
-          // 失败时仍携带原文并发空译文；显示端会稳定回退原文，
-          // 既不伪造翻译，也不会把整句吞掉。
-          lines: [{ text: entry.text, translated }],
-          seq: entry.seq,
-          unit: true
-        }, entry.timing).catch(() => undefined);
-      } else if (translated) {
-        sendCaptureMessage({
-          type: "CAPTURE_TRANSLATED",
-          lines: [{ text: entry.text, translated }],
-          seq: entry.seq
-        }, entry.timing).catch(() => undefined);
-      }
-    });
+    if (item.kind === "draft" && item.superseded) continue;
+
+    translated = String(translated || lastStreamed || "").trim();
+    logEvent("translation-complete", `kind=${item.kind} seq=${item.seq} ms=${Math.round(finishedAt - startedAt)} ok=${Boolean(translated)}`);
+    if (translated) logEvent("translation-ok", `kind=${item.kind} seq=${item.seq} chars=${Array.from(translated).length}`);
+    if (item.kind === "unit") {
+      if (translated) rememberTranslation(item.text, translated);
+      // 完成时再发一次冻结值；失败则空译文让显示端稳定回退原文。
+      sendCaptureMessage({
+        type: "CAPTURE_TRANSLATED",
+        lines: [{ text: item.text, translated }],
+        seq: item.seq,
+        unit: true,
+        streaming: false
+      }, item.timing).catch(() => undefined);
+    } else if (translated && translated !== lastStreamed) {
+      emitTranslatedItem(item, translated, { streaming: false });
+    }
   }
   translatorRunning = false;
 }
@@ -1110,7 +1231,7 @@ async function translateWithRetry(text, options = {}) {
         await sleep(700);
         continue;
       }
-      // 新模型（qwen-mt-flash/plus）未开通时回退到 turbo，避免翻译全挂
+      // flash 未开通时回退到 turbo，避免翻译全挂；turbo 走非增量 JSON。
       if (attempt === 0 && options.model && options.model !== "qwen-mt-turbo"
         && /model|not.?found|invalid|unsupported|permission/i.test(message)) {
         logEvent("translation-model-fallback", `from=${options.model} to=turbo err=${String(message).slice(0, 60)}`);
@@ -1120,19 +1241,6 @@ async function translateWithRetry(text, options = {}) {
     }
   }
   throw lastError || new Error("translate_failed");
-}
-
-// 批量翻译结果解析：模型按 "1. xxx\n2. xxx" 返回时逐条对应；
-// 没有按编号返回时整段当作第一条译文，其余由调用方退回原文。
-function parseNumberedTranslations(result, count) {
-  const text = String(result || "").trim();
-  if (count <= 1) return [text];
-  const pieces = text
-    .split(/\n+/)
-    .map((line) => line.replace(/^\d+[.、．)]\s*/, "").trim())
-    .filter(Boolean);
-  if (pieces.length === count) return pieces;
-  return [text, ...new Array(count - 1).fill("")];
 }
 
 async function startPcmCapture() {
@@ -1222,12 +1330,12 @@ async function resetSocket() {
   if (!stream) throw new Error("capture_not_running");
   logEvent("ws-reconnect", `retry=${retryCount}`);
   captureGeneration += 1;
-  if (inFlightItem) inFlightItem.superseded = true;
+  cancelTranslationWork();
   closeSocket(false);
   frameQueue = [];
   pcmPending = new Uint8Array(0);
-  translationQueue.length = 0;
   inFlightItem = null;
+  inFlightController = null;
   lastUnitTexts.length = 0;
   activeSentenceId = 0;
   activeTiming = {};
@@ -1328,10 +1436,10 @@ async function stopRecognitionOnly() {
   closeSocket(true);
   taskId = "";
   emitSeq = 0;
-  translationQueue.length = 0;
+  cancelTranslationWork();
   inFlightItem = null;
+  inFlightController = null;
   throttleCooldownUntil = 0;
-  lastTranslationAt = 0;
   lastUnitTexts.length = 0;
   resetDraftCommitter();
   // stream 与 monitorAudio 保留，供下次开启复用
@@ -1357,10 +1465,10 @@ async function stopCapture() {
   closeSocket(true);
   taskId = "";
   emitSeq = 0;
-  translationQueue.length = 0;
+  cancelTranslationWork();
   inFlightItem = null;
+  inFlightController = null;
   throttleCooldownUntil = 0;
-  lastTranslationAt = 0;
   lastUnitTexts.length = 0;
   resetDraftCommitter();
 }
