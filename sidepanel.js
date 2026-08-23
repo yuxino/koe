@@ -144,7 +144,12 @@ chrome.runtime.onMessage.addListener((message) => {
       if (text) promoteDraftOrAppend(text, message.seq);
     } else if (message.type === "LIVE_TRANSLATED") {
       if (!translateOn()) return false;
-      if (message.unit) {
+      if (message.unit && message.streaming) {
+        const text = lastLine(message.lines)?.translated;
+        if (!text) return false;
+        if (!acceptDraftSeq(message.seq, { allowEqual: true })) return false;
+        setDraft(text, "translated");
+      } else if (message.unit) {
         const seq = Number(message.seq) || 0;
         const line = lastLine(message.lines);
         // 翻译偶发失败时稳定行退回原文，而不是整句消失。

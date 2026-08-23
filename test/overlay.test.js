@@ -124,27 +124,34 @@ function makeElement(tag = "div") {
   const longDraft = "This draft keeps growing while somebody speaks continuously and it should become a rolling readable viewport instead of filling the video with several lines of source text.";
   send({ type: "LIVE_PARTIAL", jobId: "job-1", mediaEpoch: 3, seq: 2, lines: [{ text: longDraft }] });
   check(
-    Array.from(overlay.shadowRoot.querySelector(".original").textContent).length <= 64,
-    "long source draft is fitted to the readable overlay viewport"
+    overlay.shadowRoot.querySelector(".original").textContent === longDraft,
+    "long source draft keeps its complete semantic context"
   );
 
   send({ type: "LIVE_SUBTITLES", jobId: "job-1", mediaEpoch: 3, seq: 3, unit: true, lines: [{ text: "Second final unit" }] });
   check(
-    overlay.shadowRoot.querySelector(".original").textContent !== "Second final unit",
-    "an immediate second unit does not erase the visible unit"
+    overlay.shadowRoot.querySelector(".original").textContent === "Second final unit",
+    "an immediate second unit renders without an artificial reading delay"
   );
   send({ type: "LIVE_TRANSLATED", jobId: "job-1", mediaEpoch: 3, seq: 3, unit: true, lines: [{ translated: "第二条字幕" }] });
   check(
-    overlay.shadowRoot.querySelector(".translation").textContent !== "第二条字幕",
-    "translation for a queued unit waits with its source"
+    overlay.shadowRoot.querySelector(".translation").textContent === "第二条字幕",
+    "translation stays paired with the immediately visible source"
   );
-  advance(1_100);
-  check(overlay.shadowRoot.querySelector(".original").textContent === "Second final unit", "queued unit is promoted after the minimum reading interval");
-  check(overlay.shadowRoot.querySelector(".translation").textContent === "第二条字幕", "queued translation stays paired with its source");
 
   advance(1_200);
   send({ type: "LIVE_SUBTITLES", jobId: "job-1", mediaEpoch: 3, seq: 4, unit: true, lines: [{ text: "Normally timed unit" }] });
   check(overlay.shadowRoot.querySelector(".original").textContent === "Normally timed unit", "normally timed units still render immediately");
+  send({ type: "LIVE_TRANSLATED", jobId: "job-1", mediaEpoch: 3, seq: 4, unit: true, streaming: true, lines: [{ translated: "首个流式译文" }] });
+  check(overlay.shadowRoot.querySelector(".translation").textContent === "首个流式译文",
+    "the first streaming translation for a stable unit is immediately visible");
+  send({ type: "LIVE_SUBTITLES", jobId: "job-1", mediaEpoch: 3, seq: 4, unit: true, lines: [{ text: "Duplicate must not replace" }] });
+  check(overlay.shadowRoot.querySelector(".original").textContent === "Normally timed unit",
+    "a duplicate stable sequence cannot overwrite the visible cue");
+  send({ type: "LIVE_REVOKE", jobId: "job-1", mediaEpoch: 3, fromSeq: 4, toSeq: 4 });
+  send({ type: "LIVE_SUBTITLES", jobId: "job-1", mediaEpoch: 3, seq: 3, unit: true, lines: [{ text: "Stale after revoke" }] });
+  check(overlay.shadowRoot.querySelector(".original").textContent === "",
+    "revoke clears the cue without lowering the stale-message high-water mark");
 
   const fullscreenRoot = makeElement("fullscreen");
   document.fullscreenElement = fullscreenRoot;

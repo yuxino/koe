@@ -535,31 +535,75 @@ async function hydrateTranscript() {
   transcriptHydrated = true;
 }
 
+function normalizeTranscriptUpdate(entry, existing = null) {
+  const update = { ...entry };
+  const hasBegin = Object.prototype.hasOwnProperty.call(update, "beginTimeMs");
+  const hasEnd = Object.prototype.hasOwnProperty.call(update, "endTimeMs");
+  if (hasBegin) {
+    const value = Number(update.beginTimeMs);
+    if (Number.isFinite(value)) update.beginTimeMs = value;
+    else delete update.beginTimeMs;
+  }
+  if (hasEnd) {
+    const value = Number(update.endTimeMs);
+    if (Number.isFinite(value)) update.endTimeMs = value;
+    else delete update.endTimeMs;
+  }
+  const validBeginUpdate = Object.prototype.hasOwnProperty.call(update, "beginTimeMs");
+  const validEndUpdate = Object.prototype.hasOwnProperty.call(update, "endTimeMs");
+  const begin = Number(validBeginUpdate
+    ? update.beginTimeMs
+    : existing?.beginTimeMs);
+  const end = Number(validEndUpdate
+    ? update.endTimeMs
+    : existing?.endTimeMs);
+  const invalidNegative = (Number.isFinite(begin) && begin < 0) || (Number.isFinite(end) && end < 0);
+  if (invalidNegative || (Number.isFinite(begin) && Number.isFinite(end) && end < begin)) {
+    if (validBeginUpdate) delete update.beginTimeMs;
+    if (validEndUpdate) delete update.endTimeMs;
+  }
+  return update;
+}
+
 function recordTranscript(entry) {
   transcriptWriteChain = transcriptWriteChain
     .then(async () => {
       await hydrateTranscript();
       const seq = Number(entry.seq);
       const epoch = Number(entry.mediaEpoch) || 0;
-      const existing = transcriptCache.find((row) => Number(row.seq) === seq && (Number(row.mediaEpoch) || 0) === epoch);
-      if (existing) Object.assign(existing, entry);
-      else transcriptCache.push({ ...entry, seq, mediaEpoch: epoch });
+      const jobId = String(entry.jobId || "");
+      let existing = transcriptCache.find((row) => Number(row.seq) === seq
+        && (Number(row.mediaEpoch) || 0) === epoch
+        && String(row.jobId || "") === jobId);
+      const incomingText = String(entry.text || "").trim();
+      const existingText = String(existing?.text || "").trim();
+      // 同一键出现不同原文表示上游发生了序号碰撞。不能把新原文与旧译文/时间
+      // 拼成一行；替换整条记录，让损坏局限在当前消息。
+      if (existing && incomingText && existingText && incomingText !== existingText) {
+        transcriptCache.splice(transcriptCache.indexOf(existing), 1);
+        existing = null;
+      }
+      const update = normalizeTranscriptUpdate(entry, existing);
+      if (existing) Object.assign(existing, update);
+      else transcriptCache.push({ ...update, seq, mediaEpoch: epoch, jobId });
       while (transcriptCache.length > TRANSCRIPT_LIMIT) transcriptCache.shift();
       await chrome.storage.session.set({ koeTranscript: transcriptCache });
     })
     .catch(() => {});
 }
 
-function removeTranscriptRange(fromSeq, toSeq, mediaEpoch = 0) {
+function removeTranscriptRange(fromSeq, toSeq, mediaEpoch = 0, jobId = "") {
   transcriptWriteChain = transcriptWriteChain
     .then(async () => {
       await hydrateTranscript();
       const from = Number(fromSeq) || 0;
       const to = Number(toSeq) || from;
       const epoch = Number(mediaEpoch) || 0;
+      const targetJobId = String(jobId || "");
       transcriptCache = transcriptCache.filter((row) => {
         const seq = Number(row.seq) || 0;
-        return (Number(row.mediaEpoch) || 0) !== epoch || seq < from || seq > to;
+        const sameJob = !targetJobId || String(row.jobId || "") === targetJobId;
+        return !sameJob || (Number(row.mediaEpoch) || 0) !== epoch || seq < from || seq > to;
       });
       await chrome.storage.session.set({ koeTranscript: transcriptCache });
     })
@@ -661,7 +705,7 @@ async function forwardRevoke(message) {
   const state = resolveCaptureState(message);
   if (!state?.captureStarted || !state.jobId) return { ok: true, ignored: true };
   if (Number(message.mediaEpoch) !== (Number(state.mediaEpoch) || 0)) return { ok: true, ignored: true };
-  await removeTranscriptRange(fromSeq, toSeq, message.mediaEpoch);
+  await removeTranscriptRange(fromSeq, toSeq, message.mediaEpoch, state.jobId);
   const payload = {
     type: "LIVE_REVOKE",
     jobId: state.jobId,
@@ -690,6 +734,7 @@ async function forwardCaptureLines(message, type) {
     recordTranscript({
       seq: message.seq,
       text: lines[0]?.text,
+      jobId: state.jobId,
       mediaEpoch: message.mediaEpoch,
       beginTimeMs: message.beginTimeMs,
       endTimeMs: message.endTimeMs,
@@ -699,6 +744,7 @@ async function forwardCaptureLines(message, type) {
     recordTranscript({
       seq: message.seq,
       translated: lines[0]?.translated,
+      jobId: state.jobId,
       mediaEpoch: message.mediaEpoch,
       beginTimeMs: message.beginTimeMs,
       endTimeMs: message.endTimeMs,
@@ -1025,7 +1071,8 @@ function resolveCaptureState(message = {}) {
   if (!state && captureTabId) state = tabStates.get(captureTabId) || null;
   if (!state) return null;
   if (messageJobId && state.jobId !== messageJobId) return null;
-  state.captureStarted = true;
+  // 停止后的 WebSocket/翻译结果可能迟到。它们绝不能把会话从 idle 复活。
+  if (!state.captureStarted) return null;
   state.status = "live";
   state.captureNeedsGesture = false;
   captureTabId = state.tabId;

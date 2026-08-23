@@ -33,11 +33,8 @@
   let draftTranslatedText = "";
   let translatedSeq = 0;
   let visibleUnitSeq = 0;
-  let visibleUnitShownAt = 0;
-  let unitAdvanceTimer = null;
-  const queuedUnits = [];
+  let awaitingMediaReset = false;
   const pendingUnitTranslations = new Map();
-  const MINIMUM_UNIT_DISPLAY_MS = 1_000;
 
   try {
     chrome.runtime.onMessage.addListener((message) => {
@@ -130,12 +127,13 @@
 
   document.addEventListener("seeking", (event) => {
     if (!isActiveVideoEvent(event)) return;
-    clearOverlayText();
+    awaitingMediaReset = true;
+    clearOverlayText({ resetTimeline: false });
   }, true);
 
   document.addEventListener("seeked", (event) => {
     if (!isActiveVideoEvent(event) || !activeSession) return;
-    clearOverlayText();
+    clearOverlayText({ resetTimeline: false });
     safeSend({
       type: "MEDIA_DISCONTINUITY",
       reason: "seek",
@@ -168,6 +166,7 @@
         mediaEpoch: nextEpoch,
         translate: message.translate !== false
       };
+      awaitingMediaReset = false;
       ensureOverlay();
       applyOverlayPreferences();
       return;
@@ -176,6 +175,7 @@
       if (!activeSession || !message.jobId || message.jobId === activeSession.jobId) {
         clearOverlayText();
         activeSession = null;
+        awaitingMediaReset = false;
       }
       return;
     }
@@ -183,15 +183,15 @@
       if (!activeSession || message.jobId !== activeSession.jobId) return;
       activeSession.mediaEpoch = Number(message.mediaEpoch) || 0;
       clearOverlayText();
+      awaitingMediaReset = false;
       return;
     }
     if (!acceptLiveMessage(message)) return;
     if (message.type === "LIVE_REVOKE") {
       const from = Number(message.fromSeq) || 0;
       const to = Number(message.toSeq) || from;
-      const queuedRevoked = queuedUnits.some((item) => item.seq >= from && item.seq <= to);
-      if ((visibleUnitSeq >= from && visibleUnitSeq <= to) || queuedRevoked || (translatedSeq >= from && translatedSeq <= to)) {
-        clearOverlayText();
+      if ((visibleUnitSeq >= from && visibleUnitSeq <= to) || (translatedSeq >= from && translatedSeq <= to)) {
+        clearOverlayText({ resetTimeline: false });
       }
       return;
     }
@@ -205,9 +205,9 @@
       draftTranslatedText = "";
       showOverlay(3_600);
     } else if (message.type === "LIVE_SUBTITLES") {
-      if (seq && seq < lastUnitSeq) return;
+      if (seq && seq <= lastUnitSeq) return;
       lastUnitSeq = Math.max(lastUnitSeq, seq);
-      queueOrShowUnit({
+      showUnit({
         seq,
         original: String(line.text || "").trim(),
         translated: pendingUnitTranslations.get(seq) || ""
@@ -221,11 +221,7 @@
         if (seq === visibleUnitSeq) {
           finalTranslatedText = value;
           if (!draftOriginal) showOverlay(5_200);
-        } else {
-          const queued = queuedUnits.find((item) => item.seq === seq);
-          if (queued) queued.translated = value;
-          else if (seq >= visibleUnitSeq) pendingUnitTranslations.set(seq, value);
-        }
+        } else if (seq >= visibleUnitSeq) pendingUnitTranslations.set(seq, value);
       } else {
         if (seq < lastDraftSeq) return;
         draftTranslatedText = value;
@@ -235,57 +231,30 @@
     renderOverlay();
   }
 
-  function queueOrShowUnit(item) {
-    if (!item.original) return;
-    const elapsed = Date.now() - visibleUnitShownAt;
-    if (!visibleUnitSeq || elapsed >= MINIMUM_UNIT_DISPLAY_MS) {
-      showUnit(item);
-      return;
-    }
-    const existing = queuedUnits.find((queued) => queued.seq === item.seq);
-    if (existing) Object.assign(existing, item);
-    else queuedUnits.push(item);
-    scheduleQueuedUnit();
-  }
-
   function showUnit(item) {
+    if (!item.original) return;
     visibleUnitSeq = Number(item.seq) || visibleUnitSeq;
-    visibleUnitShownAt = Date.now();
     finalOriginal = String(item.original || "").trim();
     finalTranslatedText = String(item.translated || "").trim();
     draftOriginal = "";
     draftTranslatedText = "";
     showOverlay(5_200);
     renderOverlay();
-    scheduleQueuedUnit();
-  }
-
-  function scheduleQueuedUnit() {
-    if (unitAdvanceTimer) window.clearTimeout(unitAdvanceTimer);
-    unitAdvanceTimer = null;
-    if (queuedUnits.length === 0) return;
-    const delay = Math.max(0, MINIMUM_UNIT_DISPLAY_MS - (Date.now() - visibleUnitShownAt));
-    unitAdvanceTimer = window.setTimeout(() => {
-      unitAdvanceTimer = null;
-      const next = queuedUnits.shift();
-      if (next) showUnit(next);
-    }, delay);
   }
 
   function clearUnitQueue() {
-    if (unitAdvanceTimer) window.clearTimeout(unitAdvanceTimer);
-    unitAdvanceTimer = null;
-    queuedUnits.length = 0;
     pendingUnitTranslations.clear();
     visibleUnitSeq = 0;
-    visibleUnitShownAt = 0;
   }
 
   function acceptLiveMessage(message) {
     if (!activeSession || message.jobId !== activeSession.jobId) return false;
+    if (awaitingMediaReset) return false;
     if ((Number(message.mediaEpoch) || 0) !== activeSession.mediaEpoch) return false;
+    const begin = Number(message.beginTimeMs);
     const end = Number(message.endTimeMs);
     const audio = Number(message.audioPositionMs);
+    if (Number.isFinite(begin) && Number.isFinite(end) && end < begin) return false;
     // 弱网恢复时宁可跳过已经过去很久的字幕，也不要让旧台词追着画面补播。
     if (Number.isFinite(end) && Number.isFinite(audio) && audio - end > 8_000) return false;
     return true;
@@ -413,7 +382,7 @@
     const scale = overlaySize === "small" ? 0.84 : overlaySize === "large" ? 1.18 : 1;
     stage.style.setProperty("--koe-scale", String(scale));
     overlayHost.hidden = !overlayEnabled;
-    if (!overlayEnabled) clearOverlayText();
+    if (!overlayEnabled) clearOverlayText({ resetTimeline: false });
   }
 
   function positionOverlay() {
@@ -447,39 +416,24 @@
     if (!overlayOriginal || !overlayTranslation) return;
     const original = draftOriginal || finalOriginal;
     const translation = draftOriginal ? draftTranslatedText : finalTranslatedText;
-    overlayOriginal.textContent = fitOverlayText(original);
-    overlayTranslation.textContent = activeSession?.translate ? fitOverlayText(translation) : "";
+    overlayOriginal.textContent = original;
+    overlayTranslation.textContent = activeSession?.translate ? translation : "";
     overlayOriginal.classList.toggle("solo", !overlayTranslation.textContent);
     positionOverlay();
   }
 
-  function fitOverlayText(text) {
-    const value = String(text || "").trim();
-    const points = Array.from(value);
-    const isCjk = /[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(value);
-    const maximum = isCjk ? 28 : 64;
-    if (points.length <= maximum) return value;
-    let tail = points.slice(points.length - maximum);
-    const searchEnd = Math.min(tail.length - 1, Math.floor(maximum * 0.34));
-    for (let index = 0; index <= searchEnd; index += 1) {
-      if (/\s/.test(tail[index]) || /[，、,；;：:—–-]/.test(tail[index])) {
-        tail = tail.slice(index + 1);
-        break;
-      }
-    }
-    return tail.join("").trim();
-  }
-
-  function clearOverlayText() {
+  function clearOverlayText({ resetTimeline = true } = {}) {
     if (overlayHideTimer) window.clearTimeout(overlayHideTimer);
     overlayHideTimer = null;
-    lastDraftSeq = 0;
-    lastUnitSeq = 0;
+    if (resetTimeline) {
+      lastDraftSeq = 0;
+      lastUnitSeq = 0;
+      translatedSeq = 0;
+    }
     finalOriginal = "";
     draftOriginal = "";
     finalTranslatedText = "";
     draftTranslatedText = "";
-    translatedSeq = 0;
     clearUnitQueue();
     if (overlayOriginal) overlayOriginal.textContent = "";
     if (overlayTranslation) overlayTranslation.textContent = "";

@@ -72,8 +72,7 @@ function makeHarness() {
   h.run(`updateDraft(${JSON.stringify(draft)})`);
   const committed = h.run("commitPendingDraft({ forceLongIncomplete: false })");
   check(Boolean(committed), "a complete oversized sentence still commits promptly");
-  check(Array.from(String(committed || "")).length <= 64, "a complete sentence is bounded instead of becoming one oversized unit");
-  check(!/\s$/.test(String(committed || "")), "the bounded unit does not end in stray whitespace");
+  check(String(committed || "") === draft, "a complete sentence stays intact for accurate translation");
 }
 
 {
@@ -96,15 +95,19 @@ function makeHarness() {
 {
   const h = makeHarness();
   const text = "This final result contains a long uninterrupted explanation that should be divided at a natural word boundary before it fills the whole video. It then continues with a short closing sentence.";
-  const units = h.run(`typeof splitSubtitleUnits === "function" ? splitSubtitleUnits(${JSON.stringify(text)}) : []`);
-  check(units.length >= 2, "an oversized server final is split into multiple subtitle-sized units");
-  check(units.every((unit) => Array.from(unit).length <= 64), "every server-final unit respects the Latin hard cap");
+  h.run(`emitFinalSentences(${JSON.stringify(text)}, { sentenceId: 9, beginTimeMs: 1_000, endTimeMs: 8_000 })`);
+  const units = h.sent.filter((message) => message.type === "CAPTURE_LINES");
+  check(units.length === 1, "one authoritative server final emits one semantic cue instead of a same-timestamp burst");
+  check(units[0]?.lines?.[0]?.text === text, "the semantic cue keeps the complete authoritative text");
 }
 
 {
   const h = makeHarness();
-  const units = h.run(`typeof splitSubtitleUnits === "function" ? splitSubtitleUnits("Okay. Great. Let's continue.") : []`);
-  check(units.length === 1, "adjacent short final sentences are packed into one readable unit");
+  const text = "Okay. Great. Let's continue.";
+  h.run(`emitFinalSentences(${JSON.stringify(text)})`);
+  const units = h.sent.filter((message) => message.type === "CAPTURE_LINES");
+  check(units.length === 1 && units[0]?.lines?.[0]?.text === text,
+    "adjacent short final sentences stay in one semantic cue");
 }
 
 console.log(failures === 0 ? "long subtitle regression PASS" : `${failures} failures`);

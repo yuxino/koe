@@ -91,9 +91,14 @@ function audioPositionMs() {
 }
 
 function timingFields(timing = activeTiming) {
+  const beginTimeMs = Number(timing?.beginTimeMs);
+  const endTimeMs = Number(timing?.endTimeMs);
+  const hasBegin = Number.isFinite(beginTimeMs);
+  const hasEnd = Number.isFinite(endTimeMs);
+  const validRange = !hasBegin || !hasEnd || endTimeMs >= beginTimeMs;
   return {
-    beginTimeMs: Number.isFinite(Number(timing?.beginTimeMs)) ? Number(timing.beginTimeMs) : undefined,
-    endTimeMs: Number.isFinite(Number(timing?.endTimeMs)) ? Number(timing.endTimeMs) : undefined,
+    beginTimeMs: validRange && hasBegin ? beginTimeMs : undefined,
+    endTimeMs: validRange && hasEnd ? endTimeMs : undefined,
     audioPositionMs: audioPositionMs(),
     sentenceId: Number(timing?.sentenceId) || 0
   };
@@ -158,7 +163,12 @@ async function startCapture(message) {
 
 async function runStartCapture({ streamId, translate, apiKey, source, engine, jobId, tabId, mediaEpoch }) {
   const nextJobId = String(jobId || "");
-  const sameSession = Boolean(nextJobId && nextJobId === captureJobId);
+  const nextMediaEpoch = Number(mediaEpoch) || 0;
+  const sameTimeline = Boolean(
+    nextJobId
+    && nextJobId === captureJobId
+    && nextMediaEpoch === captureMediaEpoch
+  );
   retryCount = 0;
   stopping = false;
   clearRetryTimer();
@@ -170,8 +180,8 @@ async function runStartCapture({ streamId, translate, apiKey, source, engine, jo
   captureTranslate = Boolean(translate);
   captureJobId = nextJobId;
   captureTabId = Number(tabId) || 0;
-  captureMediaEpoch = Number(mediaEpoch) || 0;
-  if (!sameSession) {
+  captureMediaEpoch = nextMediaEpoch;
+  if (!sameTimeline) {
     emitSeq = 0;
     capturedAudioSamples = 0;
   }
@@ -613,9 +623,10 @@ function commitPendingDraft({ forceLongIncomplete = false } = {}) {
   // 才出现时把整段独白作为一个 unit 上屏。
   const firstSentence = firstCompleteSentence(pending);
   if (isMeaningful(firstSentence)) {
-    const chunk = firstLongChunk(firstSentence);
-    commitChunk(chunk, pending);
-    return chunk;
+    // 完整句是翻译的最小语义单位，不再按显示宽度切碎。页面负责两行布局；
+    // 只有迟迟没有标点的连续语音才走下面的长度兜底。
+    commitChunk(firstSentence, pending);
+    return firstSentence;
   }
   if (forceLongIncomplete) {
     const longChunk = firstLongChunk(pending);
@@ -739,55 +750,6 @@ function resetDraftCommitter() {
   currentSentenceStartSeq = 0;
 }
 
-// 按句切块（保留句末标点），供权威 final 整段按句上屏，避免一大段/超长译文
-function splitSentences(text) {
-  const points = codePoints(text);
-  const result = [];
-  let start = 0;
-  for (let index = 0; index < points.length; index += 1) {
-    if (SENTENCE_DELIMITERS.includes(points[index])) {
-      const sentence = points.slice(start, index + 1).join("").trim();
-      if (sentence) result.push(sentence);
-      start = index + 1;
-    }
-  }
-  const tail = points.slice(start).join("").trim();
-  if (tail) result.push(tail);
-  return result;
-}
-
-// 权威 final 可能一次返回整段。先把超长句拆到字幕宽度内，再把相邻短句尽量
-// 合并到同一块：既没有超长字幕，也不会在同一毫秒连发多个本来放得下的小句。
-function splitSubtitleUnits(text) {
-  const bounded = [];
-  for (const sentence of splitSentences(text)) {
-    let remaining = String(sentence).trim();
-    while (isMeaningful(remaining)) {
-      const chunk = firstLongChunk(remaining);
-      if (!isMeaningful(chunk)) break;
-      bounded.push(chunk);
-      const consumed = codePoints(chunk).length;
-      remaining = codePoints(remaining).slice(consumed).join("").trim();
-    }
-  }
-
-  const result = [];
-  let current = "";
-  for (const chunk of bounded) {
-    const separator = current && textLanguage(`${current}${chunk}`) === "latin" ? " " : "";
-    const candidate = `${current}${separator}${chunk}`.trim();
-    const { maximum } = subtitleLimits(candidate);
-    if (current && codePoints(candidate).length > maximum) {
-      result.push(current);
-      current = chunk;
-    } else {
-      current = candidate;
-    }
-  }
-  if (isMeaningful(current)) result.push(current);
-  return result;
-}
-
 // 撤回当前句子的全部字幕块（识别修正时用），并清空待提交状态
 function revokeCurrentSentence(reason) {
   const fromSeq = currentSentenceStartSeq || lastEmittedUnitSeq;
@@ -886,10 +848,10 @@ function handleServerDraft(text, timing = activeTiming) {
     seq
   }, timing).catch(() => undefined);
   if (captureTranslate) {
-    // 草稿仍然立即翻译，但输入也限制在下一块字幕宽度内：长独白不会把持续增长的
-    // 200 多字符反复送去翻译，首块更稳，且草稿译文与随后提交的 unit 对齐。
-    const first = firstLongChunk(firstCompleteSentence(tail) || tail);
-    scheduleDraftTranslation(first, seq, timing);
+    // 显示宽度和翻译上下文分开处理：页面仍用两行样式约束视觉高度，但翻译模型
+    // 收到完整的当前句，避免 64 字符硬截断破坏指代、语义和句尾信息。
+    const translationSource = firstCompleteSentence(tail) || tail;
+    scheduleDraftTranslation(translationSource, seq, timing);
   }
 }
 
@@ -965,14 +927,12 @@ function handleServerFinal(text, timing = activeTiming) {
   resetDraftCommitter();
 }
 
-// final 文本按字幕宽度切块；已上屏过的块跳过（防重复）
+// 一个权威 final 对应一个语义 cue。按显示宽度拆成多条会让它们共享同一时间区间、
+// 在同一毫秒连发，页面只能看到最后一条，翻译也失去完整上下文。
 function emitFinalSentences(text, timing = activeTiming) {
-  const units = splitSubtitleUnits(text);
-  for (const unit of units) {
-    if (lastUnitTexts.includes(unit)) continue;
-    if (!isMeaningful(unit)) continue;
-    emitUnit(unit, timing);
-  }
+  const unit = String(text || "").trim();
+  if (!isMeaningful(unit) || lastUnitTexts.includes(unit)) return;
+  emitUnit(unit, timing);
 }
 
 function emitCommittedUnit(text, timing = activeTiming) {
@@ -1160,8 +1120,9 @@ function emitTranslatedItem(item, translated, { streaming = false } = {}) {
     type: "CAPTURE_TRANSLATED",
     lines: [{ text: item.text, translated }],
     seq: item.seq,
-    // 流式块先更新当前草稿；完整响应到达后才把稳定句冻结成 unit。
-    unit: !streaming && item.kind === "unit",
+    // unit 表示译文属于稳定字幕；streaming 只表示结果仍在增长。两者不能混用，
+    // 否则稳定字幕的首个流式译文会被页面当成草稿而不可见。
+    unit: item.kind === "unit",
     streaming
   }, item.timing).catch(() => undefined);
 }
@@ -1479,7 +1440,6 @@ async function stopRecognitionOnly() {
   await stopPcmCapture();
   closeSocket(true);
   taskId = "";
-  emitSeq = 0;
   cancelTranslationWork();
   inFlightItem = null;
   inFlightController = null;

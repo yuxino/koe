@@ -128,6 +128,28 @@ function makeCtx(fetchImpl = async () => jsonResponse("译文")) {
   }
 
   {
+    const h = makeCtx(async () => jsonResponse("完整长句译文"));
+    const source = "This deliberately long sentence keeps every important relationship intact so that the translation model can resolve references and meaning accurately.";
+    h.run(`handleServerDraft(${JSON.stringify(source)}, { sentenceId: 7, beginTimeMs: 100, endTimeMs: 900 })`);
+    await settle();
+    const translatedSource = h.requests[0]?.body?.input?.messages?.[0]?.content;
+    check(translatedSource === source,
+      `long draft translation keeps the complete sentence (actual ${JSON.stringify(translatedSource)})`);
+    console.log("T3 长句完整上下文 PASS");
+  }
+
+  {
+    const h = makeCtx(async () => jsonResponse("完整最终译文"));
+    const source = "This authoritative final remains a complete semantic sentence even when its visual representation needs to fit inside a compact subtitle overlay.";
+    h.run(`emitFinalSentences(${JSON.stringify(source)}, { sentenceId: 8, beginTimeMs: 1_000, endTimeMs: 7_000 })`);
+    await settle();
+    check(h.requests.length === 1, `one final sentence starts one translation request (actual ${h.requests.length})`);
+    check(h.requests[0]?.body?.input?.messages?.[0]?.content === source,
+      "the authoritative final reaches translation without display-boundary truncation");
+    console.log("T4 最终句完整上下文 PASS");
+  }
+
+  {
     let releaseFirst = () => undefined;
     const h = makeCtx((url, options, index) => {
       if (index > 0) return Promise.resolve(jsonResponse("稳定译文"));
@@ -161,15 +183,15 @@ function makeCtx(fetchImpl = async () => jsonResponse("译文")) {
     check(!h.requestedDelays.includes(700), "正常翻译路径没有固定 700ms 等待");
 
     const unitMessages = h.sent.filter((message) => message.type === "CAPTURE_TRANSLATED" && message.seq === 2);
-    check(unitMessages.some((message) => message.streaming === true && message.unit === false),
-      "流式中文先作为当前草稿更新，不提前冻结稳定行");
+    check(unitMessages.some((message) => message.streaming === true && message.unit === true),
+      "稳定句的首个流式中文保留 unit 归属，页面可以立即显示");
     check(unitMessages.some((message) => message.streaming === false && message.unit === true
       && message.lines[0].translated === "稳定译文"), "完整中文到达后才冻结稳定行");
 
     releaseFirst();
     await new Promise((resolve) => setTimeout(resolve, 30));
     await settle();
-    console.log("T3 稳定句抢占草稿 PASS");
+    console.log("T5 稳定句抢占草稿 PASS");
   }
 
   console.log(fail === 0 ? "translation-latency 回归全部通过" : `${fail} 项失败`);
