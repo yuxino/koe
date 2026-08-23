@@ -17,6 +17,7 @@ let draftTranslatedAt = 0;
 // 翻译偏好自动同步节流：会话与开关不一致时最多 10 秒补发一次 SET_TRANSLATE
 let lastTranslateSyncAt = 0;
 let lastStatusHint = "";
+const pendingOriginalUnits = new Map();
 const MAX_ROWS = 120;
 
 // 字幕模式：一个下拉 = 声音来源 × 识别引擎，收起复杂的双选项设置
@@ -33,6 +34,8 @@ const elements = {
   startButton: document.querySelector("#start-button"),
   translateToggle: document.querySelector("#translate-toggle"),
   captureMode: document.querySelector("#capture-mode"),
+  overlayEnabled: document.querySelector("#overlay-enabled"),
+  overlaySize: document.querySelector("#overlay-size"),
   apiKey: document.querySelector("#api-key"),
   saveKey: document.querySelector("#save-key"),
   hint: document.querySelector("#hint"),
@@ -73,6 +76,14 @@ elements.translateToggle.addEventListener("change", async () => {
   elements.hint.textContent = translate ? "中文翻译已开启 · 正在重连识别…" : "中文翻译已关闭 · 只显示原文";
 });
 elements.captureMode.addEventListener("change", () => void saveCaptureMode());
+elements.overlayEnabled.addEventListener("change", async () => {
+  await chrome.storage.local.set({ koeOverlayEnabled: elements.overlayEnabled.checked });
+  elements.hint.textContent = elements.overlayEnabled.checked ? "页面字幕已开启" : "页面字幕已关闭 · 侧边栏记录仍会保留";
+});
+elements.overlaySize.addEventListener("change", async () => {
+  await chrome.storage.local.set({ koeOverlaySize: elements.overlaySize.value });
+  elements.hint.textContent = "页面字幕大小已更新";
+});
 elements.copyAll.addEventListener("click", () => void copyTranscript());
 elements.clearFeed.addEventListener("click", () => {
   resetFeed();
@@ -124,18 +135,27 @@ chrome.runtime.onMessage.addListener((message) => {
         setDraft(text, "raw");
       }
     } else if (message.type === "LIVE_SUBTITLES") {
-      if (translateOn()) return false;
-      if (!acceptUnitSeq(message.seq)) return false;
       const text = lastLine(message.lines)?.text;
+      if (translateOn()) {
+        if (text) pendingOriginalUnits.set(Number(message.seq) || 0, text);
+        return false;
+      }
+      if (!acceptUnitSeq(message.seq)) return false;
       if (text) promoteDraftOrAppend(text, message.seq);
     } else if (message.type === "LIVE_TRANSLATED") {
       if (!translateOn()) return false;
-      const text = lastLine(message.lines)?.translated;
-      if (!text) return false;
       if (message.unit) {
+        const seq = Number(message.seq) || 0;
+        const line = lastLine(message.lines);
+        // 翻译偶发失败时稳定行退回原文，而不是整句消失。
+        const text = String(line?.translated || pendingOriginalUnits.get(seq) || line?.text || "").trim();
+        pendingOriginalUnits.delete(seq);
+        if (!text) return false;
         if (!acceptUnitSeq(message.seq)) return false;
         promoteDraftOrAppend(text, message.seq);
       } else {
+        const text = lastLine(message.lines)?.translated;
+        if (!text) return false;
         if (!acceptDraftSeq(message.seq)) return false;
         setDraft(text, "translated");
       }
@@ -155,7 +175,9 @@ async function init() {
 }
 
 async function initPrefs() {
-  const { koeTranslate, koeApiKey, koeCaptureSource, koeAsrEngine } = await chrome.storage.local.get(["koeTranslate", "koeApiKey", "koeCaptureSource", "koeAsrEngine"]);
+  const { koeTranslate, koeApiKey, koeCaptureSource, koeAsrEngine, koeOverlayEnabled, koeOverlaySize } = await chrome.storage.local.get([
+    "koeTranslate", "koeApiKey", "koeCaptureSource", "koeAsrEngine", "koeOverlayEnabled", "koeOverlaySize"
+  ]);
   elements.translateToggle.checked = koeTranslate !== undefined ? Boolean(koeTranslate) : true;
   const sourceValue = koeCaptureSource === "mic" ? "mic" : "tab";
   const engineValue = ["webspeech"].includes(koeAsrEngine) ? koeAsrEngine : "dashscope";
@@ -163,6 +185,8 @@ async function initPrefs() {
     .find((key) => CAPTURE_MODES[key].source === sourceValue && CAPTURE_MODES[key].engine === engineValue)
     || "tab-dashscope";
   elements.captureMode.value = modeKey;
+  elements.overlayEnabled.checked = koeOverlayEnabled !== false;
+  elements.overlaySize.value = ["small", "medium", "large"].includes(koeOverlaySize) ? koeOverlaySize : "medium";
   hasApiKey = Boolean(String(koeApiKey || "").trim());
   elements.settings.open = !hasApiKey;
   updateSettingsSummary();
@@ -177,8 +201,10 @@ function currentMode() {
 async function saveCaptureMode() {
   const mode = currentMode();
   await chrome.storage.local.set({ koeCaptureSource: mode.source, koeAsrEngine: mode.engine });
-  if (activeTab?.id) {
-    await chrome.runtime.sendMessage({ type: "SET_CAPTURE", tabId: activeTab.id }).catch(() => undefined);
+  const targetTabId = currentState.tabId || activeTab?.id;
+  if (targetTabId) {
+    const response = await chrome.runtime.sendMessage({ type: "SET_CAPTURE", tabId: targetTabId }).catch(() => null);
+    if (response?.state) currentState = response.state;
   }
   elements.hint.textContent = `已切换模式：${elements.captureMode.options[elements.captureMode.selectedIndex].textContent}`;
 }
@@ -208,7 +234,8 @@ async function syncAuthRule(apiKey) {
       },
       condition: {
         urlFilter: "||dashscope.aliyuncs.com/api-ws/",
-        resourceTypes: ["websocket"]
+        resourceTypes: ["websocket"],
+        initiatorDomains: [chrome.runtime.id]
       }
     }]
   });
@@ -514,6 +541,7 @@ function resetFeed() {
   draftEl = null;
   lastUnitSeq = 0;
   lastDraftSeq = 0;
+  pendingOriginalUnits.clear();
 }
 
 // 切 tab 后新面板实例接管会话：从后台拉回本次会话已上屏的字幕历史。
@@ -573,6 +601,7 @@ function revokeRow(fromSeq, toSeq) {
   const from = Number(fromSeq) || 0;
   const to = Number(toSeq) || from;
   if (!from) return;
+  for (let seq = from; seq <= to; seq += 1) pendingOriginalUnits.delete(seq);
   const rows = [...elements.feed.children];
   let removed = 0;
   for (const row of rows) {

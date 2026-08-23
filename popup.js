@@ -1,8 +1,5 @@
-// Koe 弹窗：点图标 = 弹窗 + 侧边栏一起出现。
-// 侧边栏打开的硬约束：chrome.sidePanel.open() 必须发生在"用户手势上下文"内，
-// await 链之后的调用会抛 "may only be called in response to a user gesture"（Chromium issue 356181670）。
-// 因此策略：① init 在 5 秒手势窗口内尽量早开；② 任何按钮点击先用缓存的 windowId 同步开一次（新手势）；
-// ③ 开失败绝不静默——状态行提示 + 次按钮可再次点击重试。
+// Koe 弹窗：点图标直接开启页面字幕。侧边栏退回为可选的记录与设置面板，
+// 只有用户明确点「打开字幕记录与设置」时才占用屏幕空间。
 
 let activeTab;
 let lastWindowId = null;   // 最近一次拿到的窗口 id，供"点击时同步开面板"使用
@@ -19,32 +16,22 @@ const elements = {
 
 document.addEventListener("DOMContentLoaded", init);
 elements.startButton.addEventListener("click", () => {
-  // 同步调用开面板：这次点击就是新的手势，必须在同一事件栈里发出
-  fireAndForgetOpen();
   if (currentState.captureActive) void stop();
   else void startRecommended();
 });
 elements.openPanel.addEventListener("click", () => {
-  fireAndForgetOpen();
   void (async () => {
     if (await openPanelAndClose()) window.close();
+    else setStatus("记录面板没有打开，请再点一次", true);
   })();
 });
 
 async function init() {
   if (elements.version) elements.version.textContent = `v${chrome.runtime.getManifest().version}`;
   await refreshActiveTab();
-  // 无条件先开面板：点图标就该看到侧边栏（用户心智 = 旧版 openPanelOnActionClick 行为）
-  const opened = await openPanelAndClose();
   await refreshState();
-  if (currentState.captureActive || currentState.status === "live") return; // 开完即关弹窗
-  if (!opened) setStatus("侧边栏没开出来？点「打开字幕侧边栏」再试一次", true);
+  if (currentState.captureActive || currentState.status === "live") return;
   void tryAutoStart();
-}
-
-function fireAndForgetOpen() {
-  if (!lastWindowId) return;
-  void chrome.sidePanel.open({ windowId: lastWindowId }).catch(() => {});
 }
 
 async function openPanelAndClose() {
@@ -140,9 +127,7 @@ async function start(targetIdOverride) {
     if (!response?.ok) throw new Error(response?.error || "无法启动实时字幕。");
     currentState = response.state || { status: "live" };
     render();
-    // 开好了：确保侧边栏开着，然后关弹窗
-    fireAndForgetOpen();
-    await openPanelAndClose();
+    // 页面字幕已接管显示，保持视频可视区域不被侧边栏挤压。
     window.close();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -193,6 +178,6 @@ function render() {
   if (live) {
     // 字幕可能在别的标签页跑着：状态跟捕获会话走，别让用户以为没开
     const otherTab = currentState.tabId && activeTab?.id && currentState.tabId !== activeTab.id;
-    setStatus(otherTab ? "字幕运行于其他标签页 · 停止按钮可关闭" : "字幕已开启 · 显示在侧边栏");
+    setStatus(otherTab ? "字幕运行于其他标签页 · 停止按钮可关闭" : "字幕已开启 · 显示在视频画面上");
   }
 }

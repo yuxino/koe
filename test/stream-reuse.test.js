@@ -86,13 +86,30 @@ const fakeTabStream = () => ({ getTracks: () => [{ stop() {} }] });
     console.log("T2 active-stream retry PASS");
   }
   {
+    let calls = 0;
+    let stopped = 0;
+    const h = makeOffCtx({ tabGetUserMedia: async () => {
+      calls += 1;
+      return { getTracks: () => [{ stop() { stopped += 1; } }] };
+    } });
+    const run = (code) => vm.runInContext(code, h.ctx);
+    run(`captureSource = "tab"; captureEngine = "dashscope"; currentStreamSource = ""; stream = null; monitorAudio = null;`);
+    await run(`startCapture({ streamId: "tab-a", translate: false, apiKey: "k", source: "tab", engine: "dashscope" })`);
+    await flush();
+    await run(`startCapture({ streamId: "tab-b", translate: false, apiKey: "k", source: "tab", engine: "dashscope" })`);
+    await flush();
+    check(calls === 2, `different tab stream id reacquires media (${calls})`);
+    check(stopped >= 1, "different tab stream id releases previous media");
+    console.log("T3 different tab stream identity PASS");
+  }
+  {
     const h = makeOffCtx({ tabGetUserMedia: async () => { throw new Error("Cannot capture a tab with an active stream"); } });
     const run = (code) => vm.runInContext(code, h.ctx);
     run(`captureSource = "tab"; captureEngine = "dashscope"; currentStreamSource = ""; stream = null; monitorAudio = null;`);
     const r = await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope" }).then(r => ({ok:true})).catch(e => ({ok:false,error:e.message}))`);
     await flush();
     check(r.ok === false && /刷新视频页面/.test(r.error), "clear guidance when still occupied");
-    console.log("T3 persistent-occupancy guidance PASS");
+    console.log("T4 persistent-occupancy guidance PASS");
   }
   {
     let micCalls = 0;
@@ -114,7 +131,7 @@ captureSource = "tab"; captureEngine = "dashscope"; currentStreamSource = ""; st
     check(r.ok === true, `mic start ok (${r.error || ""})`);
     check(run(`currentStreamSource`) === "mic", "source switched to mic");
     check(run(`globalThis.__micCalls`) >= 1, "mic stream acquired after source switch");
-    console.log("T4 source switch PASS");
+    console.log("T5 source switch PASS");
   }
   console.log(fail === 0 ? "ALL stream-reuse suites PASS" : `FAILURES: ${fail}`);
   process.exit(fail ? 1 : 0);

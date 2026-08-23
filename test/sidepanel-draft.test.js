@@ -165,6 +165,18 @@ const WAIT = 380;
       `自动补发 SET_TRANSLATE(true) 给会话 tab 9（实际 ${JSON.stringify(sync)}）`);
     console.log("T4 偏好开→会话自动对齐, 开关不被重置 PASS");
   }
+  {
+    // 场景：稳定句翻译失败（空译文）时，不能把这一句整个吞掉。
+    const h = makeCtx();
+    h.els["#translate-toggle"].checked = true;
+    sendMessage(h, { type: "LIVE_SUBTITLES", jobId: "live-5", seq: 7, unit: true, lines: [{ text: "Translation failed, keep me." }] });
+    sendMessage(h, { type: "LIVE_TRANSLATED", jobId: "live-5", seq: 7, unit: true, lines: [{ text: "Translation failed, keep me.", translated: "" }] });
+    const rowText = h.feed.children
+      .flatMap((row) => row.children)
+      .find((child) => child.className === "text")?.textContent || "";
+    check(rowText.includes("Translation failed"), "空译文稳定回退原文，不丢句");
+    console.log("T5 翻译失败稳定回退原文 PASS");
+  }
   console.log(fail === 0 ? "sidepanel-draft 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
 })().catch((err) => { console.error(err); process.exit(1); });

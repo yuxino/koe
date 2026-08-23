@@ -35,6 +35,18 @@
               <option value="mic-webspeech">麦克风 · Chrome 内置（免 Key）</option>
             </select>
           </label>
+          <label class="toggle-row setting-toggle" for="overlay-enabled">
+            <span>显示在视频画面上</span>
+            <input type="checkbox" id="overlay-enabled" checked>
+          </label>
+          <label class="field-row" for="overlay-size">
+            <span>页面字幕大小</span>
+            <select id="overlay-size">
+              <option value="small">小</option>
+              <option value="medium" selected>标准</option>
+              <option value="large">大</option>
+            </select>
+          </label>
           <label class="field-row" for="api-key">
             <span>DashScope API Key（DashScope 模式需要）</span>
             <input id="api-key" type="password" autocomplete="off" placeholder="sk-...">

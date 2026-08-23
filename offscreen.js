@@ -26,13 +26,18 @@ function recentTranslationMemory() {
   return translationMemory.slice(-5);
 }
 const PCM_FRAME_BYTES = 3_200; // 100 ms, 16 kHz mono int16
+const PCM_QUEUE_LIMIT = 20; // 最多保留约 2 秒；网络追不上时优先保持实时
+const SOCKET_BACKPRESSURE_BYTES = 128 * 1_024;
 const MAX_AUTO_RETRIES = 5;
 
 let stream = null;
 let currentStreamSource = ""; // 当前流的来源："tab" | "mic"
+let currentStreamId = "";
 let monitorAudio = null;
 let audioContext = null;
 let processor = null;
+let audioSource = null;
+let silentGain = null;
 let socket = null;
 let taskId = "";
 let taskReady = false;
@@ -48,6 +53,14 @@ let frameQueue = [];
 let emitSeq = 0;
 let stopping = false;
 let captureGeneration = 0;
+let captureJobId = "";
+let captureTabId = 0;
+let captureMediaEpoch = 0;
+let captureClockStartedAt = 0;
+let capturedAudioSamples = 0;
+let taskAudioOffsetMs = 0;
+let activeSentenceId = 0;
+let activeTiming = {};
 // 高频草稿日志节流：asr-draft 至少间隔 300ms 才记一条
 let lastDraftLogAt = 0;
 
@@ -65,6 +78,36 @@ function logEvent(event, detail = "") {
   } catch {
     // 消息发不出不影响识别
   }
+}
+
+function monotonicNow() {
+  return typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
+}
+
+function audioPositionMs() {
+  if (captureEngine === "webspeech") return Math.max(0, monotonicNow() - captureClockStartedAt);
+  return Math.max(0, capturedAudioSamples / 16);
+}
+
+function timingFields(timing = activeTiming) {
+  return {
+    beginTimeMs: Number.isFinite(Number(timing?.beginTimeMs)) ? Number(timing.beginTimeMs) : undefined,
+    endTimeMs: Number.isFinite(Number(timing?.endTimeMs)) ? Number(timing.endTimeMs) : undefined,
+    audioPositionMs: audioPositionMs(),
+    sentenceId: Number(timing?.sentenceId) || 0
+  };
+}
+
+function sendCaptureMessage(message, timing = activeTiming) {
+  return chrome.runtime.sendMessage({
+    ...message,
+    ...timingFields(timing),
+    tabId: captureTabId,
+    jobId: captureJobId,
+    mediaEpoch: captureMediaEpoch
+  });
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -87,13 +130,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.type === "CAPTURE_RESET") {
     captureTranslate = Boolean(message.translate);
+    if (Number.isFinite(Number(message.mediaEpoch))) captureMediaEpoch = Number(message.mediaEpoch);
     if (message.source) captureSource = message.source === "mic" ? "mic" : "tab";
     if (message.engine) captureEngine = String(message.engine);
     // 内置识别不需要重连 WebSocket：重启识别会话即可
     const restart = captureEngine === "webspeech"
       ? restartWebSpeech()
       : resetSocket();
-    restart.then(() => sendResponse({ ok: true })).catch((error) => {
+    restart.then(() => sendResponse({ ok: true, audioPositionMs: audioPositionMs() })).catch((error) => {
       sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
     });
     return true;
@@ -113,7 +157,9 @@ async function startCapture(message) {
   return startCapturePromise;
 }
 
-async function runStartCapture({ streamId, translate, apiKey, source, engine }) {
+async function runStartCapture({ streamId, translate, apiKey, source, engine, jobId, tabId, mediaEpoch }) {
+  const nextJobId = String(jobId || "");
+  const sameSession = Boolean(nextJobId && nextJobId === captureJobId);
   retryCount = 0;
   stopping = false;
   clearRetryTimer();
@@ -123,6 +169,16 @@ async function runStartCapture({ streamId, translate, apiKey, source, engine }) 
   captureEngine = ["webspeech"].includes(engine) ? engine : "dashscope";
   captureApiKey = String(apiKey || "").trim();
   captureTranslate = Boolean(translate);
+  captureJobId = nextJobId;
+  captureTabId = Number(tabId) || 0;
+  captureMediaEpoch = Number(mediaEpoch) || 0;
+  if (!sameSession) {
+    emitSeq = 0;
+    capturedAudioSamples = 0;
+  }
+  captureClockStartedAt = monotonicNow();
+  activeSentenceId = 0;
+  activeTiming = {};
   logEvent("start", `source=${captureSource} engine=${captureEngine} translate=${captureTranslate}`);
 
   if (captureEngine === "webspeech") {
@@ -133,7 +189,7 @@ async function runStartCapture({ streamId, translate, apiKey, source, engine }) 
     await acquireStreamForSource("");
     startWebSpeech();
     logEvent("started", "mode=webspeech");
-    return { ok: true, mode: "webspeech" };
+    return { ok: true, mode: "webspeech", audioPositionMs: audioPositionMs() };
   }
 
   await acquireStreamForSource(streamId);
@@ -145,7 +201,7 @@ async function runStartCapture({ streamId, translate, apiKey, source, engine }) 
     await connectRealtime();
     flushFrames();
     logEvent("started", "mode=direct");
-    return { ok: true, mode: "direct" };
+    return { ok: true, mode: "direct", audioPositionMs: audioPositionMs() };
   } catch (error) {
     logEvent("start-failed", String(error?.message || error));
     await stopCapture();
@@ -156,7 +212,8 @@ async function runStartCapture({ streamId, translate, apiKey, source, engine }) 
 // 获取（或复用）音频流：来源未变时直接复用已存在的流，
 // 只有来源切换或首次开启时才真正调用 getUserMedia。
 async function acquireStreamForSource(streamId) {
-  if (stream && currentStreamSource === captureSource) return;
+  const requestedStreamId = captureSource === "tab" ? String(streamId || "") : "mic";
+  if (stream && currentStreamSource === captureSource && currentStreamId === requestedStreamId) return;
   releaseStream();
   if (captureSource === "mic") {
     stream = await navigator.mediaDevices.getUserMedia({
@@ -200,6 +257,7 @@ async function acquireStreamForSource(streamId) {
     monitorAudio.play().catch(() => undefined);
   }
   currentStreamSource = captureSource;
+  currentStreamId = requestedStreamId;
 }
 
 function releaseStream() {
@@ -215,6 +273,7 @@ function releaseStream() {
     stream = null;
   }
   currentStreamSource = "";
+  currentStreamId = "";
 }
 
 // ===== Chrome 内置语音识别（webkitSpeechRecognition）=====
@@ -231,14 +290,20 @@ function startWebSpeech() {
       const result = event.results[index];
       const text = String(result?.[0]?.transcript || "").trim();
       if (!text) continue;
-      if (result.isFinal) handleServerFinal(text);
-      else handleServerDraft(text);
+      const now = audioPositionMs();
+      const timing = {
+        sentenceId: index + 1,
+        beginTimeMs: Math.max(0, now - 1_500),
+        endTimeMs: result.isFinal ? now : undefined
+      };
+      if (result.isFinal) handleServerFinal(text, timing);
+      else handleServerDraft(text, timing);
     }
   };
   recognition.onerror = (event) => {
     const error = String(event?.error || "");
     if (error === "not-allowed" || error === "service-not-allowed") {
-      chrome.runtime.sendMessage({
+      sendCaptureMessage({
         type: "CAPTURE_ERROR",
         error: "麦克风权限被拒绝：请在浏览器地址栏允许麦克风后重试。"
       }).catch(() => undefined);
@@ -267,6 +332,7 @@ async function restartWebSpeech() {
 async function connectRealtime() {
   taskReady = false;
   taskId = randomTaskId();
+  taskAudioOffsetMs = audioPositionMs();
   socket = new WebSocket(DASHSCOPE_WS);
   socket.binaryType = "arraybuffer";
 
@@ -306,6 +372,14 @@ async function connectRealtime() {
         resolve();
         return;
       }
+      if (type === "task-failed") {
+        const error = message?.header?.error_message || "DashScope 实时识别失败";
+        clearTimeout(timer);
+        handleDashScopeMessage(message);
+        if (isRetryable(error)) resolve(false);
+        else reject(new Error(error));
+        return;
+      }
       handleDashScopeMessage(message);
     };
     socket.onerror = () => {
@@ -329,6 +403,24 @@ function handleDashScopeMessage(message) {
   if (event === "result-generated") {
     const sentence = message?.payload?.output?.sentence;
     if (!sentence || sentence.heartbeat) return;
+    const sentenceId = Number(sentence.sentence_id) || 0;
+    if (sentenceId && sentenceId !== activeSentenceId) {
+      if (activeSentenceId) {
+        lastUnitTexts.length = 0;
+        resetDraftCommitter();
+      }
+      activeSentenceId = sentenceId;
+    }
+    const timing = {
+      sentenceId,
+      beginTimeMs: Number.isFinite(Number(sentence.begin_time))
+        ? taskAudioOffsetMs + Number(sentence.begin_time)
+        : undefined,
+      endTimeMs: Number.isFinite(Number(sentence.end_time))
+        ? taskAudioOffsetMs + Number(sentence.end_time)
+        : undefined
+    };
+    activeTiming = timing;
     // 注意：不在这里根据 sentence_begin 重置断句状态。
     // 若服务端在句子的多个中间结果上都带 sentence_begin（或 final 晚于下一句
     // 的中间结果到达），重置会把已提交边界清空，导致同一个句子被重复上屏。
@@ -337,9 +429,8 @@ function handleDashScopeMessage(message) {
     if (!text) return;
     const isFinal = Boolean(sentence.sentence_end);
     if (isFinal) {
-      logEvent("asr-final",
-        `text=${JSON.stringify(text.slice(0, 80))} len=${Array.from(text).length}`);
-      handleServerFinal(text);
+      logEvent("asr-final", `len=${Array.from(text).length} sentence=${sentenceId}`);
+      handleServerFinal(text, timing);
     } else {
       // 草稿是高频消息（每 100~300ms 一条）：日志节流到 300ms 一条，
       // 避免 KOE_LOG 写入风暴拖慢后台、字幕消息被排队（"卡住"）。
@@ -347,10 +438,9 @@ function handleDashScopeMessage(message) {
       const now = Date.now();
       if (now - lastDraftLogAt >= 300) {
         lastDraftLogAt = now;
-        logEvent("asr-draft",
-          `text=${JSON.stringify(text.slice(0, 80))} len=${Array.from(text).length}`);
+        logEvent("asr-draft", `len=${Array.from(text).length} sentence=${sentenceId}`);
       }
-      handleServerDraft(text);
+      handleServerDraft(text, timing);
     }
     return;
   }
@@ -362,7 +452,7 @@ function handleDashScopeMessage(message) {
     if (isRetryable(error)) {
       scheduleAutoReconnect();
     } else {
-      chrome.runtime.sendMessage({ type: "CAPTURE_ERROR", error }).catch(() => undefined);
+      sendCaptureMessage({ type: "CAPTURE_ERROR", error }).catch(() => undefined);
     }
   }
 }
@@ -631,8 +721,8 @@ function splitSentences(text) {
 function revokeCurrentSentence(reason) {
   const fromSeq = currentSentenceStartSeq || lastEmittedUnitSeq;
   if (!fromSeq || !lastEmittedUnitSeq) return;
-  logEvent("revoke", `${reason} from=${fromSeq} to=${lastEmittedUnitSeq} old=${JSON.stringify(lastEmittedUnitText.slice(0, 40))}`);
-  chrome.runtime.sendMessage({
+  logEvent("revoke", `${reason} from=${fromSeq} to=${lastEmittedUnitSeq} oldChars=${Array.from(lastEmittedUnitText).length}`);
+  sendCaptureMessage({
     type: "CAPTURE_REVOKE",
     fromSeq,
     toSeq: lastEmittedUnitSeq,
@@ -654,8 +744,8 @@ function revokeCurrentSentence(reason) {
 // 保留不动，待提交区从新草稿继续，避免整句重新提交造成字幕重复。
 function revokeLastUnitForDrift(draftText, lcp) {
   if (!lastEmittedUnitSeq) return;
-  logEvent("revoke-tail", `from=${lastEmittedUnitSeq} to=${lastEmittedUnitSeq} old=${JSON.stringify(lastEmittedUnitText.slice(0, 40))} new=${JSON.stringify(draftText.slice(0, 40))}`);
-  chrome.runtime.sendMessage({
+  logEvent("revoke-tail", `from=${lastEmittedUnitSeq} to=${lastEmittedUnitSeq} oldChars=${Array.from(lastEmittedUnitText).length} newChars=${Array.from(draftText).length}`);
+  sendCaptureMessage({
     type: "CAPTURE_REVOKE",
     fromSeq: lastEmittedUnitSeq,
     toSeq: lastEmittedUnitSeq,
@@ -680,7 +770,8 @@ function hasSharedWord(left, right) {
   return rightWords.slice(-2).some((word) => words.has(word));
 }
 
-function handleServerDraft(text) {
+function handleServerDraft(text, timing = activeTiming) {
+  activeTiming = timing || {};
   // 识别修正检测：
   // ① 整句换词（"Okayur assets" → "Identify your assets"，公共前缀极短但保留尾词）
   //    → 撤回整句重来；
@@ -697,7 +788,7 @@ function handleServerDraft(text) {
       const lcp = longestCommonPrefix(draftText, committedText);
       const fullSwap = lcp < 3 && hasSharedWord(draftText, committedText);
       if (fullSwap) {
-        revokeCurrentSentence(`draft-swap new=${JSON.stringify(draftText.slice(0, 40))}`);
+        revokeCurrentSentence("draft-swap");
       } else if (lcp >= 4 && lastEmittedUnitText) {
         // 词尾修正判定：最后上屏块的开头（去尾标点）不再出现在新草稿中
         // （"I am." 被替换成 "Yes? Yes."）→ 该块已失效，撤回它并对齐前缀。
@@ -717,28 +808,29 @@ function handleServerDraft(text) {
   if (tail === lastEmittedTail) return;
   lastEmittedTail = tail;
   const seq = ++emitSeq;
-  logEvent("draft-emit", `seq=${seq} tail=${JSON.stringify(tail.slice(0, 60))}`);
-  chrome.runtime.sendMessage({
+  logEvent("draft-emit", `seq=${seq} chars=${Array.from(tail).length}`);
+  sendCaptureMessage({
     type: "CAPTURE_PARTIAL",
     lines: [{ text: tail }],
     seq
-  }).catch(() => undefined);
+  }, timing).catch(() => undefined);
   if (captureTranslate) {
     // 翻译只译“即将上屏的那一句”，与字幕块对齐——译整段待提交文本
     // 会让译文比字幕多出后续内容，图文对不上。
     const first = firstCompleteSentence(tail) || tail;
-    scheduleDraftTranslation(first, seq);
+    scheduleDraftTranslation(first, seq, timing);
   }
 }
 
-function handleServerFinal(text) {
+function handleServerFinal(text, timing = activeTiming) {
+  activeTiming = timing || {};
   cancelDraftTimers();
   const finalText = String(text).trim();
   const lastUnit = lastUnitTexts[lastUnitTexts.length - 1] || "";
 
   // 对账：final 与最近上屏的块完全相同，或只是其中一部分 → 已经显示过，跳过
   if (lastUnit && (lastUnitTexts.includes(finalText) || lastUnit.startsWith(finalText))) {
-    logEvent("final-dup", `final=${JSON.stringify(finalText.slice(0, 60))} lastUnit=${JSON.stringify(lastUnit.slice(0, 60))}`);
+    logEvent("final-dup", `finalChars=${Array.from(finalText).length} lastUnitChars=${Array.from(lastUnit).length}`);
     dropQueuedDrafts();
     resetDraftCommitter();
     return;
@@ -760,8 +852,8 @@ function handleServerFinal(text) {
         // 只补发最后上屏块之后的新内容（按句切块），不重发已上屏部分
         const index = finalText.indexOf(lastUnit);
         const tail = finalText.slice(index + lastUnit.length).trim();
-        if (isMeaningful(tail)) emitFinalSentences(tail);
-        logEvent("final-tail-only", `after=${JSON.stringify(tail.slice(0, 40))}`);
+        if (isMeaningful(tail)) emitFinalSentences(tail, timing);
+        logEvent("final-tail-only", `afterChars=${Array.from(tail).length}`);
         dropQueuedDrafts();
         resetDraftCommitter();
         return;
@@ -772,7 +864,7 @@ function handleServerFinal(text) {
       const sameSentence = committedLen >= 8 && finalLen >= 8 && lcp >= 8;
       if (sameSentence) {
         revokeCurrentSentence(`final-fix lcp=${lcp}`);
-        emitFinalSentences(finalText);
+        emitFinalSentences(finalText, timing);
         dropQueuedDrafts();
         resetDraftCommitter();
         return;
@@ -782,7 +874,7 @@ function handleServerFinal(text) {
 
   const outcome = finishSentence(finalText);
   logEvent(`final-${outcome.kind}`,
-    `final=${JSON.stringify(finalText.slice(0, 60))} out=${JSON.stringify(String(outcome.text || "").slice(0, 60))} committedLen=${Array.from(committedText).length}`);
+    `finalChars=${Array.from(finalText).length} outChars=${Array.from(String(outcome.text || "")).length} committedLen=${Array.from(committedText).length}`);
   if (outcome.kind === "replaced" || outcome.kind === "appended") {
     // appended：final 只是把已上屏内容往后延长 → 只补发新增后缀，
     // 否则整段（含已显示的部分）会再上一次屏，看起来就是字幕重复。
@@ -794,7 +886,7 @@ function handleServerFinal(text) {
     if (isMeaningful(unitText)) {
       // 权威 final 可能是多句（语义断句一次性给出整段）：按句切块逐条上屏，
       // 避免一大段突然出现、译文也超长；已上屏过的块直接跳过。
-      emitFinalSentences(unitText);
+      emitFinalSentences(unitText, timing);
     }
   }
   // 旧草稿尾的翻译已过期，丢弃；下一句从头开始
@@ -803,20 +895,20 @@ function handleServerFinal(text) {
 }
 
 // final 文本按句切块逐条上屏；已上屏过的块跳过（防重复）
-function emitFinalSentences(text) {
+function emitFinalSentences(text, timing = activeTiming) {
   const sentences = splitSentences(text);
   for (const sentence of sentences) {
     if (lastUnitTexts.includes(sentence)) continue;
     if (!isMeaningful(sentence)) continue;
-    emitUnit(sentence);
+    emitUnit(sentence, timing);
   }
 }
 
-function emitCommittedUnit(text) {
-  emitUnit(text);
+function emitCommittedUnit(text, timing = activeTiming) {
+  emitUnit(text, timing);
 }
 
-function emitUnit(text) {
+function emitUnit(text, timing = activeTiming) {
   const unitText = String(text).trim();
   if (!isMeaningful(unitText)) return;
   lastUnitTexts.push(unitText);
@@ -829,14 +921,14 @@ function emitUnit(text) {
   // 无句号的强切块（长句中间态）仍在同一句内，revoke 从本块覆盖。
   const isComplete = SENTENCE_DELIMITERS.includes(unitText[unitText.length - 1]);
   currentSentenceStartSeq = isComplete ? 0 : (currentSentenceStartSeq || seq);
-  logEvent("unit-emit", `seq=${seq} text=${JSON.stringify(unitText.slice(0, 80))}`);
-  chrome.runtime.sendMessage({
+  logEvent("unit-emit", `seq=${seq} chars=${Array.from(unitText).length}`);
+  sendCaptureMessage({
     type: "CAPTURE_LINES",
     lines: [{ text: unitText }],
     seq,
     unit: true
-  }).catch(() => undefined);
-  if (captureTranslate) scheduleUnitTranslation(unitText, seq);
+  }, timing).catch(() => undefined);
+  if (captureTranslate) scheduleUnitTranslation(unitText, seq, timing);
 }
 
 // ===== 翻译调度：单队列串行 + 统一限速 =====
@@ -894,15 +986,15 @@ async function translateText(text, { model = TRANSLATE_MODEL_FINAL, memory = [] 
   ).trim();
 }
 
-function scheduleUnitTranslation(text, seq) {
-  translationQueue.push({ kind: "unit", text, seq });
+function scheduleUnitTranslation(text, seq, timing = activeTiming) {
+  translationQueue.push({ kind: "unit", text, seq, timing: { ...timing } });
   void runTranslationWorker();
 }
 
-function scheduleDraftTranslation(text, seq) {
+function scheduleDraftTranslation(text, seq, timing = activeTiming) {
   // 合并：队列里只保留最新一条草稿，避免草稿翻译堆积挤占字幕块
   dropQueuedDrafts();
-  translationQueue.push({ kind: "draft", text, seq });
+  translationQueue.push({ kind: "draft", text, seq, timing: { ...timing } });
   void runTranslationWorker();
 }
 
@@ -954,7 +1046,7 @@ async function runTranslationWorker() {
     const isDraft = item.kind === "draft";
     const model = isDraft ? TRANSLATE_MODEL_DRAFT : TRANSLATE_MODEL_FINAL;
     const memory = isDraft ? [] : recentTranslationMemory();
-    logEvent("translation-request", `kind=${item.kind} model=${model} batch=${batch.length} text=${JSON.stringify(batch[0].text.slice(0, 40))}`);
+    logEvent("translation-request", `kind=${item.kind} model=${model} batch=${batch.length} chars=${Array.from(batch[0].text).length}`);
     try {
       if (batch.length === 1) {
         parts = [await translateWithRetry(batch[0].text, { model, memory })];
@@ -964,7 +1056,7 @@ async function runTranslationWorker() {
       }
     } catch {
       parts = [];
-      logEvent("translation-failed", `kind=${item.kind} text=${JSON.stringify(batch[0].text.slice(0, 40))}`);
+      logEvent("translation-failed", `kind=${item.kind} chars=${Array.from(batch[0].text).length}`);
     }
     lastTranslationAt = Date.now();
     inFlightItem = null;
@@ -975,24 +1067,24 @@ async function runTranslationWorker() {
     if (item.kind === "draft" && item.superseded) continue; // 翻译期间被取代：丢弃结果
     batch.forEach((entry, index) => {
       const translated = parts[index] || "";
-      if (translated) logEvent("translation-ok", `kind=${entry.kind} seq=${entry.seq} out=${JSON.stringify(translated.slice(0, 40))}`);
+      if (translated) logEvent("translation-ok", `kind=${entry.kind} seq=${entry.seq} chars=${Array.from(translated).length}`);
       if (entry.kind === "unit") {
         if (translated) rememberTranslation(entry.text, translated);
         // 彻底失败才退原文，保证稳定行不断
-        chrome.runtime.sendMessage({
+        sendCaptureMessage({
           type: "CAPTURE_TRANSLATED",
-          // 失败时发空译文（translated=""），侧边栏会跳过该句——
-          // 不把原文混进译文历史（移植 Mimi：宁缺毋滥，避免"字幕变英文"）
+          // 失败时仍携带原文并发空译文；显示端会稳定回退原文，
+          // 既不伪造翻译，也不会把整句吞掉。
           lines: [{ text: entry.text, translated }],
           seq: entry.seq,
           unit: true
-        }).catch(() => undefined);
+        }, entry.timing).catch(() => undefined);
       } else if (translated) {
-        chrome.runtime.sendMessage({
+        sendCaptureMessage({
           type: "CAPTURE_TRANSLATED",
           lines: [{ text: entry.text, translated }],
           seq: entry.seq
-        }).catch(() => undefined);
+        }, entry.timing).catch(() => undefined);
       }
     });
   }
@@ -1052,22 +1144,38 @@ async function startPcmCapture() {
       audioContext = null;
       return false;
     }
-    const source = audioContext.createMediaStreamSource(stream);
-    source.channelCount = 1;
-    source.channelCountMode = "explicit";
-    source.channelInterpretation = "speakers";
-    // 2048 样本 @ 16 kHz = 128 ms 一块：块一到手立刻发送，不依赖定时器。
-    // 离屏页的 setInterval 可能被浏览器节流，之前靠定时器发帧会让字幕越来越滞后。
-    processor = audioContext.createScriptProcessor(2_048, 1, 1);
-    processor.onaudioprocess = (event) => {
-      enqueueSamples(event.inputBuffer.getChannelData(0));
-      flushFrames();
-    };
-    const silent = audioContext.createGain();
-    silent.gain.value = 0;
-    source.connect(processor);
-    processor.connect(silent);
-    silent.connect(audioContext.destination);
+    audioSource = audioContext.createMediaStreamSource(stream);
+    audioSource.channelCount = 1;
+    audioSource.channelCountMode = "explicit";
+    audioSource.channelInterpretation = "speakers";
+    silentGain = audioContext.createGain();
+    silentGain.gain.value = 0;
+
+    // AudioWorklet 在音频渲染线程里稳定收集 PCM，不再触发 ScriptProcessorNode
+    // 的废弃警告，也不会因为主线程忙而让声画延迟越积越大。
+    if (audioContext.audioWorklet && typeof AudioWorkletNode === "function") {
+      await audioContext.audioWorklet.addModule(chrome.runtime.getURL("pcm-worklet.js"));
+      processor = new AudioWorkletNode(audioContext, "koe-pcm-capture", {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [1]
+      });
+      processor.port.onmessage = (event) => {
+        const samples = event.data instanceof Float32Array ? event.data : new Float32Array(event.data);
+        enqueueSamples(samples);
+        flushFrames();
+      };
+    } else {
+      // 仅给旧版浏览器保留兼容兜底；现代 Chrome 永远走 AudioWorklet。
+      processor = audioContext.createScriptProcessor(2_048, 1, 1);
+      processor.onaudioprocess = (event) => {
+        enqueueSamples(event.inputBuffer.getChannelData(0));
+        flushFrames();
+      };
+    }
+    audioSource.connect(processor);
+    processor.connect(silentGain);
+    silentGain.connect(audioContext.destination);
     return true;
   } catch {
     await stopPcmCapture();
@@ -1076,6 +1184,7 @@ async function startPcmCapture() {
 }
 
 function enqueueSamples(samples) {
+  capturedAudioSamples += samples.length;
   const bytes = new Uint8Array(samples.length * 2);
   const view = new DataView(bytes.buffer);
   for (let i = 0; i < samples.length; i += 1) {
@@ -1091,12 +1200,14 @@ function enqueueSamples(samples) {
     frameQueue.push(pcmPending.slice(0, PCM_FRAME_BYTES));
     pcmPending = pcmPending.slice(PCM_FRAME_BYTES);
   }
-  if (frameQueue.length > 50) frameQueue.splice(0, frameQueue.length - 50);
+  if (frameQueue.length > PCM_QUEUE_LIMIT) {
+    frameQueue.splice(0, frameQueue.length - PCM_QUEUE_LIMIT);
+  }
 }
 
 function flushFrames() {
   if (!taskReady || !socket || socket.readyState !== WebSocket.OPEN) return;
-  while (frameQueue.length > 0) {
+  while (frameQueue.length > 0 && Number(socket.bufferedAmount || 0) < SOCKET_BACKPRESSURE_BYTES) {
     const frame = frameQueue.shift();
     try {
       socket.send(frame.buffer);
@@ -1110,11 +1221,16 @@ function flushFrames() {
 async function resetSocket() {
   if (!stream) throw new Error("capture_not_running");
   logEvent("ws-reconnect", `retry=${retryCount}`);
+  captureGeneration += 1;
+  if (inFlightItem) inFlightItem.superseded = true;
   closeSocket(false);
   frameQueue = [];
   pcmPending = new Uint8Array(0);
   translationQueue.length = 0;
+  inFlightItem = null;
   lastUnitTexts.length = 0;
+  activeSentenceId = 0;
+  activeTiming = {};
   resetDraftCommitter();
   await new Promise((resolve) => setTimeout(resolve, 250));
   await connectRealtime();
@@ -1124,7 +1240,7 @@ function scheduleAutoReconnect() {
   if (stopping || retryTimer) return;
   if (retryCount >= MAX_AUTO_RETRIES) {
     logEvent("ws-reconnect-exhausted", `retries=${retryCount}`);
-    chrome.runtime.sendMessage({
+    sendCaptureMessage({
       type: "CAPTURE_ERROR",
       error: "DashScope 重连失败，请检查网络或 API Key。"
     }).catch(() => undefined);
@@ -1152,9 +1268,18 @@ async function stopPcmCapture() {
   frameQueue = [];
   pcmPending = new Uint8Array(0);
   if (processor) {
+    if (processor.port) processor.port.onmessage = null;
     try { processor.disconnect(); } catch { /* ignore */ }
-    processor.onaudioprocess = null;
+    if ("onaudioprocess" in processor) processor.onaudioprocess = null;
     processor = null;
+  }
+  if (audioSource) {
+    try { audioSource.disconnect(); } catch { /* ignore */ }
+    audioSource = null;
+  }
+  if (silentGain) {
+    try { silentGain.disconnect(); } catch { /* ignore */ }
+    silentGain = null;
   }
   if (audioContext) {
     try { await audioContext.close(); } catch { /* ignore */ }
@@ -1251,6 +1376,9 @@ function randomTaskId() {
 
 function isAlreadyChinese(value) {
   const text = String(value || "");
+  // 日语也大量使用汉字；只要出现假名就必须继续翻译，不能把
+  // “気持ちいい”这类文本误判成已经是中文。
+  if (/[\u3040-\u30ff\u31f0-\u31ff]/.test(text)) return false;
   const cjk = (text.match(/[\u4e00-\u9fff]/g) || []).length;
   const latin = (text.match(/[A-Za-z]/g) || []).length;
   return cjk > 0 && cjk >= latin;
