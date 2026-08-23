@@ -6,7 +6,10 @@
 let activeTab;
 let currentState = { status: "idle" };
 let hasApiKey = false;
+let translatePreference = true;
+let hideOriginalPreference = false;
 let activeJobId = "";
+let activeMediaEpoch = 0;
 let captureEnded = false;
 let lastUnitSeq = 0;
 let lastDraftSeq = 0;
@@ -20,11 +23,10 @@ let lastStatusHint = "";
 const pendingOriginalUnits = new Map();
 const MAX_ROWS = 120;
 
-// 字幕模式：一个下拉 = 声音来源 × 识别引擎，收起复杂的双选项设置
+// 字幕模式：只保留本地精准（可本地翻译）与 DashScope 两种，去掉麦克风/Chrome 内置。
 const CAPTURE_MODES = {
-  "tab-dashscope": { source: "tab", engine: "dashscope" },
-  "mic-dashscope": { source: "mic", engine: "dashscope" },
-  "mic-webspeech": { source: "mic", engine: "webspeech" }
+  "tab-local": { source: "tab", engine: "local" },
+  "tab-dashscope": { source: "tab", engine: "dashscope" }
 };
 
 const AUTH_RULE_ID = 9001;
@@ -32,7 +34,10 @@ const elements = {
   version: document.querySelector("#version"),
   statusDot: document.querySelector("#status-dot"),
   startButton: document.querySelector("#start-button"),
+  translateLabel: document.querySelector("#translate-label"),
   translateToggle: document.querySelector("#translate-toggle"),
+  hideOriginalToggle: document.querySelector("#hide-original-toggle"),
+  dashscopeOnly: document.querySelector("#dashscope-only"),
   captureMode: document.querySelector("#capture-mode"),
   overlayEnabled: document.querySelector("#overlay-enabled"),
   overlaySize: document.querySelector("#overlay-size"),
@@ -66,6 +71,7 @@ elements.startButton.addEventListener("click", () => {
 elements.saveKey.addEventListener("click", () => void saveApiKey());
 elements.translateToggle.addEventListener("change", async () => {
   const translate = elements.translateToggle.checked;
+  translatePreference = translate;
   await chrome.storage.local.set({ koeTranslate: translate });
   // 翻译开关更新的是"正在捕获的会话"（可能在别的标签页），不是当前 tab——
   // 否则在其他 tab 上切开关，视频 tab 的字幕翻译永远不更新（"唯独视频没翻译"）。
@@ -73,7 +79,14 @@ elements.translateToggle.addEventListener("change", async () => {
   if (targetTabId) {
     await chrome.runtime.sendMessage({ type: "SET_TRANSLATE", tabId: targetTabId, translate }).catch(() => undefined);
   }
+  applyTranslationPrivacy();
   elements.hint.textContent = translate ? "中文翻译已开启 · 正在重连识别…" : "中文翻译已关闭 · 只显示原文";
+});
+elements.hideOriginalToggle.addEventListener("change", async () => {
+  const hide = elements.hideOriginalToggle.checked;
+  hideOriginalPreference = hide;
+  await chrome.storage.local.set({ koeHideOriginal: hide });
+  elements.hint.textContent = hide ? "已隐藏原文 · 只显示中文" : "已恢复显示原文与中文";
 });
 elements.captureMode.addEventListener("change", () => void saveCaptureMode());
 elements.overlayEnabled.addEventListener("change", async () => {
@@ -117,6 +130,18 @@ chrome.runtime.onMessage.addListener((message) => {
   }
   if (!belongsToSession(message)) return false;
   try {
+    if (message.type === "OFFLINE_VISIBLE") {
+      const epoch = Number(message.mediaEpoch) || 0;
+      if (epoch !== activeMediaEpoch) {
+        activeMediaEpoch = epoch;
+        lastUnitSeq = 0;
+      }
+      if (!acceptUnitSeq(message.seq)) return false;
+      const line = lastLine(message.lines);
+      const text = displayValue(line);
+      if (text) appendRow(text, "", message.seq);
+      return false;
+    }
     if (message.type === "LIVE_REVOKE") {
       revokeRow(message.fromSeq, message.toSeq);
       return false;
@@ -128,6 +153,7 @@ chrome.runtime.onMessage.addListener((message) => {
         // 翻译模式：先显示弱化的原文草稿做即时反馈，译文到达后替换。
         // 原文不占 seq 门控（译文同 seq 由 LIVE_TRANSLATED 负责），
         // 译文展示期间原文不打扰（5 秒内不覆盖），避免原文/译文来回闪。
+        if (hideOriginalOn()) return false; // 隐藏原文时不显示西文草稿，等译文
         if (draftKind === "translated" && Date.now() - draftTranslatedAt < 5_000) return false;
         setDraft(text, "raw");
       } else {
@@ -153,7 +179,7 @@ chrome.runtime.onMessage.addListener((message) => {
         const seq = Number(message.seq) || 0;
         const line = lastLine(message.lines);
         // 翻译偶发失败时稳定行退回原文，而不是整句消失。
-        const text = String(line?.translated || pendingOriginalUnits.get(seq) || line?.text || "").trim();
+        const text = String(line?.translated || (hideOriginalOn() ? "" : (pendingOriginalUnits.get(seq) || line?.text)) || "").trim();
         pendingOriginalUnits.delete(seq);
         if (!text) return false;
         if (!acceptUnitSeq(message.seq)) return false;
@@ -180,20 +206,30 @@ async function init() {
 }
 
 async function initPrefs() {
-  const { koeTranslate, koeApiKey, koeCaptureSource, koeAsrEngine, koeOverlayEnabled, koeOverlaySize } = await chrome.storage.local.get([
-    "koeTranslate", "koeApiKey", "koeCaptureSource", "koeAsrEngine", "koeOverlayEnabled", "koeOverlaySize"
+  const { koeTranslate, koeHideOriginal, koeApiKey, koeCaptureSource, koeAsrEngine, koeOverlayEnabled, koeOverlaySize } = await chrome.storage.local.get([
+    "koeTranslate", "koeHideOriginal", "koeApiKey", "koeCaptureSource", "koeAsrEngine", "koeOverlayEnabled", "koeOverlaySize"
   ]);
-  elements.translateToggle.checked = koeTranslate !== undefined ? Boolean(koeTranslate) : true;
+  translatePreference = koeTranslate !== undefined ? Boolean(koeTranslate) : true;
+  elements.translateToggle.checked = translatePreference;
+  hideOriginalPreference = koeHideOriginal !== undefined ? Boolean(koeHideOriginal) : false;
+  elements.hideOriginalToggle.checked = hideOriginalPreference;
   const sourceValue = koeCaptureSource === "mic" ? "mic" : "tab";
-  const engineValue = ["webspeech"].includes(koeAsrEngine) ? koeAsrEngine : "dashscope";
+  const engineValue = ["local", "webspeech"].includes(koeAsrEngine) ? koeAsrEngine : "dashscope";
   const modeKey = Object.keys(CAPTURE_MODES)
     .find((key) => CAPTURE_MODES[key].source === sourceValue && CAPTURE_MODES[key].engine === engineValue)
     || "tab-dashscope";
   elements.captureMode.value = modeKey;
+  // 旧配置（麦克风 / Chrome 内置）已下线：归一化回有效的 tab 模式，避免启动读到过时值
+  const chosen = CAPTURE_MODES[modeKey];
+  if (chosen.source !== sourceValue || chosen.engine !== engineValue) {
+    await chrome.storage.local.set({ koeCaptureSource: chosen.source, koeAsrEngine: chosen.engine });
+  }
+  applyTranslationPrivacy();
   elements.overlayEnabled.checked = koeOverlayEnabled !== false;
   elements.overlaySize.value = ["small", "medium", "large"].includes(koeOverlaySize) ? koeOverlaySize : "medium";
   hasApiKey = Boolean(String(koeApiKey || "").trim());
-  elements.settings.open = !hasApiKey;
+  // 本地模式不需要 API Key：设置默认收起；DashScope 且未保存 Key 才展开提示。
+  elements.settings.open = !hasApiKey && currentMode().engine === "dashscope";
   updateSettingsSummary();
   if (hasApiKey) elements.apiKey.placeholder = "已保存 · 输入新 Key 可替换";
   await syncAuthRule(String(koeApiKey || "").trim());
@@ -206,12 +242,37 @@ function currentMode() {
 async function saveCaptureMode() {
   const mode = currentMode();
   await chrome.storage.local.set({ koeCaptureSource: mode.source, koeAsrEngine: mode.engine });
+  applyTranslationPrivacy();
+  // 切到 DashScope 且未保存 Key：展开设置，让用户看到输入框。
+  if (mode.engine === "dashscope" && !hasApiKey) elements.settings.open = true;
   const targetTabId = currentState.tabId || activeTab?.id;
   if (targetTabId) {
     const response = await chrome.runtime.sendMessage({ type: "SET_CAPTURE", tabId: targetTabId }).catch(() => null);
     if (response?.state) currentState = response.state;
   }
-  elements.hint.textContent = `已切换模式：${elements.captureMode.options[elements.captureMode.selectedIndex].textContent}`;
+  elements.hint.textContent = mode.engine === "local"
+    ? "已切换本地精准字幕 · 原文识别与显示全程在本机"
+    : `已切换模式：${elements.captureMode.options[elements.captureMode.selectedIndex].textContent}`;
+}
+
+function applyTranslationPrivacy() {
+  // 本地精准默认只出原文；仅当本机具备本地翻译能力（macOS 26+ 且支持简体中文）时才放开开关。
+  const localOriginalOnly = currentMode().engine === "local" && !Boolean(currentState.nativeTranslation);
+  elements.translateToggle.disabled = localOriginalOnly;
+  if (localOriginalOnly) {
+    elements.translateToggle.checked = false;
+    if (elements.translateLabel) elements.translateLabel.textContent = "中文翻译（本地精准暂为原文）";
+  } else {
+    elements.translateToggle.checked = translatePreference;
+    if (elements.translateLabel) elements.translateLabel.textContent = "显示中文翻译";
+  }
+  // 隐藏原文只在开了翻译时才有意义；本地无法翻译时一并禁用。
+  if (elements.hideOriginalToggle) {
+    elements.hideOriginalToggle.disabled = localOriginalOnly || !elements.translateToggle.checked;
+  }
+  // API Key 只对 DashScope 模式需要；本地模式隐藏，精简页面。
+  const isDashScope = currentMode().engine === "dashscope";
+  if (elements.dashscopeOnly) elements.dashscopeOnly.hidden = !isDashScope;
 }
 
 function updateSettingsSummary() {
@@ -292,6 +353,8 @@ async function refreshState() {
   if (!captureStateResponse) return;
   const captureState = captureStateResponse.state || { status: "idle" };
   currentState = captureState;
+  // 本地翻译能力来自 Helper 握手，可能在轮询后才就绪；每次刷新按当前能力重放翻译开关。
+  applyTranslationPrivacy();
   // 开关 = 用户偏好（koeTranslate），永远不被会话值改掉（否则"每次切过去开关被重置"）。
   // 若会话翻译与偏好不一致（如历史遗留、会话重启读到旧值），自动把偏好同步到会话，
   // 但节流到 10 秒一次，避免每 1 秒轮询触发一次重连识别。
@@ -312,6 +375,7 @@ async function refreshState() {
   const jobId = String(captureState.jobId || "");
   if (captureState.captureActive && jobId && jobId !== activeJobId) {
     activeJobId = jobId;
+    activeMediaEpoch = Number(captureState.mediaEpoch) || 0;
     captureEnded = false;
     resetFeed();
     // 侧边栏是"每 tab 一个实例"：切 tab 后新实例接管会话时，
@@ -372,6 +436,7 @@ async function startForTab() {
     const apiKey = String(koeApiKey || "").trim();
     const mode = currentMode();
     const micMode = mode.source === "mic";
+    const localMode = mode.engine === "local";
     const keyless = mode.engine !== "dashscope";
     if (!keyless && !apiKey) {
       elements.settings.open = true;
@@ -388,9 +453,11 @@ async function startForTab() {
       elements.hint.textContent = "操作超时，请再点一次「开启实时字幕」。";
     }, 15_000);
     let streamId = "";
-    if (!micMode) {
+    if (!micMode && !localMode) {
       elements.hint.textContent = `③ 正在为标签页 ${activeTab.id} 获取音频流授权…`;
       streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: activeTab.id });
+    } else if (localMode) {
+      elements.hint.textContent = "③ 正在连接本地 Koe Helper，无需标签页录音授权…";
     } else {
       elements.hint.textContent = "③ 麦克风模式：无需手势授权（首次使用浏览器会询问麦克风权限）…";
     }
@@ -426,7 +493,11 @@ async function stopForTab() {
   if (!tabId) return;
   setButtonBusy(true);
   try {
-    const response = await chrome.runtime.sendMessage({ type: "STOP_CAPTURE", tabId });
+    const response = await chrome.runtime.sendMessage({
+      type: "STOP_CAPTURE",
+      tabId,
+      jobId: currentState.jobId || ""
+    });
     currentState = response?.state || { status: "idle" };
     lastStatusHint = "";
     elements.hint.textContent = "已停止 · 字幕流保留";
@@ -445,12 +516,16 @@ function setButtonBusy(busy) {
 function renderState() {
   const status = currentState.status || "idle";
   const live = status === "live";
+  const captureActive = Boolean(currentState.captureActive);
+  const local = currentState.engine === "local" || (!captureActive && currentMode().engine === "local");
   const gesture = Boolean(currentState.captureNeedsGesture);
   const error = status === "error";
   const starting = !live && !error && !gesture && status !== "idle";
   elements.statusDot.className = `dot ${error ? "bad" : live ? "ok" : gesture || starting ? "busy" : ""}`;
-  elements.startButton.textContent = live ? "停止实时字幕" : "开启实时字幕";
-  elements.startButton.classList.toggle("active", live);
+  elements.startButton.textContent = captureActive
+    ? (local ? "停止本地字幕" : "停止实时字幕")
+    : (local ? "开启本地精准字幕" : "开启实时字幕");
+  elements.startButton.classList.toggle("active", captureActive);
 }
 
 // ===== 字幕流：历史行累积 + 草稿行实时刷新（Mimi 模型）=====
@@ -513,6 +588,18 @@ function translateOn() {
   return Boolean(elements.translateToggle.checked);
 }
 
+// 「隐藏原文」：仅当开着翻译时才隐藏原文（否则没有可显示的译文）。
+function hideOriginalOn() {
+  return Boolean(hideOriginalPreference) && translateOn();
+}
+
+// 一条字幕该显示什么：翻译优先（隐藏原文时绝不回落原文），否则原文。
+function displayValue(line) {
+  const translated = String(line?.translated || "").trim();
+  if (translateOn()) return translated || (hideOriginalOn() ? "" : String(line?.text || "").trim());
+  return String(line?.text || "").trim();
+}
+
 function belongsToSession(message) {
   // 会话已结束或尚未接管的字幕一律丢弃
   if (captureEnded) return false;
@@ -554,12 +641,12 @@ function resetFeed() {
 async function restoreTranscript() {
   try {
     const response = await chrome.runtime.sendMessage({ type: "GET_TRANSCRIPT" });
-    const rows = Array.isArray(response?.rows) ? response.rows : [];
+    const rows = (Array.isArray(response?.rows) ? response.rows : [])
+      .filter((row) => !activeJobId || String(row?.jobId || "") === activeJobId);
     if (rows.length === 0) return;
-    const translate = translateOn();
     let maxSeq = 0;
     for (const row of rows) {
-      const display = translate && row.translated ? row.translated : row.text;
+      const display = displayValue(row);
       if (!display) continue;
       appendRow(display, "", row.seq);
       const seq = Number(row.seq) || 0;

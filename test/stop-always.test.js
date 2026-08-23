@@ -107,6 +107,24 @@ function makeCtx({ captureStarted = false } = {}) {
     check(Boolean(r?.ok), "ensureLiveCaptions 正常返回");
     console.log("T5 停止后自动授权被拦 PASS");
   }
+  {
+    // 场景：UI 轮询后会话已从 A 交接到 B；晚到的 STOP(A) 不能杀掉 B。
+    const h = makeCtx({ captureStarted: false });
+    vm.runInContext(`
+      tabStates.get(1).jobId = "job-a";
+      tabStates.set(2, { tabId: 2, jobId: "job-b", captureStarted: true, status: "live", engine: "dashscope" });
+      captureTabId = 2;
+    `, h.ctx);
+    const before = h.sent.length;
+    const response = await vm.runInContext(`stopCaptureForTab({ tabId: 1, jobId: "job-a" })`, h.ctx);
+    await flush();
+    check(response.stale === true && response.state?.jobId === "job-b",
+      "stale stop returns the current session for UI refresh");
+    check(!h.sent.slice(before).some((message) => message.type === "CAPTURE_STOP")
+        && vm.runInContext(`tabStates.get(2).captureStarted`, h.ctx) === true,
+      "stale STOP from the previous tab cannot terminate the new global session");
+    console.log("T6 交接后的旧 STOP 不杀新会话 PASS");
+  }
   console.log(fail === 0 ? "stop-always 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
 })().catch((err) => { console.error(err); process.exit(1); });

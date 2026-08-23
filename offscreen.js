@@ -38,6 +38,7 @@ let processor = null;
 let audioSource = null;
 let silentGain = null;
 let socket = null;
+let pendingSocketStartCancel = null;
 let taskId = "";
 let taskReady = false;
 let captureTranslate = false;
@@ -52,6 +53,7 @@ let frameQueue = [];
 let emitSeq = 0;
 let stopping = false;
 let captureGeneration = 0;
+let captureOperationId = 0;
 let captureJobId = "";
 let captureTabId = 0;
 let captureMediaEpoch = 0;
@@ -162,6 +164,7 @@ async function startCapture(message) {
 }
 
 async function runStartCapture({ streamId, translate, apiKey, source, engine, jobId, tabId, mediaEpoch }) {
+  const operationId = ++captureOperationId;
   const nextJobId = String(jobId || "");
   const nextMediaEpoch = Number(mediaEpoch) || 0;
   const sameTimeline = Boolean(
@@ -173,7 +176,9 @@ async function runStartCapture({ streamId, translate, apiKey, source, engine, jo
   stopping = false;
   clearRetryTimer();
   await stopRecognitionOnly();
+  if (operationId !== captureOperationId) throw captureCancelledError();
   stopping = false;
+  assertCaptureOperation(operationId);
   captureSource = source === "mic" ? "mic" : "tab";
   captureEngine = ["webspeech"].includes(engine) ? engine : "dashscope";
   captureApiKey = String(apiKey || "").trim();
@@ -190,24 +195,28 @@ async function runStartCapture({ streamId, translate, apiKey, source, engine, jo
   activeTiming = {};
   logEvent("start", `source=${captureSource} engine=${captureEngine} translate=${captureTranslate}`);
 
-  if (captureEngine === "webspeech") {
+  try {
+    if (captureEngine === "webspeech") {
     // Chrome 内置语音识别：仅支持麦克风来源；免 Key、免手势（一次麦克风授权后永久生效）
     if (captureSource !== "mic") {
       throw new Error("内置语音识别只支持「麦克风」声音来源，请在设置里切换。");
     }
     await acquireStreamForSource("");
+    assertCaptureOperation(operationId);
     startWebSpeech();
     logEvent("started", "mode=webspeech");
-    return { ok: true, mode: "webspeech", audioPositionMs: audioPositionMs() };
-  }
+      return { ok: true, mode: "webspeech", audioPositionMs: audioPositionMs() };
+    }
 
-  await acquireStreamForSource(streamId);
+    await acquireStreamForSource(streamId);
+    assertCaptureOperation(operationId);
 
-  try {
     // 先开始采集再连接识别会话：连接期间的音频先排队，连上后立即补发，开播头几秒不丢
     const started = await startPcmCapture();
+    assertCaptureOperation(operationId);
     if (!started) throw new Error("浏览器不支持 16kHz 音频采集。");
     await connectRealtime();
+    assertCaptureOperation(operationId);
     flushFrames();
     logEvent("started", "mode=direct");
     return { ok: true, mode: "direct", audioPositionMs: audioPositionMs() };
@@ -216,6 +225,17 @@ async function runStartCapture({ streamId, translate, apiKey, source, engine, jo
     await stopCapture();
     throw error;
   }
+}
+
+function assertCaptureOperation(operationId) {
+  if (operationId === captureOperationId && !stopping) return;
+  throw captureCancelledError();
+}
+
+function captureCancelledError() {
+  const error = new Error("capture_start_cancelled");
+  error.name = "AbortError";
+  return error;
 }
 
 // 获取（或复用）音频流：来源未变时直接复用已存在的流，
@@ -348,10 +368,31 @@ async function connectRealtime() {
   nextSocket.binaryType = "arraybuffer";
 
   await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    let settled = false;
+    let timer = null;
+    const clearPending = () => {
+      if (pendingSocketStartCancel === cancel) pendingSocketStartCancel = null;
+    };
+    const finishResolve = (value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      clearPending();
+      resolve(value);
+    };
+    const finishReject = (error) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      clearPending();
+      reject(error);
+    };
+    const cancel = () => finishResolve(false);
+    pendingSocketStartCancel = cancel;
+    timer = setTimeout(() => {
       if (socket === nextSocket) socket = null;
       try { nextSocket.close(1000, "timeout"); } catch { /* ignore */ }
-      reject(new Error("DashScope 连接超时。"));
+      finishReject(new Error("DashScope 连接超时。"));
     }, 20_000);
     nextSocket.onopen = () => {
       // 旧连接可能比替代它的新连接更晚触发 open；绝不能借用全局 socket
@@ -359,7 +400,7 @@ async function connectRealtime() {
       if (socket !== nextSocket || stopping) {
         clearTimeout(timer);
         try { nextSocket.close(1000, "superseded"); } catch { /* ignore */ }
-        resolve(false);
+        finishResolve(false);
         return;
       }
       nextSocket.send(JSON.stringify({
@@ -393,15 +434,15 @@ async function connectRealtime() {
         retryCount = 0;
         clearRetryTimer();
         logEvent("ws-task-started", `task=${nextTaskId}`);
-        resolve();
+        finishResolve();
         return;
       }
       if (type === "task-failed") {
         const error = message?.header?.error_message || "DashScope 实时识别失败";
         clearTimeout(timer);
         handleDashScopeMessage(message);
-        if (isRetryable(error)) resolve(false);
-        else reject(new Error(error));
+        if (isRetryable(error)) finishResolve(false);
+        else finishReject(new Error(error));
         return;
       }
       handleDashScopeMessage(message);
@@ -409,16 +450,16 @@ async function connectRealtime() {
     nextSocket.onerror = () => {
       clearTimeout(timer);
       if (socket !== nextSocket) {
-        resolve(false);
+        finishResolve(false);
         return;
       }
       logEvent("ws-error", "");
-      reject(new Error("无法连接 DashScope 实时识别。"));
+      finishReject(new Error("无法连接 DashScope 实时识别。"));
     };
     nextSocket.onclose = (event) => {
       clearTimeout(timer);
       if (socket !== nextSocket) {
-        resolve(false);
+        finishResolve(false);
         return;
       }
       const wasReady = taskReady;
@@ -429,10 +470,16 @@ async function connectRealtime() {
       logEvent("ws-closed", `code=${event?.code ?? "?"} reason=${JSON.stringify(String(event?.reason || "").slice(0, 60))} stopping=${stopping}`);
       if (!stopping && stream) {
         scheduleAutoReconnect();
-        if (!wasReady) reject(new Error("DashScope 连接在启动前关闭。"));
+        if (!wasReady) finishReject(new Error("DashScope 连接在启动前关闭。"));
       }
     };
   });
+}
+
+function cancelPendingSocketStart() {
+  const cancel = pendingSocketStartCancel;
+  pendingSocketStartCancel = null;
+  if (cancel) cancel();
 }
 
 function handleDashScopeMessage(message) {
@@ -1336,6 +1383,7 @@ async function resetSocket() {
   logEvent("ws-reconnect", `retry=${retryCount}`);
   captureGeneration += 1;
   cancelTranslationWork();
+  cancelPendingSocketStart();
   closeSocket(false);
   frameQueue = [];
   pcmPending = new Uint8Array(0);
@@ -1427,6 +1475,7 @@ function closeSocket(finish = true) {
 async function stopRecognitionOnly() {
   stopping = true;
   captureGeneration += 1;
+  cancelPendingSocketStart();
   clearRetryTimer();
   if (recognition) {
     try {
@@ -1452,8 +1501,10 @@ async function stopRecognitionOnly() {
 
 async function stopCapture() {
   logEvent("stop", "full (stream released)");
+  captureOperationId += 1;
   stopping = true;
   captureGeneration += 1;
+  cancelPendingSocketStart();
   clearRetryTimer();
   if (recognition) {
     try {

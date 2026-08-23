@@ -123,9 +123,12 @@ function makeElement(tag = "div") {
 
   const longDraft = "This draft keeps growing while somebody speaks continuously and it should become a rolling readable viewport instead of filling the video with several lines of source text.";
   send({ type: "LIVE_PARTIAL", jobId: "job-1", mediaEpoch: 3, seq: 2, lines: [{ text: longDraft }] });
+  const rollingDraft = overlay.shadowRoot.querySelector(".original").textContent;
   check(
-    overlay.shadowRoot.querySelector(".original").textContent === longDraft,
-    "long source draft keeps its complete semantic context"
+    rollingDraft !== longDraft
+      && rollingDraft.replace(/\s+/g, " ").includes("several lines of source text.")
+      && rollingDraft.split("\n").length <= 2,
+    "long source draft rolls forward to the newest two semantic lines"
   );
 
   send({ type: "LIVE_SUBTITLES", jobId: "job-1", mediaEpoch: 3, seq: 3, unit: true, lines: [{ text: "Second final unit" }] });
@@ -160,6 +163,52 @@ function makeElement(tag = "div") {
   document.fullscreenElement = null;
   documentListeners.fullscreenchange();
   check(overlay.parentNode === root, "overlay returns to document after fullscreen");
+
+  Object.assign(video, { currentTime: 171.5, duration: 1_793, playbackRate: 1 });
+  send({ type: "OFFLINE_SESSION", jobId: "offline-1", mediaEpoch: 5, translate: true });
+  send({
+    type: "OFFLINE_CUES", jobId: "offline-1", mediaEpoch: 5, revision: 1,
+    cues: [{ cueId: "cue-1", startMs: 171_000, endMs: 173_000, text: "Complete local source.", translated: "完整的本地字幕。" }]
+  });
+  check(overlay.shadowRoot.querySelector(".original").textContent === "Complete local source.",
+    "offline cue renders from the absolute video clock");
+  check(overlay.shadowRoot.querySelector(".translation").textContent === "完整的本地字幕。",
+    "offline translation stays paired with its cue");
+  video.currentTime = 174;
+  documentListeners.timeupdate({ target: video });
+  check(overlay.shadowRoot.querySelector(".original").textContent === "", "offline cue clears exactly after its media end time");
+  send({ type: "OFFLINE_RESET", jobId: "offline-1", mediaEpoch: 6 });
+  video.currentTime = 171.5;
+  send({
+    type: "OFFLINE_CUES", jobId: "offline-1", mediaEpoch: 5, revision: 2,
+    cues: [{ cueId: "stale", startMs: 171_000, endMs: 173_000, text: "Stale cue." }]
+  });
+  check(overlay.shadowRoot.querySelector(".original").textContent === "", "old offline epoch cannot reappear after seek");
+  send({ type: "OFFLINE_RESET", jobId: "offline-1", mediaEpoch: 5 });
+  send({ type: "OFFLINE_STOP", jobId: "offline-1", mediaEpoch: 5 });
+  send({
+    type: "OFFLINE_CUES", jobId: "offline-1", mediaEpoch: 6, revision: 1,
+    cues: [{ cueId: "current-6", startMs: 171_000, endMs: 175_000, text: "Current epoch survives." }]
+  });
+  check(overlay.shadowRoot.querySelector(".original").textContent === "Current epoch survives.",
+    "late reset and stop control messages cannot roll back or end a newer epoch");
+
+  send({ type: "OFFLINE_RESET", jobId: "offline-1", mediaEpoch: 7 });
+  send({
+    type: "OFFLINE_CUES", jobId: "offline-1", mediaEpoch: 7, revision: 1,
+    cues: [
+      { cueId: "long", startMs: 170_000, endMs: 176_000, text: "Long active cue." },
+      { cueId: "short", startMs: 171_000, endMs: 172_000, text: "Short overlap." }
+    ]
+  });
+  video.currentTime = 174;
+  documentListeners.timeupdate({ target: video });
+  check(overlay.shadowRoot.querySelector(".original").textContent === "Long active cue.",
+    "an ended short overlap does not hide an earlier cue that is still active");
+
+  documentListeners.emptied({ target: video });
+  check(overlay.shadowRoot.querySelector(".original").textContent === "",
+    "a media source change freezes and clears old offline cues immediately");
 
   console.log(fail === 0 ? "overlay regression PASS" : `${fail} failures`);
   process.exit(fail ? 1 : 0);

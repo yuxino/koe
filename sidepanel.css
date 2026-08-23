@@ -72,6 +72,7 @@ body {
 .settings summary::before { content: "›"; font-size: 14px; line-height: 1; transition: transform .15s ease; }
 .settings[open] summary::before { transform: rotate(90deg); }
 .settings-body { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; }
+.dashscope-only { display: flex; flex-direction: column; gap: 8px; }
 .setting-toggle {
   min-height: 38px;
   padding: 0 2px;

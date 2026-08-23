@@ -24,6 +24,7 @@
   let overlayTranslation = null;
   let overlayEnabled = true;
   let overlaySize = "medium";
+  let hideOriginal = false;
   let overlayHideTimer = null;
   let lastDraftSeq = 0;
   let lastUnitSeq = 0;
@@ -35,6 +36,15 @@
   let visibleUnitSeq = 0;
   let awaitingMediaReset = false;
   const pendingUnitTranslations = new Map();
+  let offlineCues = [];
+  let offlineRevision = 0;
+  let visibleOfflineCueId = "";
+  let offlineFrameRequest = 0;
+  let lastMediaContextAt = 0;
+  let mediaDiscontinuityId = 0;
+  let mediaResourceFloor = 0;
+  const CAPTION_SENTENCE_ENDINGS = new Set(["。", "！", "？", "!", "?", "；", ";", "\n"]);
+  const CAPTION_PREFERRED_BREAKS = new Set(["，", "、", ",", "：", ":", "—", "–", "-", " "]);
 
   try {
     chrome.runtime.onMessage.addListener((message) => {
@@ -51,6 +61,7 @@
       if (areaName !== "local") return;
       if (changes.koeOverlayEnabled) overlayEnabled = changes.koeOverlayEnabled.newValue !== false;
       if (changes.koeOverlaySize) overlaySize = normalizeOverlaySize(changes.koeOverlaySize.newValue);
+      if (changes.koeHideOriginal) hideOriginal = changes.koeHideOriginal.newValue !== false;
       applyOverlayPreferences();
     });
   } catch {
@@ -81,6 +92,7 @@
     if (window.__koeLoaded !== CONTENT_VERSION) return;
     const target = event.target;
     if (!(target instanceof HTMLVideoElement)) return;
+    freezeForSourceChange();
     safeSend({ type: "VIDEO_CHANGED" });
   }, true);
 
@@ -92,8 +104,13 @@
     handleUrlChange();
     const video = findVideo();
     const source = video ? (video.currentSrc || video.src || "") : "";
+    if (video && activeSession?.mode === "offline" && Date.now() - lastMediaContextAt >= 2_000) {
+      reportMediaContext(video);
+    }
     if (source && source !== lastSeenSource) {
+      const hadSource = Boolean(lastSeenSource);
       lastSeenSource = source;
+      if (hadSource) freezeForSourceChange();
       safeSend({ type: "VIDEO_CHANGED" });
       return;
     }
@@ -111,6 +128,7 @@
     if (window.__koeLoaded !== CONTENT_VERSION) return; // 旧副本：停止工作
     if (location.href === lastSeenUrl) return;
     lastSeenUrl = location.href;
+    freezeForSourceChange();
     safeSend({ type: "VIDEO_CHANGED" });
   }
   const wrapHistory = (method) => {
@@ -134,11 +152,13 @@
   document.addEventListener("seeked", (event) => {
     if (!isActiveVideoEvent(event) || !activeSession) return;
     clearOverlayText({ resetTimeline: false });
+    mediaDiscontinuityId += 1;
     safeSend({
       type: "MEDIA_DISCONTINUITY",
       reason: "seek",
       jobId: activeSession.jobId,
       mediaEpoch: activeSession.mediaEpoch,
+      discontinuityId: mediaDiscontinuityId,
       currentTime: Number(event.target.currentTime) || 0
     });
   }, true);
@@ -146,7 +166,15 @@
   document.addEventListener("ratechange", (event) => {
     if (!isActiveVideoEvent(event)) return;
     positionOverlay();
+    if (activeSession?.mode === "offline") reportMediaContext();
   }, true);
+
+  for (const eventName of ["play", "pause", "timeupdate", "loadedmetadata"]) {
+    document.addEventListener(eventName, (event) => {
+      if (!isActiveVideoEvent(event) || activeSession?.mode !== "offline") return;
+      renderOfflineCue();
+    }, true);
+  }
 
   document.addEventListener("fullscreenchange", () => {
     mountOverlayForFullscreen();
@@ -155,6 +183,77 @@
 
   function handleLiveMessage(message) {
     if (!message || typeof message.type !== "string") return;
+    if (message.type === "OFFLINE_SESSION") {
+      const nextJobId = String(message.jobId || "");
+      const nextEpoch = Number(message.mediaEpoch) || 0;
+      if (activeSession?.mode === "offline"
+          && activeSession.jobId === nextJobId
+          && nextEpoch < activeSession.mediaEpoch) return;
+      const replacingJob = !activeSession || activeSession.jobId !== nextJobId || activeSession.mode !== "offline";
+      const translateChanged = activeSession?.mode === "offline"
+        && activeSession.jobId === nextJobId
+        && activeSession.translate !== (message.translate !== false);
+      if (!activeSession || activeSession.jobId !== nextJobId || activeSession.mediaEpoch !== nextEpoch || activeSession.mode !== "offline") {
+        clearOverlayText();
+        resetOfflineCues();
+      }
+      activeSession = {
+        jobId: nextJobId,
+        mediaEpoch: nextEpoch,
+        translate: message.translate !== false,
+        mode: "offline"
+      };
+      awaitingMediaReset = false;
+      if (replacingJob) {
+        mediaDiscontinuityId = Math.max(0, Number(message.discontinuityId) || 0);
+        mediaResourceFloor = Math.max(0, performanceClock() - 60_000);
+      } else {
+        mediaDiscontinuityId = Math.max(mediaDiscontinuityId, Number(message.discontinuityId) || 0);
+      }
+      if (!lastSeenSource) {
+        const video = findVideo();
+        lastSeenSource = video ? String(video.currentSrc || video.src || "") : "";
+      }
+      if (translateChanged) visibleOfflineCueId = "";
+      ensureOverlay();
+      applyOverlayPreferences();
+      startOfflineClock();
+      renderOfflineCue();
+      return;
+    }
+    if (message.type === "OFFLINE_DISCOVER") {
+      if (!activeSession || activeSession.mode !== "offline" || message.jobId !== activeSession.jobId) return;
+      reportMediaContext();
+      return;
+    }
+    if (message.type === "OFFLINE_RESET") {
+      if (!activeSession || activeSession.mode !== "offline" || message.jobId !== activeSession.jobId) return;
+      const nextEpoch = Number(message.mediaEpoch) || 0;
+      if (nextEpoch <= activeSession.mediaEpoch) return;
+      activeSession.mediaEpoch = nextEpoch;
+      awaitingMediaReset = false;
+      if (message.reason === "source") mediaResourceFloor = Math.max(0, performanceClock() - 3_000);
+      clearOverlayText();
+      resetOfflineCues();
+      reportMediaContext();
+      return;
+    }
+    if (message.type === "OFFLINE_CUES") {
+      if (!acceptOfflineMessage(message)) return;
+      mergeOfflineCues(message.cues, message.revision);
+      renderOfflineCue();
+      return;
+    }
+    if (message.type === "OFFLINE_STOP" || message.type === "OFFLINE_ERROR") {
+      if (!activeSession || (message.jobId && message.jobId !== activeSession.jobId)) return;
+      if (message.mediaEpoch !== undefined && (Number(message.mediaEpoch) || 0) < activeSession.mediaEpoch) return;
+      stopOfflineClock();
+      resetOfflineCues();
+      clearOverlayText();
+      activeSession = null;
+      awaitingMediaReset = false;
+      return;
+    }
     if (message.type === "LIVE_SESSION") {
       const nextJobId = String(message.jobId || "");
       const nextEpoch = Number(message.mediaEpoch) || 0;
@@ -164,8 +263,11 @@
       activeSession = {
         jobId: nextJobId,
         mediaEpoch: nextEpoch,
-        translate: message.translate !== false
+        translate: message.translate !== false,
+        mode: "live"
       };
+      stopOfflineClock();
+      resetOfflineCues();
       awaitingMediaReset = false;
       ensureOverlay();
       applyOverlayPreferences();
@@ -260,12 +362,188 @@
     return true;
   }
 
+  function acceptOfflineMessage(message) {
+    if (!activeSession || activeSession.mode !== "offline" || message.jobId !== activeSession.jobId) return false;
+    if ((Number(message.mediaEpoch) || 0) !== activeSession.mediaEpoch) return false;
+    return true;
+  }
+
+  function mergeOfflineCues(cues, revision = 0) {
+    const nextRevision = Number(revision) || 0;
+    if (nextRevision < offlineRevision) return;
+    offlineRevision = Math.max(offlineRevision, nextRevision);
+    const byId = new Map(offlineCues.map((cue) => [cue.cueId, cue]));
+    for (const candidate of Array.isArray(cues) ? cues : []) {
+      const startMs = Number(candidate?.startMs);
+      const endMs = Number(candidate?.endMs);
+      const text = String(candidate?.text || "").trim();
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs < 0 || endMs <= startMs || !text) continue;
+      const cueId = String(candidate.cueId || `${Math.round(startMs)}-${Math.round(endMs)}`);
+      byId.set(cueId, {
+        cueId,
+        startMs,
+        endMs,
+        text,
+        translated: String(candidate.translated || "").trim()
+      });
+    }
+    offlineCues = [...byId.values()]
+      .sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs)
+      .slice(-2_000);
+  }
+
+  function resetOfflineCues() {
+    offlineCues = [];
+    offlineRevision = 0;
+    visibleOfflineCueId = "";
+  }
+
+  function startOfflineClock() {
+    stopOfflineClock();
+    if (typeof window.requestAnimationFrame !== "function") return;
+    const tick = () => {
+      offlineFrameRequest = 0;
+      if (activeSession?.mode !== "offline") return;
+      renderOfflineCue();
+      offlineFrameRequest = window.requestAnimationFrame(tick);
+    };
+    offlineFrameRequest = window.requestAnimationFrame(tick);
+  }
+
+  function stopOfflineClock() {
+    if (offlineFrameRequest && typeof window.cancelAnimationFrame === "function") {
+      window.cancelAnimationFrame(offlineFrameRequest);
+    }
+    offlineFrameRequest = 0;
+  }
+
+  function renderOfflineCue() {
+    if (!activeSession || activeSession.mode !== "offline" || awaitingMediaReset) return;
+    const video = findVideo();
+    if (!video) return;
+    const currentMs = Math.max(0, Number(video.currentTime) || 0) * 1_000;
+    const cue = findCueAt(currentMs);
+    const signature = cue ? `${cue.cueId}\u0000${cue.text}\u0000${cue.translated}` : "";
+    if (signature === visibleOfflineCueId) return;
+    visibleOfflineCueId = signature;
+    if (!cue) {
+      finalOriginal = "";
+      finalTranslatedText = "";
+      draftOriginal = "";
+      draftTranslatedText = "";
+      if (overlayOriginal) overlayOriginal.textContent = "";
+      if (overlayTranslation) overlayTranslation.textContent = "";
+      overlayHost?.shadowRoot?.querySelector(".stage")?.classList.remove("visible");
+      return;
+    }
+    finalOriginal = cue.text;
+    finalTranslatedText = cue.translated;
+    draftOriginal = "";
+    draftTranslatedText = "";
+    safeSend({
+      type: "OFFLINE_VISIBLE_REPORT",
+      jobId: activeSession.jobId,
+      mediaEpoch: activeSession.mediaEpoch,
+      currentTimeMs: currentMs,
+      cue: {
+        cueId: cue.cueId,
+        startMs: cue.startMs,
+        endMs: cue.endMs,
+        text: cue.text,
+        translated: cue.translated
+      }
+    });
+    renderOverlay();
+    showOverlayPersistent();
+  }
+
+  function findCueAt(currentMs) {
+    let low = 0;
+    let high = offlineCues.length - 1;
+    let candidate = null;
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      const cue = offlineCues[middle];
+      if (cue.startMs <= currentMs) {
+        candidate = cue;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    if (!candidate) return null;
+    let index = offlineCues.indexOf(candidate);
+    while (index >= 0) {
+      const cue = offlineCues[index];
+      if (cue.startMs <= currentMs && currentMs < cue.endMs) return cue;
+      index -= 1;
+    }
+    return null;
+  }
+
+  function showOverlayPersistent() {
+    if (!overlayEnabled) return;
+    ensureOverlay();
+    if (overlayHideTimer) window.clearTimeout(overlayHideTimer);
+    overlayHideTimer = null;
+    overlayHost.shadowRoot?.querySelector(".stage")?.classList.add("visible");
+  }
+
+  function reportMediaContext(video = findVideo()) {
+    if (!video || !activeSession || activeSession.mode !== "offline") return;
+    lastMediaContextAt = Date.now();
+    let resourceUrls = [];
+    try {
+      resourceUrls = (typeof performance !== "undefined" && typeof performance.getEntriesByType === "function")
+        ? performance.getEntriesByType("resource")
+          .filter((entry) => Number(entry?.startTime) >= mediaResourceFloor)
+          .map((entry) => ({
+            url: String(entry?.name || ""),
+            observedAt: performanceTimeOrigin() + Math.max(0, Number(entry?.startTime) || 0)
+          }))
+          .filter((item) => {
+            try { return /\.m3u8$/i.test(new URL(item.url).pathname); } catch { return false; }
+          })
+          .slice(-24)
+        : [];
+    } catch {
+      resourceUrls = [];
+    }
+    safeSend({
+      type: "MEDIA_CONTEXT",
+      jobId: activeSession.jobId,
+      mediaEpoch: activeSession.mediaEpoch,
+      currentSrc: String(video.currentSrc || video.src || ""),
+      currentTimeMs: Math.max(0, Number(video.currentTime) || 0) * 1_000,
+      durationMs: Number.isFinite(Number(video.duration)) ? Math.max(0, Number(video.duration) * 1_000) : 0,
+      playbackRate: Math.max(0.25, Math.min(4, Number(video.playbackRate) || 1)),
+      resourceUrls
+    });
+  }
+
+  function freezeForSourceChange() {
+    if (!activeSession) return;
+    awaitingMediaReset = true;
+    mediaResourceFloor = Math.max(0, performanceClock() - 3_000);
+    clearOverlayText({ resetTimeline: false });
+    if (activeSession.mode === "offline") resetOfflineCues();
+  }
+
+  function performanceClock() {
+    try { return Number(performance?.now?.()) || 0; } catch { return 0; }
+  }
+
+  function performanceTimeOrigin() {
+    try { return Number(performance?.timeOrigin) || (Date.now() - performanceClock()); } catch { return Date.now(); }
+  }
+
   async function loadOverlayPreferences() {
     try {
       if (!chrome.storage?.local?.get) return;
-      const stored = await chrome.storage.local.get(["koeOverlayEnabled", "koeOverlaySize"]);
+      const stored = await chrome.storage.local.get(["koeOverlayEnabled", "koeOverlaySize", "koeHideOriginal"]);
       overlayEnabled = stored.koeOverlayEnabled !== false;
       overlaySize = normalizeOverlaySize(stored.koeOverlaySize);
+      hideOriginal = stored.koeHideOriginal !== false;
       applyOverlayPreferences();
     } catch {
       // 使用默认偏好。
@@ -321,6 +599,7 @@
           text-shadow: 0 1px 2px #000, 0 0 12px rgba(0,0,0,.88);
           overflow-wrap: anywhere;
           overflow: hidden;
+          white-space: pre-line;
         }
         .line:not(:empty) {
           display: -webkit-box;
@@ -383,6 +662,10 @@
     stage.style.setProperty("--koe-scale", String(scale));
     overlayHost.hidden = !overlayEnabled;
     if (!overlayEnabled) clearOverlayText({ resetTimeline: false });
+    else if (activeSession?.mode === "offline") {
+      visibleOfflineCueId = "";
+      renderOfflineCue();
+    }
   }
 
   function positionOverlay() {
@@ -414,12 +697,52 @@
 
   function renderOverlay() {
     if (!overlayOriginal || !overlayTranslation) return;
-    const original = draftOriginal || finalOriginal;
-    const translation = draftOriginal ? draftTranslatedText : finalTranslatedText;
-    overlayOriginal.textContent = original;
+    // 持续增长的草稿必须显示“最新两行”。直接把全文交给 line-clamp 只会
+    // 永远裁出开头两行，讲话越久，用户越看不到当前正在说什么。
+    const original = draftOriginal ? captionViewport(draftOriginal) : finalOriginal;
+    const translation = draftOriginal ? captionViewport(draftTranslatedText) : finalTranslatedText;
+    const hideOriginalActive = hideOriginal && Boolean(activeSession?.translate);
+    overlayOriginal.textContent = hideOriginalActive ? "" : original;
     overlayTranslation.textContent = activeSession?.translate ? translation : "";
     overlayOriginal.classList.toggle("solo", !overlayTranslation.textContent);
+    overlayOriginal.style.display = hideOriginalActive ? "none" : "";
     positionOverlay();
+  }
+
+  function captionViewport(text) {
+    const value = String(text || "").trim();
+    if (!value) return "";
+    const cjk = /[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(value);
+    const maximum = cjk ? 24 : 58;
+    const remaining = Array.from(value);
+    const parts = [];
+    while (remaining.length > 0) {
+      while (remaining.length > 0 && /\s/.test(remaining[0])) remaining.shift();
+      if (remaining.length === 0) break;
+      const searchCount = Math.min(maximum, remaining.length);
+      const sentenceEnd = remaining.slice(0, searchCount)
+        .findIndex((character) => CAPTION_SENTENCE_ENDINGS.has(character));
+      if (sentenceEnd >= 0) {
+        parts.push(remaining.splice(0, sentenceEnd + 1).join("").trim());
+        continue;
+      }
+      if (remaining.length <= maximum) {
+        parts.push(remaining.splice(0).join("").trim());
+        continue;
+      }
+      let preferred = -1;
+      for (let index = maximum - 1; index >= Math.floor(maximum / 2); index -= 1) {
+        if (CAPTION_PREFERRED_BREAKS.has(remaining[index])) {
+          preferred = index;
+          break;
+        }
+      }
+      const count = preferred >= 0
+        ? (/\s/.test(remaining[preferred]) ? preferred : preferred + 1)
+        : maximum;
+      parts.push(remaining.splice(0, Math.max(1, count)).join("").trim());
+    }
+    return parts.filter(Boolean).slice(-2).join("\n");
   }
 
   function clearOverlayText({ resetTimeline = true } = {}) {
@@ -448,11 +771,23 @@
   function findVideo() {
     const videos = [...document.querySelectorAll("video")];
     const score = (video) => {
-      const area = Number(video.videoWidth || 0) * Number(video.videoHeight || 0);
-      return area + (video.muted ? 0 : 1_000_000) + (video.paused ? 0 : 500_000);
+      const rect = video.getBoundingClientRect?.() || {};
+      const intrinsicArea = Number(video.videoWidth || 0) * Number(video.videoHeight || 0);
+      const layoutArea = Number(rect.width || 0) * Number(rect.height || 0);
+      const ancestry = [video, video.parentElement, video.parentElement?.parentElement]
+        .map((node) => `${node?.id || ""} ${node?.className || ""}`).join(" ");
+      const adLike = /(^|[\s_-])(ad|ads|advert|preroll|postroll|pauseroll|gifvideo)([\s_-]|$)/i.test(ancestry);
+      if (adLike) return -1_000_000_000_000;
+      return Math.max(intrinsicArea, layoutArea)
+        + (video.muted ? 0 : 1_000_000)
+        + (video.paused ? 0 : 500_000);
     };
     const main = videos
-      .filter((video) => Number(video.videoWidth) >= 320 && Number(video.videoHeight) >= 180 && (video.currentSrc || video.src))
+      .filter((video) => {
+        const rect = video.getBoundingClientRect?.() || {};
+        return Math.max(Number(video.videoWidth || 0), Number(rect.width || 0)) >= 320
+          && Math.max(Number(video.videoHeight || 0), Number(rect.height || 0)) >= 180;
+      })
       .sort((left, right) => score(right) - score(left))[0];
     return main || videos.sort((left, right) => score(right) - score(left))[0] || null;
   }

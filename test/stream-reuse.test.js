@@ -182,6 +182,31 @@ captureSource = "tab"; captureEngine = "dashscope"; currentStreamSource = ""; st
     check(invalidSends === 0, "superseded socket never sends through the connecting replacement");
     console.log("T6 overlapping WebSocket open race PASS");
   }
+  {
+    // 用户在 getUserMedia 仍等待时点停止：迟到的流不能继续启动 PCM/WebSocket。
+    let releaseMedia;
+    let stopped = 0;
+    const h = makeOffCtx({
+      tabGetUserMedia: () => new Promise((resolve) => {
+        releaseMedia = () => resolve({ getTracks: () => [{ stop() { stopped += 1; } }] });
+      })
+    });
+    const run = (code) => vm.runInContext(code, h.ctx);
+    const pending = run(`startCapture({
+      streamId: "slow", translate: false, apiKey: "k", source: "tab", engine: "dashscope",
+      jobId: "slow-job", mediaEpoch: 0
+    }).then(() => ({ ok: true })).catch((error) => ({ ok: false, error: error.message }))`);
+    await flush();
+    await run(`stopCapture()`);
+    releaseMedia();
+    const result = await pending;
+    await flush();
+    check(result.ok === false && result.error === "capture_start_cancelled",
+      "stop invalidates an in-flight capture start operation");
+    check(run(`stream === null && socket === null && stopping === true`) === true && stopped >= 1,
+      "the late media stream is released and no recognizer restarts after stop");
+    console.log("T7 stop-during-start race PASS");
+  }
   console.log(fail === 0 ? "ALL stream-reuse suites PASS" : `FAILURES: ${fail}`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

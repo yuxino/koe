@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Koe",
-  "version": "1.7.3",
+  "version": "1.8.0",
   "description": "Media-synced page subtitles and Chinese translation for audio playing in the current tab.",
   "icons": {
     "16": "assets/koe-avatar-16.png",
@@ -16,6 +16,8 @@
     "offscreen",
     "sidePanel",
     "contextMenus",
+    "nativeMessaging",
+    "webRequest",
     "declarativeNetRequestWithHostAccess"
   ],
   "host_permissions": [

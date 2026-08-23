@@ -117,6 +117,16 @@ function makeContext() {
   check(late.ignored === true && stillStopped,
     "a late message after stop cannot revive the capture state");
   check(!result.rows.some((row) => row.seq === 99), "a late message after stop is not persisted");
+
+  vm.runInContext(`
+    recordTranscript({ seq: 100, text: "Old queued row.", mediaEpoch: 2, jobId: "live-1" });
+    clearTranscript();
+    recordTranscript({ seq: 1, text: "New session row.", mediaEpoch: 0, jobId: "live-new" });
+  `, ctx);
+  await settle();
+  result = await vm.runInContext("getTranscript()", ctx);
+  check(result.rows.length === 1 && result.rows[0]?.jobId === "live-new",
+    "new-session clear is serialized after old writes and before new rows");
   console.log(fail === 0 ? "transcript-consistency regression PASS" : `${fail} failures`);
   process.exit(fail ? 1 : 0);
 })().catch((error) => { console.error(error); process.exit(1); });

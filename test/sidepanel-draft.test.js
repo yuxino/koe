@@ -191,6 +191,16 @@ const WAIT = 380;
     check(row?.className === "row" && text === "你好啊", "完整译文到达后冻结为稳定行");
     console.log("T6 流式译文同 seq 更新并冻结 PASS");
   }
+  {
+    // 场景：本地 Helper 下载模型/准备音频期间，status 还不是 live，
+    // 但 captureActive=true 代表会话已经启动，按钮必须保持可停止状态。
+    const h = makeCtx();
+    vm.runInContext(`currentState = { status: "preparing-model", captureActive: true, engine: "local", tabId: 9 }; renderState();`, h.ctx);
+    check(h.els["#start-button"].textContent === "停止本地字幕",
+      `本地准备中按钮显示停止（实际 ${JSON.stringify(h.els["#start-button"].textContent)}）`);
+    check(h.els["#start-button"].classList.contains("active"), "本地准备中按钮保持 active 状态");
+    console.log("T7 本地 Helper 准备中按钮状态 PASS");
+  }
   console.log(fail === 0 ? "sidepanel-draft 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
 })().catch((err) => { console.error(err); process.exit(1); });

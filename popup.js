@@ -116,8 +116,16 @@ async function start(targetIdOverride) {
   setBusy(true);
   setStatus("正在开启…");
   try {
-    // 弹窗按钮点击 = 有效授权手势
-    const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
+    let koeAsrEngine = "";
+    try {
+      ({ koeAsrEngine } = await chrome.storage.local.get("koeAsrEngine"));
+    } catch {
+      // 旧测试环境或 storage 暂不可用时沿用实时模式。
+    }
+    // 本地精准模式直接读取媒体资源，不捕获标签页声音；实时模式仍需浏览器手势授权。
+    const streamId = koeAsrEngine === "local"
+      ? ""
+      : await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
     const response = await chrome.runtime.sendMessage({
       type: "START_CAPTURE",
       tabId: tab.id,
@@ -146,7 +154,11 @@ async function stop() {
   if (!tabId) return;
   setBusy(true);
   try {
-    const response = await chrome.runtime.sendMessage({ type: "STOP_CAPTURE", tabId });
+    const response = await chrome.runtime.sendMessage({
+      type: "STOP_CAPTURE",
+      tabId,
+      jobId: currentState.jobId || ""
+    });
     currentState = response?.state || { status: "idle" };
     setStatus("已停止");
   } catch (error) {
@@ -169,15 +181,19 @@ function setStatus(text, isError = false) {
 function render() {
   const status = currentState.status || "idle";
   const live = status === "live";
+  const captureActive = Boolean(currentState.captureActive);
+  const local = currentState.engine === "local";
   const error = status === "error";
   const gesture = Boolean(currentState.captureNeedsGesture);
   const starting = !live && !error && !gesture && status !== "idle";
   elements.statusDot.className = `dot ${error ? "bad" : live ? "ok" : gesture || starting ? "busy" : ""}`;
-  elements.startButton.textContent = live ? "停止实时字幕" : "开启实时字幕";
-  elements.startButton.classList.toggle("active", live);
+  elements.startButton.textContent = captureActive
+    ? (local ? "停止本地字幕" : "停止实时字幕")
+    : (local ? "开启本地精准字幕" : "开启实时字幕");
+  elements.startButton.classList.toggle("active", captureActive);
   if (live) {
     // 字幕可能在别的标签页跑着：状态跟捕获会话走，别让用户以为没开
     const otherTab = currentState.tabId && activeTab?.id && currentState.tabId !== activeTab.id;
-    setStatus(otherTab ? "字幕运行于其他标签页 · 停止按钮可关闭" : "字幕已开启 · 显示在视频画面上");
+    setStatus(otherTab ? "字幕运行于其他标签页 · 停止按钮可关闭" : local ? "本地精准字幕已开启 · 音视频不会上传" : "字幕已开启 · 显示在视频画面上");
   }
 }

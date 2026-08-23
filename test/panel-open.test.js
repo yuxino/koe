@@ -91,10 +91,11 @@ function runScenario({ state, startOk = true, recommendTabId = 1, clickOpenPanel
     const deadline = Date.now() + 2000;
     const poll = () => {
       const initiallyLive = Boolean(state?.captureActive || state?.status === "live");
+      const expectedStopText = state?.engine === "local" ? "停止本地字幕" : "停止实时字幕";
       const settled = clickOpenPanel
         ? calls.sidePanelOpen >= 1 && calls.closed >= 1
         : initiallyLive
-          ? els["#start-button"].textContent === "停止实时字幕"
+          ? els["#start-button"].textContent === expectedStopText
           : startOk
             ? calls.startedTab !== null && calls.closed >= 1
             : calls.startedTab !== null && /失败/.test(els["#status-text"].textContent);
@@ -155,5 +156,16 @@ function runScenario({ state, startOk = true, recommendTabId = 1, clickOpenPanel
   await new Promise((r) => setTimeout(r, 50));
   if (f.calls.stoppedTab !== 5) throw new Error(`F 停止应发给捕获会话 tab 5，实际 ${f.calls.stoppedTab}`);
   console.log(`F 捕获在其他标签页 → 按钮跟随会话状态，停止发到 tab ${f.calls.stoppedTab} ✓`);
+  // G：本地 Helper 仍在下载模型/准备音频时，status 尚未 live，但会话已经可以停止。
+  // 按钮必须依据 captureActive 显示停止，不能误导为再次开启。
+  const g = await runScenario({ state: { status: "preparing-model", captureActive: true, engine: "local", tabId: 6 } });
+  if (g.calls.getMediaStreamId !== 0) throw new Error("G 本地准备中不应重复开启");
+  if (g.els["#start-button"].textContent !== "停止本地字幕") {
+    throw new Error(`G 按钮应显示“停止本地字幕”，实际 ${JSON.stringify(g.els["#start-button"].textContent)}`);
+  }
+  g.els["#start-button"].click();
+  await new Promise((r) => setTimeout(r, 50));
+  if (g.calls.stoppedTab !== 6) throw new Error(`G 停止应发给本地会话 tab 6，实际 ${g.calls.stoppedTab}`);
+  console.log("G 本地 Helper 准备中 → 显示停止并可立即终止 ✓");
   console.log("panel-open 回归测试全部通过");
 })().catch((err) => { console.error("FAIL:", err.message); process.exit(1); });

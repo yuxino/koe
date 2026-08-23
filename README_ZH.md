@@ -5,16 +5,17 @@
   <p><a href="README.md">English</a></p>
 </div>
 
-Koe（こえ / 声）捕获标签页声音或麦克风，实时识别成字幕，并翻译成简体中文。字幕直接显示在视频画面上；侧边栏只在需要设置或回看记录时打开。
+Koe（こえ / 声）把标签页声音或麦克风识别成与媒体时间线同步的字幕，并可选翻译成简体中文。字幕直接显示在视频画面上；侧边栏只在需要设置或回看记录时打开。
 
-不下载视频，不跑 ffmpeg，也不需要 Node.js 或 `127.0.0.1` 本地助手。
+常规实时模式仍然是纯 Manifest V3 扩展：不下载视频，不跑 ffmpeg，也不需要 Node.js 或 localhost 服务。在 macOS 的 ego-lite 中，还可以按需安装 Koe Helper，使用更准确的渐进式本地字幕。
 
 ## 功能
 
 - **视频画面字幕** — 默认贴在主播放器底部，原文与中文译文分层显示，支持小 / 标准 / 大三档；网页全屏时会跟进全屏播放器。
 - **媒体时间线保护** — 拖动进度、切换视频或识别重连后，旧字幕和旧翻译不会追着新画面补播。
+- **可选的渐进式本地字幕** — 在 macOS 的 ego-lite 中，Native Helper 使用 Whisper `large-v3` 识别播放位置附近的短窗口，并提前准备下一个窗口，以视频绝对时间返回字幕；拖动进度后会取消过期任务，不让旧字幕追赶新画面。
 - **可选的字幕记录** — 侧边栏保留已确认句子、实时草稿和完整回看；识别修正时只替换受影响的一行。
-- **中文流式即刻出现** — 草稿与稳定句统一使用增量 `qwen-mt-flash`，取消固定等待；稳定句会抢占过期草稿，滚动翻译记忆直接提高第一次可见结果，不再等画面过去后做无意义的二次精修。
+- **实时模式中文流式即刻出现** — DashScope 草稿与稳定句统一使用增量 `qwen-mt-flash`，取消固定等待；稳定句会抢占过期草稿，滚动翻译记忆直接提高第一次可见结果，不再等画面过去后做无意义的二次精修。
 - **连续长句也能读** — 长段对白优先在自然停顿处切块，原文和译文各自限制在两行内；同一时刻返回的多条稳定字幕会保持中英文配对并留出阅读时间，不再互相闪掉。
 - **多种字幕模式** — 标签页声音或麦克风 × DashScope / Chrome 内置识别（免 Key）。
 - **识别修正处理** — 服务端改写句子时只替换受影响的那一行，重复在源头被抑制。
@@ -32,12 +33,28 @@ Koe（こえ / 声）捕获标签页声音或麦克风，实时识别成字幕�
 3. 点工具栏 Koe 图标：弹窗会为当前标签页（或跟随发声标签页）开启画面字幕；需要改模式、字号或回看记录时，再点「打开字幕记录与设置」。麦克风 + Chrome 内置识别可零配置开始。
 4. DashScope 模式需要填写并保存 DashScope API Key。
 
-API Key 只保存在当前浏览器配置的 `chrome.storage.local` 中，Koe 仅在直连 DashScope 时使用它。
+### ego-lite 可选本地字幕
+
+Koe Helper 目前要求 **macOS 15 或更高版本**、**ego-lite**，以及已安装的 Swift 6 工具链（Xcode Command Line Tools 即可）。它不是 localhost 服务。
+
+1. 在 ego-lite 的 `chrome://extensions` 中找到 Koe 的扩展 ID。
+2. 在仓库根目录运行 `helper/scripts/install-ego-lite.sh <扩展 ID>`。
+3. 重新加载 Koe，打开「字幕记录与设置」，选择「标签页视频 · 本地精准」。
+
+安装脚本会构建用户级 Native Messaging Helper，并且只允许 ego-lite 中指定扩展 ID 的 Koe 调用。首次使用时，WhisperKit 会下载约 626 MB 的 `large-v3` 模型，之后复用本机缓存。Helper 支持媒体直链，以及未加密、非 byte-range 的 MPEG-TS HLS 点播；不会绕过 DRM，也不会读取浏览器 Cookie 或 Authorization。
+
+### 隐私
+
+本地模式的媒体准备、音频提取和语音识别都在 Mac 上完成。Helper 只临时获取当前字幕窗口所需的媒体数据；音频和视频不会上传到 Koe、DashScope 或对象存储。识别出的原文字幕默认也只留在本机。
+
+本地精准模式在 macOS 26+ 上可开启中文翻译：识别与翻译都由本机的 Apple 翻译框架完成，媒体读取、识别、翻译与显示整条链路都留在设备上。首次使用前请到「系统设置 → 通用 → 语言与地区 → 翻译语言」勾选 **On-Device** 并下载对应语言包；未安装语言包或在 macOS 15–25 上运行时自动回退为原文字幕。
+
+DashScope API Key 只保存在当前浏览器配置的 `chrome.storage.local` 中，Koe 仅在直连 DashScope 时使用它。
 
 ## 开发
 
-运行时是纯 Manifest V3 JavaScript。修改代码后在 `chrome://extensions` 重新加载扩展即可。
+扩展运行时是纯 Manifest V3 JavaScript。修改代码后在 `chrome://extensions` 重新加载扩展即可。可选本地 Helper 是 `helper/` 下的 Swift Package；协议、支持边界和开发检查见 `helper/README.md`。
 
-主要模块：`background.js` 负责会话调度、媒体时间线、状态与字幕记录；`offscreen.js` / `pcm-worklet.js` 负责音频采集、识别与翻译；`content.js` 负责视频探测和画面字幕；`popup.*` 是手势入口弹窗；`sidepanel.*` 负责设置、诊断与滚动记录。
+主要模块：`background.js` 负责会话调度、媒体时间线、状态与字幕记录；`offscreen.js` / `pcm-worklet.js` 负责音频采集、实时识别与翻译；`content.js` 负责视频探测和画面字幕；`popup.*` 是手势入口弹窗；`sidepanel.*` 负责设置、诊断与滚动记录；`helper/` 提供可选的 Native Messaging 本地链路。
 
 © 2026 yuxino

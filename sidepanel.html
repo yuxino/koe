@@ -20,8 +20,16 @@
       <button id="start-button" class="start-button" type="button">开启实时字幕</button>
 
       <label class="toggle-row" for="translate-toggle">
-        <span>显示中文翻译</span>
+        <span id="translate-label">显示中文翻译</span>
         <input type="checkbox" id="translate-toggle" checked>
+      </label>
+      <label class="toggle-row" for="hide-original-toggle">
+        <span>隐藏原文（只显示中文）</span>
+        <input type="checkbox" id="hide-original-toggle">
+      </label>
+      <label class="toggle-row" for="overlay-enabled">
+        <span>显示在视频画面上</span>
+        <input type="checkbox" id="overlay-enabled" checked>
       </label>
 
       <details class="settings" id="settings">
@@ -30,14 +38,9 @@
           <label class="field-row" for="capture-mode">
             <span>字幕模式</span>
             <select id="capture-mode">
+              <option value="tab-local">标签页视频 · 本地精准（推荐）</option>
               <option value="tab-dashscope">标签页声音 · DashScope</option>
-              <option value="mic-dashscope">麦克风 · DashScope（免手势）</option>
-              <option value="mic-webspeech">麦克风 · Chrome 内置（免 Key）</option>
             </select>
-          </label>
-          <label class="toggle-row setting-toggle" for="overlay-enabled">
-            <span>显示在视频画面上</span>
-            <input type="checkbox" id="overlay-enabled" checked>
           </label>
           <label class="field-row" for="overlay-size">
             <span>页面字幕大小</span>
@@ -47,11 +50,13 @@
               <option value="large">大</option>
             </select>
           </label>
-          <label class="field-row" for="api-key">
-            <span>DashScope API Key（DashScope 模式需要）</span>
-            <input id="api-key" type="password" autocomplete="off" placeholder="sk-...">
-          </label>
-          <button id="save-key" class="secondary-button" type="button">保存 API Key</button>
+          <div class="dashscope-only" id="dashscope-only" hidden>
+            <label class="field-row" for="api-key">
+              <span>DashScope API Key（DashScope 模式需要）</span>
+              <input id="api-key" type="password" autocomplete="off" placeholder="sk-...">
+            </label>
+            <button id="save-key" class="secondary-button" type="button">保存 API Key</button>
+          </div>
         </div>
       </details>
 

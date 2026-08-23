@@ -2,3 +2,5 @@
 node_modules/
 coverage/
 .DS_Store
+helper/.build/
+helper/.swiftpm/
