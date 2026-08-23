@@ -1,0 +1,9 @@
+# Ultra-Low-Latency Subtitles Design
+
+Koe must optimize two separate delays: audio-to-original and original-to-Chinese. The original subtitle remains driven by DashScope's streaming ASR drafts and is sent to the page as soon as a non-empty draft arrives. The 700 ms stability timer remains only a safety mechanism for promoting incomplete drafts into durable transcript units; it must never gate the visible original line.
+
+Live translation uses one model and one visible result path. `qwen-mt-flash` handles both draft and durable-unit translation with DashScope incremental streaming enabled. `qwen-mt-plus` is removed from the live path because a correction that arrives after the subtitle has disappeared has no product value. Translation accuracy comes from an explicit Chinese target, the subtitle domain hint, and a small recent translation memory supplied to the first request—not from a later replacement.
+
+The scheduler is latest-first. A draft starts immediately when no request is active, and queued drafts collapse to the newest text. A durable unit is inserted ahead of drafts and aborts an in-flight draft so it cannot occupy the critical path. There is no fixed 700 ms inter-request wait and no two-line batching; both add latency before useful output. Rate-limit backoff remains as a failure safeguard, but normal traffic is paced naturally by one active request and latest-only draft coalescing.
+
+Incremental Chinese is accumulated per sequence and may update the current visible line while it is still active. Superseded drafts, old capture generations, and stale media epochs never emit. Once a unit finishes, Koe sends one final accumulated translation and freezes it. Diagnostic events record request-to-first-output and request-to-completion latency without recording subtitle text. Regression tests cover immediate original emission, streaming first output, flash-only requests, unit preemption, abort handling, and stale-result suppression.
