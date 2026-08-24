@@ -11,6 +11,35 @@ private func check(_ condition: @autoclosure () -> Bool, _ label: String) {
     }
 }
 
+let preferenceDefaults = KoePreferences.normalized(KoePreferences())
+check(preferenceDefaults.koeTranslate == true,
+      "native preference defaults enable translation")
+check(preferenceDefaults.koeAsrEngine == "local"
+        && preferenceDefaults.koeCaptureSource == "tab",
+      "native preference defaults select local-first tab capture")
+check(preferenceDefaults.koeOverlayEnabled == true
+        && preferenceDefaults.koeOverlaySize == "medium",
+      "native preference defaults keep the standard overlay visible")
+
+let sanitizedPreferences = KoePreferences.normalized(KoePreferences(
+    koePreferencesVersion: 99,
+    koeTranslate: false,
+    koeHideOriginal: true,
+    koeCaptureSource: "mic",
+    koeAsrEngine: "webspeech",
+    koeOverlayEnabled: false,
+    koeOverlaySize: "huge"
+))
+check(sanitizedPreferences.koePreferencesVersion == 1,
+      "native preferences clamp their schema version")
+check(sanitizedPreferences.koeTranslate == false
+        && sanitizedPreferences.koeHideOriginal == true,
+      "valid native boolean preferences survive normalization")
+check(sanitizedPreferences.koeCaptureSource == "tab"
+        && sanitizedPreferences.koeAsrEngine == "local"
+        && sanitizedPreferences.koeOverlaySize == "medium",
+      "retired or invalid native preference values fall back safely")
+
 do {
     let request = HostRequest(
         type: "start",

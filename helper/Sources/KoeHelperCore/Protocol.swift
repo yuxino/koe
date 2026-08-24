@@ -7,6 +7,50 @@ import Glibc
 
 public let koeNativeProtocolVersion = 1
 
+public struct KoePreferences: Codable, Equatable, Sendable {
+    public let koePreferencesVersion: Int?
+    public let koeTranslate: Bool?
+    public let koeHideOriginal: Bool?
+    public let koeCaptureSource: String?
+    public let koeAsrEngine: String?
+    public let koeOverlayEnabled: Bool?
+    public let koeOverlaySize: String?
+
+    public init(
+        koePreferencesVersion: Int? = nil,
+        koeTranslate: Bool? = nil,
+        koeHideOriginal: Bool? = nil,
+        koeCaptureSource: String? = nil,
+        koeAsrEngine: String? = nil,
+        koeOverlayEnabled: Bool? = nil,
+        koeOverlaySize: String? = nil
+    ) {
+        self.koePreferencesVersion = koePreferencesVersion
+        self.koeTranslate = koeTranslate
+        self.koeHideOriginal = koeHideOriginal
+        self.koeCaptureSource = koeCaptureSource
+        self.koeAsrEngine = koeAsrEngine
+        self.koeOverlayEnabled = koeOverlayEnabled
+        self.koeOverlaySize = koeOverlaySize
+    }
+
+    public static func normalized(_ input: KoePreferences) -> KoePreferences {
+        KoePreferences(
+            koePreferencesVersion: 1,
+            koeTranslate: input.koeTranslate ?? true,
+            koeHideOriginal: input.koeHideOriginal ?? false,
+            koeCaptureSource: "tab",
+            koeAsrEngine: ["local", "dashscope"].contains(input.koeAsrEngine ?? "")
+                ? input.koeAsrEngine
+                : "local",
+            koeOverlayEnabled: input.koeOverlayEnabled ?? true,
+            koeOverlaySize: ["small", "medium", "large"].contains(input.koeOverlaySize ?? "")
+                ? input.koeOverlaySize
+                : "medium"
+        )
+    }
+}
+
 public struct MediaSource: Codable, Equatable, Sendable {
     public let url: String
     public let headers: [String: String]
@@ -28,6 +72,7 @@ public struct HostRequest: Decodable, Sendable {
     public let durationMs: Double?
     public let playbackRate: Double?
     public let translate: Bool?
+    public let preferences: KoePreferences?
 
     public init(
         type: String,
@@ -39,7 +84,8 @@ public struct HostRequest: Decodable, Sendable {
         currentTimeMs: Double? = nil,
         durationMs: Double? = nil,
         playbackRate: Double? = nil,
-        translate: Bool? = nil
+        translate: Bool? = nil,
+        preferences: KoePreferences? = nil
     ) {
         self.type = type
         self.protocolVersion = protocolVersion
@@ -51,6 +97,7 @@ public struct HostRequest: Decodable, Sendable {
         self.durationMs = durationMs
         self.playbackRate = playbackRate
         self.translate = translate
+        self.preferences = preferences
     }
 }
 
@@ -295,6 +342,7 @@ public struct HostResponse: Encodable, Sendable {
     public let cues: [SubtitleCue]?
     public let error: String?
     public let nativeTranslation: Bool?
+    public let preferences: KoePreferences?
 
     public init(
         type: String,
@@ -308,7 +356,8 @@ public struct HostResponse: Encodable, Sendable {
         mediaComplete: Bool? = nil,
         cues: [SubtitleCue]? = nil,
         error: String? = nil,
-        nativeTranslation: Bool? = nil
+        nativeTranslation: Bool? = nil,
+        preferences: KoePreferences? = nil
     ) {
         self.type = type
         self.protocolVersion = protocolVersion
@@ -322,6 +371,7 @@ public struct HostResponse: Encodable, Sendable {
         self.cues = cues
         self.error = error
         self.nativeTranslation = nativeTranslation
+        self.preferences = preferences
     }
 
     public static func ready(nativeTranslation: Bool = false) -> HostResponse {
@@ -357,5 +407,9 @@ public struct HostResponse: Encodable, Sendable {
 
     public static func failure(jobId: String?, mediaEpoch: Int?, message: String) -> HostResponse {
         HostResponse(type: "error", jobId: jobId, mediaEpoch: mediaEpoch, error: message)
+    }
+
+    public static func preferences(_ value: KoePreferences) -> HostResponse {
+        HostResponse(type: "preferences", preferences: KoePreferences.normalized(value))
     }
 }

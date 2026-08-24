@@ -209,15 +209,22 @@ async function initPrefs() {
   const { koeTranslate, koeHideOriginal, koeApiKey, koeCaptureSource, koeAsrEngine, koeOverlayEnabled, koeOverlaySize } = await chrome.storage.local.get([
     "koeTranslate", "koeHideOriginal", "koeApiKey", "koeCaptureSource", "koeAsrEngine", "koeOverlayEnabled", "koeOverlaySize"
   ]);
-  translatePreference = koeTranslate !== undefined ? Boolean(koeTranslate) : true;
+  const defaults = globalThis.KoePreferences?.defaults || {
+    koeTranslate: true,
+    koeHideOriginal: false,
+    koeAsrEngine: "local",
+    koeOverlayEnabled: true,
+    koeOverlaySize: "medium"
+  };
+  translatePreference = koeTranslate !== undefined ? Boolean(koeTranslate) : defaults.koeTranslate;
   elements.translateToggle.checked = translatePreference;
-  hideOriginalPreference = koeHideOriginal !== undefined ? Boolean(koeHideOriginal) : false;
+  hideOriginalPreference = koeHideOriginal !== undefined ? Boolean(koeHideOriginal) : defaults.koeHideOriginal;
   elements.hideOriginalToggle.checked = hideOriginalPreference;
   const sourceValue = koeCaptureSource === "mic" ? "mic" : "tab";
-  const engineValue = ["local", "webspeech"].includes(koeAsrEngine) ? koeAsrEngine : "dashscope";
+  const engineValue = ["local", "dashscope"].includes(koeAsrEngine) ? koeAsrEngine : defaults.koeAsrEngine;
   const modeKey = Object.keys(CAPTURE_MODES)
     .find((key) => CAPTURE_MODES[key].source === sourceValue && CAPTURE_MODES[key].engine === engineValue)
-    || "tab-dashscope";
+    || "tab-local";
   elements.captureMode.value = modeKey;
   // 旧配置（麦克风 / Chrome 内置）已下线：归一化回有效的 tab 模式，避免启动读到过时值
   const chosen = CAPTURE_MODES[modeKey];
@@ -225,8 +232,12 @@ async function initPrefs() {
     await chrome.storage.local.set({ koeCaptureSource: chosen.source, koeAsrEngine: chosen.engine });
   }
   applyTranslationPrivacy();
-  elements.overlayEnabled.checked = koeOverlayEnabled !== false;
-  elements.overlaySize.value = ["small", "medium", "large"].includes(koeOverlaySize) ? koeOverlaySize : "medium";
+  elements.overlayEnabled.checked = koeOverlayEnabled !== undefined
+    ? Boolean(koeOverlayEnabled)
+    : defaults.koeOverlayEnabled;
+  elements.overlaySize.value = ["small", "medium", "large"].includes(koeOverlaySize)
+    ? koeOverlaySize
+    : defaults.koeOverlaySize;
   hasApiKey = Boolean(String(koeApiKey || "").trim());
   // 本地模式不需要 API Key：设置默认收起；DashScope 且未保存 Key 才展开提示。
   elements.settings.open = !hasApiKey && currentMode().engine === "dashscope";
@@ -236,7 +247,7 @@ async function initPrefs() {
 }
 
 function currentMode() {
-  return CAPTURE_MODES[elements.captureMode.value] || CAPTURE_MODES["tab-dashscope"];
+  return CAPTURE_MODES[elements.captureMode.value] || CAPTURE_MODES["tab-local"];
 }
 
 async function saveCaptureMode() {
@@ -257,7 +268,7 @@ async function saveCaptureMode() {
 
 function applyTranslationPrivacy() {
   // 本地精准默认只出原文；仅当本机具备本地翻译能力（macOS 26+ 且支持简体中文）时才放开开关。
-  const localOriginalOnly = currentMode().engine === "local" && !Boolean(currentState.nativeTranslation);
+  const localOriginalOnly = currentMode().engine === "local" && currentState.nativeTranslation === false;
   elements.translateToggle.disabled = localOriginalOnly;
   if (localOriginalOnly) {
     elements.translateToggle.checked = false;

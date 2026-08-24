@@ -26,8 +26,7 @@
     "wss://dashscope.aliyuncs.com/*"
   ],
   "background": {
-    "service_worker": "background.js",
-    "type": "module"
+    "service_worker": "background.js"
   },
   "action": {
     "default_title": "Koe",

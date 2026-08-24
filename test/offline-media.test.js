@@ -572,6 +572,8 @@ function makeContext() {
   check(autoRun(`tabStates.get(10)?.captureStarted`) === true
       && auto.nativeMessages.some((message) => message.type === "hello"),
     "a playing local video starts subtitles without opening the popup");
+  check(autoRun(`tabStates.get(10)?.translate`) === true,
+    "an unknown native capability never disables the saved translation preference during cold start");
 
   const paused = makeContext();
   const pausedRun = (source) => vm.runInContext(source, paused.ctx);

@@ -5,6 +5,7 @@ actor SessionCoordinator {
     private let writer: NativeMessageWriter
     private let resolver: HLSResolver
     private let transcriber: WhisperTranscriber
+    private let preferenceStore: PreferenceStore
     private let scheduler = WindowScheduler()
     private var activeKey: SessionKey?
     private var activeTask: Task<Void, Never>?
@@ -14,6 +15,7 @@ actor SessionCoordinator {
         self.writer = writer
         self.resolver = try HLSResolver()
         self.transcriber = WhisperTranscriber()
+        self.preferenceStore = try PreferenceStore()
     }
 
     func handle(_ request: HostRequest) async {
@@ -21,6 +23,29 @@ actor SessionCoordinator {
         case "hello":
             let capable = await NativeTranslationCapability.available()
             await writer.send(.ready(nativeTranslation: capable))
+        case "preferencesGet":
+            await writer.send(.preferences(
+                preferenceStore.load() ?? KoePreferences.normalized(KoePreferences())
+            ))
+        case "preferencesSet":
+            guard let preferences = request.preferences else {
+                await writer.send(.failure(
+                    jobId: nil,
+                    mediaEpoch: nil,
+                    message: "Koe Helper 收到的设置不完整。"
+                ))
+                return
+            }
+            do {
+                try preferenceStore.save(preferences)
+                await writer.send(.preferences(KoePreferences.normalized(preferences)))
+            } catch {
+                await writer.send(.failure(
+                    jobId: nil,
+                    mediaEpoch: nil,
+                    message: "Koe Helper 暂时无法保存设置。"
+                ))
+            }
         case "start":
             do {
                 let start = try request.validatedStart()

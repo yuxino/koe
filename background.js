@@ -1,3 +1,5 @@
+if (typeof importScripts === "function") importScripts("preferences.js");
+
 // Koe 字幕后台：实时模式捕获标签页声音；本地精准模式只把媒体定位信息
 // 通过 Chrome Native Messaging 交给本机 Helper，音视频不离开电脑。
 
@@ -6,6 +8,8 @@ const NATIVE_HOST_NAME = "app.yuxino.koe.helper";
 const NATIVE_PROTOCOL_VERSION = 1;
 const MEDIA_CANDIDATE_TTL_MS = 60_000;
 const OFFLINE_REFILL_LEAD_MS = 45_000;
+const preferenceTools = globalThis.KoePreferences || createPreferenceFallback();
+const PREFERENCE_KEYS = [...preferenceTools.keys];
 const tabStates = new Map();
 const captureStreamIds = new Map();
 const captureStartPromises = new Map();
@@ -13,7 +17,10 @@ const mediaCandidatesByTab = new Map();
 let captureTabId = null;
 let bootPromise;
 let nativePort = null;
-let nativeTranslationAvailable = false;
+// null = Helper 尚未握手；false 只表示 Helper 已明确报告不可用。
+let nativeTranslationAvailable = null;
+const nativePreferenceWaiters = new Set();
+let preferenceMirrorTimer = 0;
 let stateWriteChain = Promise.resolve();
 let mediaIdentityCounter = 0;
 
@@ -21,6 +28,58 @@ function createMediaIdentity() {
   mediaIdentityCounter += 1;
   const uuid = globalThis.crypto?.randomUUID?.();
   return uuid || `media-${Date.now()}-${mediaIdentityCounter}-${Math.random().toString(36).slice(2)}`;
+}
+
+function createPreferenceFallback() {
+  const defaults = Object.freeze({
+    koePreferencesVersion: 1,
+    koeTranslate: true,
+    koeHideOriginal: false,
+    koeCaptureSource: "tab",
+    koeAsrEngine: "local",
+    koeOverlayEnabled: true,
+    koeOverlaySize: "medium"
+  });
+  const keys = Object.keys(defaults);
+  const own = (value, key) => Boolean(value && Object.prototype.hasOwnProperty.call(value, key));
+  const normalize = (input = {}, { defaults: withDefaults = false } = {}) => {
+    const fallback = withDefaults ? defaults : {};
+    const value = {};
+    if (own(input, "koePreferencesVersion") || withDefaults) value.koePreferencesVersion = 1;
+    if (own(input, "koeTranslate") || withDefaults) {
+      value.koeTranslate = typeof input.koeTranslate === "boolean" ? input.koeTranslate : fallback.koeTranslate;
+    }
+    if (own(input, "koeHideOriginal") || withDefaults) {
+      value.koeHideOriginal = typeof input.koeHideOriginal === "boolean" ? input.koeHideOriginal : fallback.koeHideOriginal;
+    }
+    if (own(input, "koeCaptureSource") || withDefaults) value.koeCaptureSource = "tab";
+    if (own(input, "koeAsrEngine") || withDefaults) {
+      value.koeAsrEngine = ["local", "dashscope"].includes(input.koeAsrEngine)
+        ? input.koeAsrEngine
+        : fallback.koeAsrEngine;
+    }
+    if (own(input, "koeOverlayEnabled") || withDefaults) {
+      value.koeOverlayEnabled = typeof input.koeOverlayEnabled === "boolean"
+        ? input.koeOverlayEnabled
+        : fallback.koeOverlayEnabled;
+    }
+    if (own(input, "koeOverlaySize") || withDefaults) {
+      value.koeOverlaySize = ["small", "medium", "large"].includes(input.koeOverlaySize)
+        ? input.koeOverlaySize
+        : fallback.koeOverlaySize;
+    }
+    return value;
+  };
+  const isInitialized = (input = {}) => keys.some((key) => own(input, key));
+  return Object.freeze({
+    defaults,
+    keys,
+    normalize,
+    isInitialized,
+    resolveInitial: (browser = {}, native = {}) => isInitialized(browser)
+      ? normalize(browser, { defaults: true })
+      : normalize({ ...defaults, ...normalize(native) }, { defaults: true })
+  });
 }
 
 function resetOfflineBatchState(state, { preserveRevision = false } = {}) {
@@ -45,6 +104,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.runtime.onStartup.addListener(() => { bootPromise = boot(); });
 chrome.runtime.onInstalled.addListener(() => { bootPromise = boot(); });
+chrome.storage?.onChanged?.addListener((changes, areaName) => {
+  if (areaName !== "local" || !PREFERENCE_KEYS.some((key) => changes[key])) return;
+  schedulePreferenceMirror();
+});
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "koe-restore") void restoreStates();
 });
@@ -259,7 +322,76 @@ async function boot() {
   } catch {
     // 个别环境不支持 alarms 时仅保留内存状态
   }
+  await initializePreferences();
   await restoreStates();
+}
+
+async function initializePreferences() {
+  let browser = {};
+  try {
+    browser = await chrome.storage.local.get(PREFERENCE_KEYS);
+  } catch {
+    browser = {};
+  }
+  const native = preferenceTools.isInitialized(browser)
+    ? {}
+    : await requestNativePreferences(900);
+  const resolved = preferenceTools.resolveInitial(browser, native || {});
+  try {
+    await chrome.storage.local.set(resolved);
+  } catch {
+    // Storage may be unavailable only in restricted test/browser contexts.
+  }
+  schedulePreferenceMirror(resolved);
+  return resolved;
+}
+
+function requestNativePreferences(timeoutMs = 900) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      nativePreferenceWaiters.delete(finish);
+      clearTimeout(timer);
+      resolve(value || null);
+    };
+    const timer = setTimeout(() => finish(null), Math.max(100, Number(timeoutMs) || 900));
+    nativePreferenceWaiters.add(finish);
+    try {
+      postNativeMessage({ type: "preferencesGet", protocolVersion: NATIVE_PROTOCOL_VERSION });
+    } catch {
+      finish(null);
+    }
+  });
+}
+
+function schedulePreferenceMirror(snapshot = null) {
+  if (preferenceMirrorTimer) clearTimeout(preferenceMirrorTimer);
+  preferenceMirrorTimer = setTimeout(() => {
+    preferenceMirrorTimer = 0;
+    void mirrorPreferences(snapshot);
+  }, 80);
+}
+
+async function mirrorPreferences(snapshot = null) {
+  let values = snapshot;
+  if (!values) {
+    try {
+      values = await chrome.storage.local.get(PREFERENCE_KEYS);
+    } catch {
+      return;
+    }
+  }
+  try {
+    postNativeMessage({
+      type: "preferencesSet",
+      protocolVersion: NATIVE_PROTOCOL_VERSION,
+      preferences: preferenceTools.normalize(values, { defaults: true })
+    });
+  } catch {
+    // Helper is optional; browser storage remains authoritative.
+  }
 }
 
 async function handle(message, sender) {
@@ -333,7 +465,7 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
   const sourceMode = captureSource === "mic" ? "mic" : "tab";
   const engineMode = ["local", "webspeech"].includes(captureEngine) ? captureEngine : "dashscope";
   const sessionMode = engineMode === "local" ? "offline" : "live";
-  if (engineMode === "local" && !nativeTranslationAvailable) translate = false;
+  if (engineMode === "local" && nativeTranslationAvailable === false) translate = false;
 
   // 麦克风模式：不需要标签页授权手势，也不需要页面里有视频
   let source;
@@ -780,6 +912,15 @@ async function handleNativeMessage(message) {
     // Helper 通过 hello 握手上报本地翻译能力（macOS 26+ 且支持简体中文目标）。
     nativeTranslationAvailable = Boolean(message.nativeTranslation);
     void appendLog({ event: "native-ready", detail: `nativeTranslation=${nativeTranslationAvailable}` });
+    for (const state of tabStates.values()) {
+      if (state.engine === "local" && nativeTranslationAvailable === false) state.translate = false;
+    }
+    void persistStates();
+    return;
+  }
+  if (message.type === "preferences") {
+    const preferences = preferenceTools.normalize(message.preferences || {});
+    for (const finish of [...nativePreferenceWaiters]) finish(preferences);
     return;
   }
   const state = [...tabStates.values()].find((candidate) => candidate.jobId === String(message.jobId || ""));
@@ -1454,7 +1595,7 @@ async function setTranslate(tabId, translate) {
   const state = tabStates.get(tabId);
   if (!state) return { ok: true, ignored: true };
   const allowed = state.engine === "local"
-    ? (nativeTranslationAvailable && Boolean(translate))
+    ? (nativeTranslationAvailable !== false && Boolean(translate))
     : Boolean(translate);
   state.translate = allowed;
   if (state.captureStarted && state.engine === "local") {
