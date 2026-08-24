@@ -95,7 +95,7 @@
     const target = event.target;
     if (!(target instanceof HTMLVideoElement)) return;
     freezeForSourceChange();
-    safeSend({ type: "VIDEO_CHANGED" });
+    safeSend({ type: "VIDEO_CHANGED", pageUrl: location.href });
   }, true);
 
   // 周期检测：源/URL 变化 → 通知后台重连识别；正在播放且未静音 → 触发实时字幕
@@ -113,7 +113,7 @@
       const hadSource = Boolean(lastSeenSource);
       lastSeenSource = source;
       if (hadSource) freezeForSourceChange();
-      safeSend({ type: "VIDEO_CHANGED" });
+      safeSend({ type: "VIDEO_CHANGED", pageUrl: location.href });
       return;
     }
     if (video && !video.paused && !video.muted && video.readyState >= 2) {
@@ -131,7 +131,7 @@
     if (location.href === lastSeenUrl) return;
     lastSeenUrl = location.href;
     freezeForSourceChange();
-    safeSend({ type: "VIDEO_CHANGED" });
+    safeSend({ type: "VIDEO_CHANGED", pageUrl: location.href });
   }
   const wrapHistory = (method) => {
     const original = history[method];

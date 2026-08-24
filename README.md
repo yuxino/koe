@@ -14,6 +14,8 @@ The regular live modes remain a pure Manifest V3 extension: they require no vide
 - **In-video captions** — captions sit near the bottom of the main player, with distinct original and Chinese lines, three text sizes, and fullscreen support.
 - **Media-timeline protection** — seeking, switching videos, or reconnecting recognition cannot replay stale captions or translations over the new scene.
 - **Optional progressive local subtitles** — on ego-lite for macOS, the Native Helper runs Whisper `large-v3` on short windows around the playhead, continues preparing the next window, and returns absolute media timestamps. Seeking cancels obsolete work instead of letting old subtitles catch up with the new scene.
+- **Starts when playback starts** — once local accurate mode is selected, playing the main video begins subtitle preparation without opening the extension; a manual stop remains stopped for that video.
+- **Visible toolbar status** — `··`, `ON`, and `!` on the Koe icon show preparation, running, and attention-required states globally, even after switching tabs.
 - **Optional subtitle history** — the side panel keeps confirmed lines, the current draft, and scroll-back history; recognition corrections replace only the affected row.
 - **Immediate streaming Chinese in live mode** — DashScope drafts and confirmed lines both use incremental `qwen-mt-flash`; the first Chinese chunk appears without a fixed wait, confirmed lines preempt stale drafts, and rolling translation memory improves the first visible result instead of correcting it after the scene has passed.
 - **Readable continuous speech** — long monologues split at natural pauses with hard two-line limits; burst results keep source and translation paired and give each confirmed line time to be read instead of flashing over one another.
@@ -30,7 +32,7 @@ The regular live modes remain a pure Manifest V3 extension: they require no vide
 
 1. Open `chrome://extensions` and enable **Developer mode**.
 2. Choose **Load unpacked** and select this repository.
-3. Click the Koe toolbar icon; the popup starts in-video captions for the current tab (or follows the audible tab). Open “Caption history & settings” only when you need to change the mode or size, or review history. Microphone + Chrome built-in recognition works with zero configuration.
+3. Local accurate mode starts automatically when the main video begins playing. For other modes, click the Koe toolbar icon to start in-video captions for the current tab (or follow the audible tab). Open “Caption history & settings” only when you need to change the mode or size, or review history.
 4. DashScope modes require a saved DashScope API Key.
 
 ### Optional local subtitles for ego-lite

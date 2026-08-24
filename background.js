@@ -267,7 +267,7 @@ async function handle(message, sender) {
   await bootPromise;
   const tabId = Number(message.tabId ?? sender?.tab?.id);
   if (message.type === "PAGE_READY") return pageReady(sender);
-  if (message.type === "VIDEO_CHANGED") return videoChanged(sender);
+  if (message.type === "VIDEO_CHANGED") return videoChanged(message, sender);
   if (message.type === "MEDIA_CONTEXT") return receiveMediaContext(message, sender);
   if (message.type === "MEDIA_DISCONTINUITY") return mediaDiscontinuity(message, sender);
   if (message.type === "OFFLINE_VISIBLE_REPORT") return recordOfflineVisible(message, sender);
@@ -304,10 +304,11 @@ async function pageReady(sender) {
   return ensureLiveCaptions({ tabId, pageUrl });
 }
 
-async function videoChanged(sender) {
+async function videoChanged(message, sender) {
   const tabId = sender?.tab?.id;
   if (!tabId) return { ok: true, skipped: true };
-  const pageUrl = String(sender.tab?.url || "");
+  const reportedPageUrl = String(message?.pageUrl || "");
+  const pageUrl = /^https?:/i.test(reportedPageUrl) ? reportedPageUrl : String(sender.tab?.url || "");
   if (!/^https?:/i.test(pageUrl)) return { ok: true, skipped: true };
   // 页内切视频：让“视频源是否真的变了”来判断要不要重连识别会话，
   // 避免 CDN 换签名、同一视频重载这类情况把字幕打断
@@ -350,16 +351,32 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
   }
   const sourceKey = source?.sourceUrl ? normalizeSourceKey(source.sourceUrl) : "";
   let state = tabStates.get(tabId);
+  const nextPageKey = normalizePageKey(pageUrl || source?.pageUrl || "");
+  const previousPageKey = normalizePageKey(state?.pageUrl || "");
+  const pageChanged = Boolean(state && nextPageKey && previousPageKey && nextPageKey !== previousPageKey);
+  const resumeStoppedForNewPage = Boolean(
+    engineMode === "local" && !forceReset && state?.userStopped && pageChanged
+  );
+  const activeState = captureTabId === null ? null : tabStates.get(captureTabId);
 
-  // PAGE_READY 会来自所有打开的视频页。本地模式读取媒体并运行大模型，
-  // 必须只在用户明确点启动后建立新会话，不能因为任意网页播放就自动分析。
-  if (engineMode === "local" && !state && !forceReset) {
-    return { ok: true, skipped: true };
+  // 本地模式无需 tabCapture 手势：主视频真正开始播放后可以直接建立会话。
+  // 页面加载和预加载也会发送 PAGE_READY，因此自动路径必须要求 playing；
+  // 弹窗/侧边栏的明确启动仍可为暂停的视频提前准备字幕。
+  if (engineMode === "local" && !forceReset) {
+    // 自动播放不能抢走另一个标签页正在运行的全局单会话；用户仍可通过
+    // 弹窗或侧边栏明确切换。同一标签页换新页面不受这条保护影响。
+    if (activeState?.captureStarted && activeState.tabId !== tabId && activeState.status !== "error") {
+      return { ok: true, skipped: true };
+    }
+    if (state?.userStopped && !resumeStoppedForNewPage) return { ok: true, skipped: true };
+    if ((!state || !state.captureStarted) && (sourceMode !== "tab" || !source?.playing)) {
+      return { ok: true, skipped: true };
+    }
   }
 
-  // “停止/报错 → 用户明确再开”必须得到新的会话身份。若沿用旧 job/epoch，
-  // 停止前已经排队的 Helper/WebSocket 消息会在新会话激活后重新通过校验。
-  if (forceReset && state && !state.captureStarted) {
+  // “停止/报错 → 明确再开或播放新页面”必须得到新的会话身份。若沿用旧 job/epoch，
+  // 停止前已经排队的 Helper 消息会在新会话激活后重新通过校验。
+  if ((forceReset || resumeStoppedForNewPage) && state && !state.captureStarted) {
     state.jobId = `${sessionMode}-${tabId}-${Date.now()}`;
     state.mediaEpoch = (Number(state.mediaEpoch) || 0) + 1;
     state.lastDiscontinuityId = 0;
@@ -367,6 +384,7 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
     state.offlineSourceUrl = "";
     state.offlineContext = undefined;
     mediaCandidatesByTab.delete(tabId);
+    state.startedAt = Date.now();
   }
 
   const usableVideo = engineMode === "local"
@@ -401,14 +419,16 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
     };
     tabStates.set(tabId, state);
     await persistStates();
-  } else if (forceReset || mediaChanged || (sourceKey && sourceKey !== normalizeSourceKey(state.sourceUrl || "")) || state.source !== sourceMode || state.engine !== engineMode) {
+  } else if (forceReset || resumeStoppedForNewPage || pageChanged || mediaChanged
+      || (sourceKey && sourceKey !== normalizeSourceKey(state.sourceUrl || ""))
+      || state.source !== sourceMode || state.engine !== engineMode) {
     const previousSourceKey = normalizeSourceKey(state.sourceUrl || "");
-    const mediaIdentityChanged = mediaChanged
+    const mediaIdentityChanged = pageChanged || mediaChanged
       || Boolean(sourceKey && sourceKey !== previousSourceKey)
       || state.engine !== engineMode;
-    // 只有 forceReset（Alt+K / 右键 / 手动按钮 = 用户明确要开）才清除 userStopped；
-    // 视频源变化（广告/CDN 换源等）绝不能重置——用户明确停止后，换视频也不能悄悄重开字幕。
-    if (forceReset) state.userStopped = false;
+    // 明确启动会无条件清除停止标记；自动路径只在页面身份真的变化时恢复。
+    // 同页媒体换源可能只是广告或 CDN 换签，不能把用户刚停止的字幕重新打开。
+    if (forceReset || resumeStoppedForNewPage) state.userStopped = false;
     state.frameId = source.frameId || state.frameId;
     state.pageUrl = pageUrl || source.pageUrl;
     state.sourceUrl = source.sourceUrl || "";
@@ -465,7 +485,7 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
   if (!state) return { ok: true };
   if (state.engine === "local") {
     if (!state.captureStarted) {
-      await startOfflineSession(state);
+      await startOfflineSession(state, { allowHandoff: forceReset });
     } else {
       // 页面 reload 或扩展重载后，新的 content script 没有 activeSession。
       // 先幂等恢复会话身份，再让它回报媒体地址。
@@ -494,7 +514,7 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
   return { ok: true };
 }
 
-async function startOfflineSession(state) {
+async function startOfflineSession(state, { allowHandoff = true } = {}) {
   // 本地模式和实时模式一样尊重用户的明确停止。只有 START_CAPTURE
   // 会先清除此标记；页面自己的 PAGE_READY/播放事件不得偷偷重启。
   if (!state || state.userStopped) return;
@@ -508,6 +528,12 @@ async function startOfflineSession(state) {
     return;
   }
   const previous = captureTabId ? tabStates.get(captureTabId) : null;
+  // 两个 PAGE_READY 可能并发通过前置检查。启动前再检查一次，确保后到的
+  // 自动任务不会在竞态中停掉刚建立的会话。
+  if (!allowHandoff && previous?.captureStarted && previous.tabId !== state.tabId
+      && previous.status !== "error") {
+    return;
+  }
   if (previous && previous.tabId !== state.tabId && previous.captureStarted) {
     await stopCapture(previous);
     // 单会话切到新标签页后，旧页仍会周期发送 PAGE_READY。把它标成
@@ -1653,9 +1679,74 @@ function cleanupTab(tabId) {
   void persistStates();
 }
 
+function actionIndicatorForState(state) {
+  const idle = { text: "", color: "", title: "Koe" };
+  if (!state) return idle;
+  const status = String(state.status || "idle");
+  const detail = String(state.stageDetail || "").trim();
+  if (status === "idle" || (state.userStopped && !state.captureStarted && status !== "error")) {
+    return idle;
+  }
+  if (status === "error" || state.captureNeedsGesture) {
+    return {
+      text: "!",
+      color: "#B3261E",
+      title: `Koe · ${detail || "字幕启动失败，点击查看详情"}`
+    };
+  }
+  if (status === "live" && state.captureStarted) {
+    return {
+      text: "ON",
+      color: "#237B4B",
+      title: state.engine === "local" ? "Koe · 本地精准字幕运行中" : "Koe · 实时字幕运行中"
+    };
+  }
+  if (state.captureStarted || status === "starting") {
+    return {
+      text: "··",
+      color: "#5F6368",
+      title: `Koe · ${detail || "字幕准备中"}`
+    };
+  }
+  return idle;
+}
+
+function currentActionState() {
+  const active = captureTabId === null ? null : tabStates.get(captureTabId);
+  if (active) return active;
+  return [...tabStates.values()].sort((left, right) => (
+    (Number(right.startedAt) || 0) - (Number(left.startedAt) || 0)
+  ))[0] || null;
+}
+
+function invokeActionUpdate(updates, method, details) {
+  if (typeof method !== "function") return;
+  try {
+    updates.push(Promise.resolve(method.call(chrome.action, details)));
+  } catch {
+    // 状态装饰不应影响字幕会话本身。
+  }
+}
+
+async function syncActionIndicator(indicator = actionIndicatorForState(currentActionState())) {
+  const action = chrome.action;
+  if (!action) return;
+  const updates = [];
+  invokeActionUpdate(updates, action.setBadgeText, { text: indicator.text });
+  invokeActionUpdate(updates, action.setTitle, { title: indicator.title });
+  if (indicator.text) {
+    invokeActionUpdate(updates, action.setBadgeBackgroundColor, { color: indicator.color });
+    invokeActionUpdate(updates, action.setBadgeTextColor, { color: "#FFFFFF" });
+  }
+  await Promise.allSettled(updates);
+}
+
 function persistStates() {
+  // 在进入串行写队列前冻结本次状态，避免紧邻的异步状态变化让徽标跳过中间阶段。
+  const indicator = actionIndicatorForState(currentActionState());
   stateWriteChain = stateWriteChain
     .then(async () => {
+      await syncActionIndicator(indicator);
       const entries = [...tabStates.entries()].map(([tabId, state]) => ({
         tabId,
         jobId: state.jobId,
@@ -1716,6 +1807,7 @@ async function restoreStates() {
     if (entry.captureStarted === true) captureTabId = entry.tabId;
   }
   // 定时恢复只重建状态；停止采集只能由明确的 STOP_CAPTURE 触发。
+  await syncActionIndicator();
 }
 
 // ===== 找正在播放的主视频（只用来判断该不该开、有没有切视频） =====
@@ -1839,6 +1931,17 @@ function normalizeSourceKey(value) {
     return url.toString();
   } catch {
     return String(value || "");
+  }
+}
+
+function normalizePageKey(value) {
+  try {
+    const url = new URL(String(value || ""));
+    if (!/^https?:$/i.test(url.protocol)) return "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return "";
   }
 }
 

@@ -562,15 +562,65 @@ function makeContext() {
       && !h.contentMessages.some((entry) => entry.message.type === "LIVE_SESSION"),
     "stopping during live preparation prevents a late offscreen capture start");
 
-  h.nativeMessages.length = 0;
-  h.localConfig.koeAsrEngine = "local";
-  run(`discoverVideoSource = async () => ({
+  const auto = makeContext();
+  const autoRun = (source) => vm.runInContext(source, auto.ctx);
+  autoRun(`discoverVideoSource = async () => ({
     hasVideo: true, playing: true, muted: false, frameId: 0,
-    sourceUrl: "https://video.example/unrelated.mp4", pageUrl: "https://site.example/watch"
+    sourceUrl: "https://video.example/playing.m3u8", pageUrl: "https://site.example/watch"
   })`);
-  await run(`ensureLiveCaptions({ tabId: 10, pageUrl: "https://site.example/watch" })`);
-  check(run(`tabStates.has(10)`) === false && h.nativeMessages.length === 0,
-    "an unrelated page-ready event cannot silently create a local analysis session");
+  await autoRun(`ensureLiveCaptions({ tabId: 10, pageUrl: "https://site.example/watch" })`);
+  check(autoRun(`tabStates.get(10)?.captureStarted`) === true
+      && auto.nativeMessages.some((message) => message.type === "hello"),
+    "a playing local video starts subtitles without opening the popup");
+
+  const paused = makeContext();
+  const pausedRun = (source) => vm.runInContext(source, paused.ctx);
+  pausedRun(`discoverVideoSource = async () => ({
+    hasVideo: true, playing: false, muted: false, frameId: 0,
+    sourceUrl: "https://video.example/paused.m3u8", pageUrl: "https://site.example/watch"
+  })`);
+  await pausedRun(`ensureLiveCaptions({ tabId: 20, pageUrl: "https://site.example/watch" })`);
+  check(pausedRun(`tabStates.has(20)`) === false && paused.nativeMessages.length === 0,
+    "a paused local video does not auto-start in the background");
+
+  const stopped = makeContext();
+  const stoppedRun = (source) => vm.runInContext(source, stopped.ctx);
+  stoppedRun(`discoverVideoSource = async () => ({
+    hasVideo: true, playing: true, muted: false, frameId: 0,
+    sourceUrl: "https://video.example/stopped.m3u8", pageUrl: "https://site.example/watch"
+  }); tabStates.set(30, {
+    tabId: 30, frameId: 0, jobId: "offline-30", mediaEpoch: 0,
+    captureStarted: false, status: "idle", engine: "local", sessionMode: "offline",
+    source: "tab", sourceUrl: "https://video.example/stopped.m3u8",
+    pageUrl: "https://site.example/watch", translate: false, userStopped: true
+  });`);
+  await stoppedRun(`ensureLiveCaptions({ tabId: 30, pageUrl: "https://site.example/watch" })`);
+  check(stoppedRun(`tabStates.get(30).captureStarted`) === false && stopped.nativeMessages.length === 0,
+    "page activity still cannot restart a local session after the user stops it");
+  await stoppedRun(`ensureLiveCaptions({ tabId: 30, pageUrl: "https://site.example/watch-next" })`);
+  check(stoppedRun(`tabStates.get(30).captureStarted`) === true
+      && stoppedRun(`tabStates.get(30).userStopped`) === false
+      && stoppedRun(`tabStates.get(30).jobId`) !== "offline-30"
+      && stopped.nativeMessages.some((message) => message.type === "hello"),
+    "playing a new page in the same tab starts a fresh session after a manual stop");
+
+  const occupied = makeContext();
+  const occupiedRun = (source) => vm.runInContext(source, occupied.ctx);
+  occupiedRun(`discoverVideoSource = async () => ({
+    hasVideo: true, playing: true, muted: false, frameId: 0,
+    sourceUrl: "https://video.example/second.m3u8", pageUrl: "https://site.example/second"
+  }); tabStates.set(40, {
+    tabId: 40, frameId: 0, jobId: "offline-40", mediaEpoch: 0,
+    captureStarted: true, status: "live", engine: "local", sessionMode: "offline",
+    source: "tab", sourceUrl: "https://video.example/first.m3u8",
+    pageUrl: "https://site.example/first", translate: false
+  }); captureTabId = 40;`);
+  await occupiedRun(`ensureLiveCaptions({ tabId: 41, pageUrl: "https://site.example/second" })`);
+  check(occupiedRun(`captureTabId`) === 40
+      && occupiedRun(`tabStates.get(40).captureStarted`) === true
+      && occupiedRun(`tabStates.has(41)`) === false
+      && !occupied.nativeMessages.some((message) => message.type === "cancel"),
+    "an automatic start in another tab cannot steal the active local session");
 
   run(`tabStates.set(17, {
     tabId: 17, frameId: 0, jobId: "offline-17", mediaEpoch: 1,
