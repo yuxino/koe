@@ -50,6 +50,7 @@
         "<all_urls>"
       ],
       "js": [
+        "media-discovery.js",
         "content.js"
       ],
       "all_frames": false,

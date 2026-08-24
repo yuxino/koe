@@ -43,6 +43,8 @@
   let lastMediaContextAt = 0;
   let mediaDiscontinuityId = 0;
   let mediaResourceFloor = 0;
+  let inlineHlsDefinitions = null;
+  let inlineHlsScannedAt = 0;
   const CAPTION_SENTENCE_ENDINGS = new Set(["。", "！", "？", "!", "?", "；", ";", "\n"]);
   const CAPTION_PREFERRED_BREAKS = new Set(["，", "、", ",", "：", ":", "—", "–", "-", " "]);
 
@@ -494,18 +496,33 @@
     lastMediaContextAt = Date.now();
     let resourceUrls = [];
     try {
-      resourceUrls = (typeof performance !== "undefined" && typeof performance.getEntriesByType === "function")
+      const observed = (typeof performance !== "undefined" && typeof performance.getEntriesByType === "function")
         ? performance.getEntriesByType("resource")
           .filter((entry) => Number(entry?.startTime) >= mediaResourceFloor)
           .map((entry) => ({
             url: String(entry?.name || ""),
-            observedAt: performanceTimeOrigin() + Math.max(0, Number(entry?.startTime) || 0)
+            observedAt: performanceTimeOrigin() + Math.max(0, Number(entry?.startTime) || 0),
+            source: "performance"
           }))
           .filter((item) => {
             try { return /\.m3u8$/i.test(new URL(item.url).pathname); } catch { return false; }
           })
-          .slice(-24)
         : [];
+      // 许多播放器在用户打开 Koe 之前就已加载 HLS，Performance 的短时间窗
+      // 会刻意忽略这些旧请求。内联播放器配置仍描述当前页面媒体，因此作为
+      // 只驻留内存的定义候选补回；不需要为具体站点读取 window 私有对象。
+      const definitions = currentInlineHlsDefinitions();
+      const merged = new Map();
+      for (const item of observed) merged.set(item.url, item);
+      for (const item of definitions) {
+        merged.set(item.url, {
+          url: item.url,
+          observedAt: Date.now(),
+          source: "page-definition",
+          quality: Math.max(0, Number(item.quality) || 0)
+        });
+      }
+      resourceUrls = [...merged.values()].slice(-24);
     } catch {
       resourceUrls = [];
     }
@@ -525,8 +542,20 @@
     if (!activeSession) return;
     awaitingMediaReset = true;
     mediaResourceFloor = Math.max(0, performanceClock() - 3_000);
+    inlineHlsDefinitions = null;
+    inlineHlsScannedAt = 0;
     clearOverlayText({ resetTimeline: false });
     if (activeSession.mode === "offline") resetOfflineCues();
+  }
+
+  function currentInlineHlsDefinitions() {
+    const now = Date.now();
+    const cacheMs = inlineHlsDefinitions?.length ? 30_000 : 3_000;
+    if (inlineHlsDefinitions && now - inlineHlsScannedAt < cacheMs) return inlineHlsDefinitions;
+    inlineHlsScannedAt = now;
+    inlineHlsDefinitions = globalThis.KoeMediaDiscovery
+      ?.collectInlineHlsDefinitions?.(document, { limit: 24 }) || [];
+    return inlineHlsDefinitions;
   }
 
   function performanceClock() {

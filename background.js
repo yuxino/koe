@@ -148,7 +148,18 @@ function selectMediaCandidate(tabId, context = {}) {
   for (const item of Array.isArray(context.resourceUrls) ? context.resourceUrls : []) {
     const url = typeof item === "string" ? item : String(item?.url || "");
     const observedAt = typeof item === "string" ? now : Number(item?.observedAt) || now;
-    if (isHlsUrl(url)) rememberMediaCandidate(id, { url, frameId, seenAt: observedAt, source: "performance" });
+    const source = typeof item === "string" || item?.source !== "page-definition"
+      ? "performance"
+      : "page-definition";
+    if (isHlsUrl(url)) {
+      rememberMediaCandidate(id, {
+        url,
+        frameId,
+        seenAt: observedAt,
+        source,
+        quality: Math.max(0, Number(item?.quality) || 0)
+      });
+    }
   }
   const candidates = (mediaCandidatesByTab.get(id) || [])
     .filter((item) => now - Number(item.seenAt || 0) <= MEDIA_CANDIDATE_TTL_MS && !isAdSource(item.url));
@@ -575,7 +586,12 @@ async function receiveMediaContext(message, sender) {
     resourceUrls: Array.isArray(message.resourceUrls)
       ? message.resourceUrls.slice(-24).map((item) => typeof item === "string"
         ? item
-        : { url: String(item?.url || ""), observedAt: Number(item?.observedAt) || Date.now() })
+        : {
+            url: String(item?.url || ""),
+            observedAt: Number(item?.observedAt) || Date.now(),
+            source: item?.source === "page-definition" ? "page-definition" : "performance",
+            quality: Math.max(0, Number(item?.quality) || 0)
+          })
       : [],
     currentTimeMs: Math.max(0, Number(message.currentTimeMs) || 0),
     durationMs: Math.max(0, Number(message.durationMs) || 0),
@@ -1818,7 +1834,10 @@ function normalizeSourceKey(value) {
 }
 
 async function ensureContentScript(tabId, frameId = 0) {
-  await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, files: ["content.js"] });
+  await chrome.scripting.executeScript({
+    target: { tabId, frameIds: [frameId] },
+    files: ["media-discovery.js", "content.js"]
+  });
 }
 
 function resolveCaptureState(message = {}) {

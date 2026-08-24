@@ -118,6 +118,17 @@ function makeContext() {
   const genericSelected = run(`selectMediaCandidate(21, { frameId: 0, currentSrc: "blob:https://site.example/id", resourceUrls: [] })`);
   check(genericSelected?.url === genericMaster,
     "a generic HLS master outranks a newer high-resolution media playlist");
+  const inlineMaster = "https://media.example/preloaded/master.m3u8?token=INLINE_SECRET";
+  const inlineSelected = run(`selectMediaCandidate(23, {
+    frameId: 0,
+    currentSrc: "blob:https://site.example/current",
+    resourceUrls: [{
+      url: ${JSON.stringify(inlineMaster)}, observedAt: Date.now(),
+      source: "page-definition", quality: 0
+    }]
+  })`);
+  check(inlineSelected?.url === inlineMaster && inlineSelected?.source === "page-definition",
+    "a preloaded inline HLS definition remains discoverable after the performance window expires");
   check(run(`playlistStructureScore("https://cdndirector.dailymotion.com/path/title/master.m3u8")`)
       > run(`playlistStructureScore("https://dmxleo.dailymotion.com/path/title/master.m3u8")`),
     "Dailymotion's media director outranks its non-media .m3u8 metadata endpoint");
