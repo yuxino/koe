@@ -328,6 +328,37 @@ function makeContext() {
   await settle();
   check(!h.nativeMessages.some((message) => message.type === "start"),
     "a comfortably buffered local batch is not restarted by a heartbeat");
+  run(`tabStates.set(18, {
+    tabId: 18, frameId: 0, jobId: "offline-18", mediaEpoch: 3,
+    captureStarted: true, status: "live", engine: "local", sessionMode: "offline",
+    source: "tab", sourceUrl: ${JSON.stringify(signed)}, pageUrl: "https://site.example/watch",
+    translate: false, mediaIdentity: "identity-18", offlineStartedEpoch: 3,
+    offlineRunActive: false, offlinePreparedUntilMs: 60_000, offlineCueRevision: 0,
+    offlineSourceUrl: ${JSON.stringify(signed)}, offlineContextVersion: 1,
+    offlineContext: { currentTimeMs: 30_000, durationMs: 60_000, playbackRate: 1 }
+  }); captureTabId = 18;`);
+  run(`maybeExtendOfflinePrep(tabStates.get(18))`);
+  await settle();
+  check(!h.nativeMessages.some((message) => message.type === "start"),
+    "a short video already prepared through media end never refills the same batch");
+  run(`tabStates.set(17, {
+    tabId: 17, frameId: 0, jobId: "offline-17", mediaEpoch: 4,
+    captureStarted: true, status: "starting", engine: "local", sessionMode: "offline",
+    source: "tab", sourceUrl: ${JSON.stringify(signed)}, pageUrl: "https://site.example/watch",
+    translate: false, mediaIdentity: "identity-17", offlineStartedEpoch: 4,
+    offlineRunActive: true, offlinePreparedUntilMs: 0, offlineCueRevision: 0,
+    offlineSourceUrl: ${JSON.stringify(signed)}, offlineContextVersion: 1,
+    offlineContext: { currentTimeMs: 0, durationMs: 0, playbackRate: 1 }
+  }); captureTabId = 17;`);
+  await run(`handleNativeMessage({
+    type: "status", jobId: "offline-17", mediaEpoch: 4, stage: "ready",
+    detail: "ready", preparedUntilMs: 36_000, mediaComplete: true
+  })`);
+  await settle();
+  check(run(`tabStates.get(17).offlineMediaComplete`) === true
+      && !h.nativeMessages.some((message) => message.type === "start"),
+    "an explicit media-complete status stops refills when the page duration is unknown");
+  run(`captureTabId = 19;`);
   run(`tabStates.get(19).offlineContext.currentTimeMs = 76_000;
     maybeExtendOfflinePrep(tabStates.get(19));
     maybeExtendOfflinePrep(tabStates.get(19));`);

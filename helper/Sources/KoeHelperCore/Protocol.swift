@@ -291,6 +291,7 @@ public struct HostResponse: Encodable, Sendable {
     public let detail: String?
     public let revision: Int?
     public let preparedUntilMs: Double?
+    public let mediaComplete: Bool?
     public let cues: [SubtitleCue]?
     public let error: String?
     public let nativeTranslation: Bool?
@@ -304,6 +305,7 @@ public struct HostResponse: Encodable, Sendable {
         detail: String? = nil,
         revision: Int? = nil,
         preparedUntilMs: Double? = nil,
+        mediaComplete: Bool? = nil,
         cues: [SubtitleCue]? = nil,
         error: String? = nil,
         nativeTranslation: Bool? = nil
@@ -316,6 +318,7 @@ public struct HostResponse: Encodable, Sendable {
         self.detail = detail
         self.revision = revision
         self.preparedUntilMs = preparedUntilMs
+        self.mediaComplete = mediaComplete
         self.cues = cues
         self.error = error
         self.nativeTranslation = nativeTranslation
@@ -334,7 +337,8 @@ public struct HostResponse: Encodable, Sendable {
         mediaEpoch: Int,
         stage: String,
         detail: String,
-        preparedUntilMs: Double? = nil
+        preparedUntilMs: Double? = nil,
+        mediaComplete: Bool? = nil
     ) -> HostResponse {
         HostResponse(
             type: "status",
@@ -342,7 +346,8 @@ public struct HostResponse: Encodable, Sendable {
             mediaEpoch: mediaEpoch,
             stage: stage,
             detail: detail,
-            preparedUntilMs: preparedUntilMs
+            preparedUntilMs: preparedUntilMs,
+            mediaComplete: mediaComplete
         )
     }
 

@@ -29,6 +29,7 @@ function resetOfflineBatchState(state, { preserveRevision = false } = {}) {
   state.offlineStartedEpoch = undefined;
   state.offlineRunActive = false;
   state.offlinePreparedUntilMs = 0;
+  state.offlineMediaComplete = false;
   state.offlineMissingMediaSince = 0;
   if (!preserveRevision) state.offlineCueRevision = 0;
 }
@@ -641,6 +642,7 @@ function maybeExtendOfflinePrep(state) {
 
 function shouldStartOfflineBatch(state) {
   if (!state?.captureStarted || state.engine !== "local" || state.offlineRunActive) return false;
+  if (state.offlineMediaComplete === true) return false;
   const epoch = Number(state.mediaEpoch) || 0;
   if (state.offlineStartedEpoch !== epoch) return true;
   const context = state.offlineContext || {};
@@ -649,6 +651,10 @@ function shouldStartOfflineBatch(state) {
   if (durationMs > 0 && currentMs >= durationMs - 1_000) return false;
   const preparedUntilMs = Math.max(0, Number(state.offlinePreparedUntilMs) || 0);
   if (preparedUntilMs <= 0) return true;
+  // 短视频的一批预处理可能已经覆盖片尾。此时即使“当前位置 + 提前量”
+  // 越过 preparedUntil，也没有下一批可续；否则会在 ready / resolving
+  // 之间永久重跑同一段媒体。
+  if (durationMs > 0 && preparedUntilMs >= durationMs - 1_000) return false;
   const playbackRate = Math.max(0.25, Math.min(4, Number(context.playbackRate) || 1));
   return currentMs + OFFLINE_REFILL_LEAD_MS * playbackRate >= preparedUntilMs;
 }
@@ -763,7 +769,10 @@ async function handleNativeMessage(message) {
     if (Number.isFinite(preparedUntilMs) && preparedUntilMs > 0) {
       state.offlinePreparedUntilMs = Math.max(Number(state.offlinePreparedUntilMs) || 0, preparedUntilMs);
     }
-    if (message.stage === "ready") state.offlineRunActive = false;
+    if (message.stage === "ready") {
+      state.offlineRunActive = false;
+      state.offlineMediaComplete = message.mediaComplete === true;
+    }
     await persistStates();
     if (message.stage === "ready") maybeExtendOfflinePrep(state);
     return;

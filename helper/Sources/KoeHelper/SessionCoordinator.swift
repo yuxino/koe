@@ -187,7 +187,8 @@ actor SessionCoordinator {
                 detail: reachedMediaEnd
                     ? "本地精准字幕已准备完成"
                     : "后续字幕已提前准备，播放时会自动续接",
-                preparedUntilMs: preparedUntilMs
+                preparedUntilMs: preparedUntilMs,
+                mediaComplete: reachedMediaEnd
             ))
         } catch is CancellationError {
             return

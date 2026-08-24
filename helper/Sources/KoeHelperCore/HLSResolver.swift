@@ -7,6 +7,7 @@ public enum HLSResolverError: LocalizedError {
     case emptyPlaylist
     case unsupportedEncryption
     case unsupportedByteRange
+    case unsupportedMediaChange
     case unsupportedAudio
     case unsafeRedirect
 
@@ -24,6 +25,8 @@ public enum HLSResolverError: LocalizedError {
             return "这个 HLS 视频使用了暂不支持的分片加密。"
         case .unsupportedByteRange:
             return "这个 HLS 视频使用了暂不支持的字节范围分片。"
+        case .unsupportedMediaChange:
+            return "这个 HLS 视频中途更换了媒体格式，暂不支持离线字幕。"
         case .unsupportedAudio:
             return "这个 HLS 视频的音轨不是可直接读取的 AAC。"
         case .unsafeRedirect:
@@ -58,11 +61,18 @@ public struct HLSMediaPlaylist: Equatable, Sendable {
     public let url: URL
     public let segments: [HLSSegment]
     public let durationMs: Double
+    public let initializationSegmentURL: URL?
 
-    public init(url: URL, segments: [HLSSegment], durationMs: Double) {
+    public init(
+        url: URL,
+        segments: [HLSSegment],
+        durationMs: Double,
+        initializationSegmentURL: URL? = nil
+    ) {
         self.url = url
         self.segments = segments
         self.durationMs = durationMs
+        self.initializationSegmentURL = initializationSegmentURL
     }
 }
 
@@ -149,16 +159,38 @@ public actor HLSResolver {
                 }
             }
         }
-        let total = pieces.reduce(0) { $0 + ($1?.count ?? 0) }
-        guard total > 0, total <= maximumChunkBytes else { throw HLSResolverError.invalidResponse }
         let completePieces = try pieces.map { piece -> Data in
             guard let piece else { throw HLSResolverError.invalidResponse }
             return piece
         }
-        let audio = try Self.demuxADTS(from: completePieces)
-        let outputURL = root.appendingPathComponent("\(UUID().uuidString).aac")
+        let media: Data
+        let fileExtension: String
+        if let initializationSegmentURL = playlist.initializationSegmentURL {
+            let initialization = try await Self.data(
+                at: initializationSegmentURL,
+                headers: headers,
+                session: session
+            )
+            let total = completePieces.reduce(initialization.count) { $0 + $1.count }
+            guard total > initialization.count, total <= maximumChunkBytes else {
+                throw HLSResolverError.invalidResponse
+            }
+            media = try Self.assembleFragmentedMP4(
+                initialization: initialization,
+                fragments: completePieces
+            )
+            fileExtension = "mp4"
+        } else {
+            let total = completePieces.reduce(0) { $0 + $1.count }
+            guard total > 0, total <= maximumChunkBytes else {
+                throw HLSResolverError.invalidResponse
+            }
+            media = try Self.demuxADTS(from: completePieces)
+            fileExtension = "aac"
+        }
+        let outputURL = root.appendingPathComponent("\(UUID().uuidString).\(fileExtension)")
         do {
-            try audio.write(to: outputURL, options: .atomic)
+            try media.write(to: outputURL, options: .atomic)
         } catch {
             try? FileManager.default.removeItem(at: outputURL)
             throw error
@@ -251,6 +283,78 @@ public actor HLSResolver {
         }
         guard !audio.isEmpty else { throw HLSResolverError.unsupportedAudio }
         return audio
+    }
+
+    /// Rebuilds the bounded portion of a CMAF/fMP4 HLS stream as a local MP4.
+    /// The initialization segment describes the tracks; each selected media
+    /// fragment then contributes its original `moof`/`mdat` pair. AVFoundation
+    /// can read the audio track directly without ffmpeg or a full-video fetch.
+    public static func assembleFragmentedMP4(initialization: Data, fragments: [Data]) throws -> Data {
+        guard let initializationBoxes = topLevelBoxTypes(in: initialization),
+              let fileTypeIndex = initializationBoxes.firstIndex(of: "ftyp"),
+              let movieIndex = initializationBoxes.firstIndex(of: "moov"),
+              fileTypeIndex < movieIndex,
+              !fragments.isEmpty,
+              fragments.allSatisfy(isCompleteMediaFragment) else {
+            throw HLSResolverError.invalidResponse
+        }
+        var output = Data(capacity: initialization.count + fragments.reduce(0) { $0 + $1.count })
+        output.append(initialization)
+        for fragment in fragments { output.append(fragment) }
+        return output
+    }
+
+    private static func isCompleteMediaFragment(_ data: Data) -> Bool {
+        guard let boxes = topLevelBoxTypes(in: data),
+              let movieFragmentIndex = boxes.firstIndex(of: "moof") else { return false }
+        return boxes.indices.contains { $0 > movieFragmentIndex && boxes[$0] == "mdat" }
+    }
+
+    /// Validates every top-level ISO BMFF box rather than assuming `moof` is
+    /// first. CMAF permits metadata and packing boxes such as `emsg`, `prft`,
+    /// `sidx`, and `free` before the media fragment.
+    private static func topLevelBoxTypes(in data: Data) -> [String]? {
+        guard !data.isEmpty else { return nil }
+        var offset = 0
+        var types: [String] = []
+        while offset < data.count {
+            let remaining = data.count - offset
+            guard remaining >= 8,
+                  let compactSize = unsignedInteger(in: data, offset: offset, byteCount: 4),
+                  let typeBytes = bytes(in: data, offset: offset + 4, count: 4),
+                  typeBytes.allSatisfy({ (0x20...0x7e).contains($0) }),
+                  let type = String(bytes: typeBytes, encoding: .ascii) else { return nil }
+            let headerSize: Int
+            let boxSize: Int
+            if compactSize == 1 {
+                guard remaining >= 16,
+                      let extendedSize = unsignedInteger(in: data, offset: offset + 8, byteCount: 8),
+                      extendedSize <= UInt64(Int.max) else { return nil }
+                headerSize = 16
+                boxSize = Int(extendedSize)
+            } else {
+                headerSize = 8
+                boxSize = compactSize == 0 ? remaining : Int(compactSize)
+            }
+            guard boxSize >= headerSize, boxSize <= remaining else { return nil }
+            types.append(type)
+            offset += boxSize
+        }
+        return offset == data.count ? types : nil
+    }
+
+    private static func unsignedInteger(in data: Data, offset: Int, byteCount: Int) -> UInt64? {
+        guard (1...8).contains(byteCount), let values = bytes(in: data, offset: offset, count: byteCount) else {
+            return nil
+        }
+        return values.reduce(0) { ($0 << 8) | UInt64($1) }
+    }
+
+    private static func bytes(in data: Data, offset: Int, count: Int) -> [UInt8]? {
+        guard offset >= 0, count >= 0, offset <= data.count - count else { return nil }
+        let start = data.index(data.startIndex, offsetBy: offset)
+        let end = data.index(start, offsetBy: count)
+        return Array(data[start..<end])
     }
 
     private static func audioPID(in segment: Data) -> Int? {
@@ -350,6 +454,11 @@ public actor HLSResolver {
             let attributes = String(line.dropFirst("#EXT-X-STREAM-INF:".count))
             let bandwidth = attribute(named: "AVERAGE-BANDWIDTH", in: attributes)
                 ?? attribute(named: "BANDWIDTH", in: attributes)
+                // Some production manifests omit both bandwidth fields but do
+                // provide RESOLUTION. Pixel area is only a fallback selection
+                // weight; choosing the smallest picture also minimizes the
+                // multiplexed audio download needed for transcription.
+                ?? resolutionPixelArea(in: attributes)
                 ?? Int.max
             guard let uri = nextURI(after: index, lines: lines),
                   let url = resolvedURL(uri, relativeTo: baseURL),
@@ -369,6 +478,30 @@ public actor HLSResolver {
             let method = attributeString(named: "METHOD", in: attributes) ?? "NONE"
             if method.uppercased() != "NONE" { throw HLSResolverError.unsupportedEncryption }
         }
+        var initializationSegmentURL: URL?
+        var sawMediaSegment = false
+        for rawLine in lines {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.uppercased().hasPrefix("#EXTINF:") {
+                sawMediaSegment = true
+                continue
+            }
+            guard line.uppercased().hasPrefix("#EXT-X-MAP:") else { continue }
+            if sawMediaSegment { throw HLSResolverError.unsupportedMediaChange }
+            let attributes = String(line.dropFirst("#EXT-X-MAP:".count))
+            if attributeString(named: "BYTERANGE", in: attributes) != nil {
+                throw HLSResolverError.unsupportedByteRange
+            }
+            guard let uri = attributeString(named: "URI", in: attributes),
+                  let url = resolvedURL(uri, relativeTo: baseURL),
+                  MediaURLSafety.isAllowed(url) else {
+                throw HLSResolverError.emptyPlaylist
+            }
+            if let existing = initializationSegmentURL, existing != url {
+                throw HLSResolverError.unsupportedMediaChange
+            }
+            initializationSegmentURL = url
+        }
         var segments: [HLSSegment] = []
         var cursorMs = 0.0
         for index in lines.indices {
@@ -384,7 +517,12 @@ public actor HLSResolver {
             cursorMs = endMs
         }
         guard !segments.isEmpty else { throw HLSResolverError.emptyPlaylist }
-        return HLSMediaPlaylist(url: baseURL, segments: segments, durationMs: cursorMs)
+        return HLSMediaPlaylist(
+            url: baseURL,
+            segments: segments,
+            durationMs: cursorMs,
+            initializationSegmentURL: initializationSegmentURL
+        )
     }
 
     private static func nextURI(after index: Int, lines: [String]) -> String? {
@@ -401,6 +539,19 @@ public actor HLSResolver {
         attributeString(named: name, in: attributes).flatMap(Int.init)
     }
 
+    private static func resolutionPixelArea(in attributes: String) -> Int? {
+        guard let value = attributeString(named: "RESOLUTION", in: attributes)?.lowercased() else {
+            return nil
+        }
+        let parts = value.split(separator: "x", maxSplits: 1)
+        guard parts.count == 2,
+              let width = Int(parts[0]),
+              let height = Int(parts[1]),
+              (1...16_384).contains(width),
+              (1...16_384).contains(height) else { return nil }
+        return width * height
+    }
+
     private static func attributeString(named name: String, in attributes: String) -> String? {
         let prefix = "\(name)="
         return attributes.split(separator: ",")
@@ -412,6 +563,7 @@ public actor HLSResolver {
     private static func resolvedURL(_ raw: String, relativeTo baseURL: URL) -> URL? {
         guard var resolved = URL(string: raw, relativeTo: baseURL)?.absoluteURL else { return nil }
         guard resolved.query == nil, baseURL.query != nil,
+              sameOrigin(resolved, baseURL),
               var components = URLComponents(url: resolved, resolvingAgainstBaseURL: false),
               let baseComponents = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
             return resolved
@@ -419,5 +571,19 @@ public actor HLSResolver {
         components.percentEncodedQuery = baseComponents.percentEncodedQuery
         if let value = components.url { resolved = value }
         return resolved
+    }
+
+    private static func sameOrigin(_ left: URL, _ right: URL) -> Bool {
+        guard left.scheme?.lowercased() == right.scheme?.lowercased(),
+              left.host?.lowercased() == right.host?.lowercased() else { return false }
+        func effectivePort(_ url: URL) -> Int? {
+            if let port = url.port { return port }
+            switch url.scheme?.lowercased() {
+            case "http": return 80
+            case "https": return 443
+            default: return nil
+            }
+        }
+        return effectivePort(left) == effectivePort(right)
     }
 }

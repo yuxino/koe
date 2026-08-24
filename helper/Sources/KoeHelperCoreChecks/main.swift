@@ -41,6 +41,22 @@ do {
     check(false, "valid start request: \(error)")
 }
 
+do {
+    let encoded = try JSONEncoder().encode(HostResponse.status(
+        jobId: "offline-1",
+        mediaEpoch: 2,
+        stage: "ready",
+        detail: "ready",
+        preparedUntilMs: 36_000,
+        mediaComplete: true
+    ))
+    let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+    check(object?["mediaComplete"] as? Bool == true,
+          "ready status explicitly reports that the media end is prepared")
+} catch {
+    check(false, "media-complete status encoding: \(error)")
+}
+
 var languageState = MediaLanguageHintState()
 check(languageState.begin(mediaKey: "media-a") == nil,
       "the first window of a media item detects its language")
@@ -95,6 +111,31 @@ if let base = URL(string: "https://cdn.example.com/master.m3u8?token=secret") {
     check(selected?.url.absoluteString == "https://cdn.example.com/low/index.m3u8?token=secret",
           "relative HLS variants preserve the signed query")
 
+    let crossOriginPlaylist = """
+    #EXTM3U
+    #EXT-X-STREAM-INF:BANDWIDTH=200000
+    https://other.example.net/low/index.m3u8
+    """
+    let crossOriginVariant = HLSResolver.variants(in: crossOriginPlaylist, baseURL: base).first
+    check(crossOriginVariant?.url.query == nil,
+          "signed master query is never copied to a cross-origin HLS URL")
+
+    let missingBandwidth = """
+    #EXTM3U
+    #EXT-X-STREAM-INF:CODECS="avc1.4d401f,mp4a.40.2",RESOLUTION=1280x720,NAME="720"
+    720/index.m3u8
+    #EXT-X-STREAM-INF:CODECS="avc1.4d401e,mp4a.40.2",RESOLUTION=512x288,NAME="288"
+    288/index.m3u8
+    #EXT-X-STREAM-INF:CODECS="avc1.640028,mp4a.40.2",RESOLUTION=1920x1080,NAME="1080"
+    1080/index.m3u8
+    """
+    let resolutionVariants = HLSResolver.variants(in: missingBandwidth, baseURL: base)
+    let resolutionSelected = resolutionVariants.min { $0.bandwidth < $1.bandwidth }
+    check(resolutionSelected?.bandwidth == 512 * 288,
+          "resolution is the fallback selection weight when HLS bandwidth is omitted")
+    check(resolutionSelected?.url.absoluteString == "https://cdn.example.com/288/index.m3u8?token=secret",
+          "bandwidth-less HLS selects the lowest-resolution variant")
+
     let media = """
     #EXTM3U
     #EXT-X-TARGETDURATION:5
@@ -116,6 +157,61 @@ if let base = URL(string: "https://cdn.example.com/master.m3u8?token=secret") {
         check(false, "target-style HLS playlist parses: \(error)")
     }
 
+    let fragmentedMP4 = """
+    #EXTM3U
+    #EXT-X-VERSION:7
+    #EXT-X-MAP:URI="init.mp4"
+    #EXTINF:4.000,
+    segment-1.m4s
+    #EXTINF:4.000,
+    segment-2.m4s
+    #EXT-X-ENDLIST
+    """
+    do {
+        let parsed = try HLSResolver.mediaPlaylist(in: fragmentedMP4, baseURL: base)
+        check(parsed.initializationSegmentURL?.absoluteString
+            == "https://cdn.example.com/init.mp4?token=secret",
+              "CMAF initialization segment preserves the signed query")
+        check(parsed.segments.count == 2 && parsed.durationMs == 8_000,
+              "CMAF media fragments use the same absolute HLS timing")
+    } catch {
+        check(false, "CMAF HLS playlist parses: \(error)")
+    }
+
+    let byteRangeMap = """
+    #EXTM3U
+    #EXT-X-MAP:URI="media.mp4",BYTERANGE="720@0"
+    #EXTINF:4,
+    segment.m4s
+    """
+    do {
+        _ = try HLSResolver.mediaPlaylist(in: byteRangeMap, baseURL: base)
+        check(false, "byte-range CMAF initialization segments are rejected")
+    } catch HLSResolverError.unsupportedByteRange {
+        check(true, "byte-range CMAF initialization segments are rejected")
+    } catch {
+        check(false, "byte-range CMAF initialization returns the expected error")
+    }
+
+    let changingInitialization = """
+    #EXTM3U
+    #EXT-X-MAP:URI="init-a.mp4"
+    #EXTINF:4,
+    segment-a.m4s
+    #EXT-X-DISCONTINUITY
+    #EXT-X-MAP:URI="init-b.mp4"
+    #EXTINF:4,
+    segment-b.m4s
+    """
+    do {
+        _ = try HLSResolver.mediaPlaylist(in: changingInitialization, baseURL: base)
+        check(false, "CMAF playlists that change initialization midstream are rejected")
+    } catch HLSResolverError.unsupportedMediaChange {
+        check(true, "CMAF playlists that change initialization midstream are rejected")
+    } catch {
+        check(false, "changing CMAF initialization returns the expected error")
+    }
+
     let encrypted = """
     #EXTM3U
     #EXT-X-KEY:METHOD=AES-128,URI="key.bin"
@@ -132,6 +228,78 @@ if let base = URL(string: "https://cdn.example.com/master.m3u8?token=secret") {
     }
 } else {
     check(false, "HLS test URL")
+}
+
+func mp4Box(_ type: String, payload: [UInt8]) -> Data {
+    let size = UInt32(8 + payload.count)
+    var bytes: [UInt8] = [
+        UInt8((size >> 24) & 0xff),
+        UInt8((size >> 16) & 0xff),
+        UInt8((size >> 8) & 0xff),
+        UInt8(size & 0xff)
+    ]
+    bytes.append(contentsOf: type.utf8)
+    bytes.append(contentsOf: payload)
+    return Data(bytes)
+}
+
+let syntheticInitialization = mp4Box("ftyp", payload: [0, 0, 0, 0])
+    + mp4Box("moov", payload: [1, 2, 3, 4])
+let syntheticFragment = mp4Box("styp", payload: [0, 0, 0, 0])
+    + mp4Box("moof", payload: [5, 6, 7, 8])
+    + mp4Box("mdat", payload: [9, 10, 11, 12])
+do {
+    let assembled = try HLSResolver.assembleFragmentedMP4(
+        initialization: syntheticInitialization,
+        fragments: [syntheticFragment]
+    )
+    check(assembled == syntheticInitialization + syntheticFragment,
+          "CMAF initialization and selected fragments are assembled losslessly")
+} catch {
+    check(false, "CMAF fragments assemble: \(error)")
+}
+
+let metadataPrefixedFragment = mp4Box("free", payload: [])
+    + mp4Box("emsg", payload: [0, 0, 0, 0])
+    + mp4Box("moof", payload: [1, 2, 3, 4])
+    + mp4Box("mdat", payload: [5, 6, 7, 8])
+do {
+    _ = try HLSResolver.assembleFragmentedMP4(
+        initialization: syntheticInitialization,
+        fragments: [metadataPrefixedFragment]
+    )
+    check(true, "valid CMAF metadata boxes may precede moof")
+} catch {
+    check(false, "valid CMAF metadata boxes may precede moof: \(error)")
+}
+
+for (invalidFragment, label) in [
+    (mp4Box("moof", payload: [1, 2, 3, 4]), "CMAF fragment without mdat is rejected"),
+    (Data([0, 0, 0, 32, 0x6d, 0x6f, 0x6f, 0x66]), "truncated CMAF top-level box is rejected")
+] {
+    do {
+        _ = try HLSResolver.assembleFragmentedMP4(
+            initialization: syntheticInitialization,
+            fragments: [invalidFragment]
+        )
+        check(false, label)
+    } catch HLSResolverError.invalidResponse {
+        check(true, label)
+    } catch {
+        check(false, "\(label) with the expected error")
+    }
+}
+
+do {
+    _ = try HLSResolver.assembleFragmentedMP4(
+        initialization: mp4Box("ftyp", payload: [0, 0, 0, 0]),
+        fragments: [syntheticFragment]
+    )
+    check(false, "CMAF initialization without moov is rejected")
+} catch HLSResolverError.invalidResponse {
+    check(true, "CMAF initialization without moov is rejected")
+} catch {
+    check(false, "CMAF initialization without moov returns the expected error")
 }
 
 func transportPacket(pid: Int, payloadStart: Bool, payload: [UInt8]) -> Data {

@@ -208,7 +208,9 @@
       awaitingMediaReset = false;
       if (replacingJob) {
         mediaDiscontinuityId = Math.max(0, Number(message.discontinuityId) || 0);
-        mediaResourceFloor = Math.max(0, performanceClock() - 60_000);
+        // 首次开启时，当前视频可能早已在这个文档里完成 HLS 预载。
+        // 保留从文档加载/最近一次换源起记录的代次边界，不能再用固定的
+        // 60 秒窗口裁掉仍属于当前视频的 Performance 资源。
       } else {
         mediaDiscontinuityId = Math.max(mediaDiscontinuityId, Number(message.discontinuityId) || 0);
       }
@@ -496,28 +498,31 @@
     lastMediaContextAt = Date.now();
     let resourceUrls = [];
     try {
+      const confirmedAt = Date.now();
       const observed = (typeof performance !== "undefined" && typeof performance.getEntriesByType === "function")
         ? performance.getEntriesByType("resource")
           .filter((entry) => Number(entry?.startTime) >= mediaResourceFloor)
           .map((entry) => ({
             url: String(entry?.name || ""),
-            observedAt: performanceTimeOrigin() + Math.max(0, Number(entry?.startTime) || 0),
+            // 后台候选有短 TTL。只要同一媒体代次仍周期回报这条记录，
+            // 就把它视为此刻再次确认；原始 startTime 只负责代次筛选。
+            observedAt: confirmedAt,
             source: "performance"
           }))
           .filter((item) => {
             try { return /\.m3u8$/i.test(new URL(item.url).pathname); } catch { return false; }
           })
         : [];
-      // 许多播放器在用户打开 Koe 之前就已加载 HLS，Performance 的短时间窗
-      // 会刻意忽略这些旧请求。内联播放器配置仍描述当前页面媒体，因此作为
-      // 只驻留内存的定义候选补回；不需要为具体站点读取 window 私有对象。
+      // 许多播放器在用户打开 Koe 之前就已加载 HLS。Performance 记录
+      // 作为当前媒体代次的主来源；内联播放器配置则补回可能已从
+      // Resource Timing 缓冲区淘汰的定义，两者都只驻留内存。
       const definitions = currentInlineHlsDefinitions();
       const merged = new Map();
       for (const item of observed) merged.set(item.url, item);
       for (const item of definitions) {
         merged.set(item.url, {
           url: item.url,
-          observedAt: Date.now(),
+          observedAt: confirmedAt,
           source: "page-definition",
           quality: Math.max(0, Number(item.quality) || 0)
         });
@@ -539,11 +544,13 @@
   }
 
   function freezeForSourceChange() {
-    if (!activeSession) return;
-    awaitingMediaReset = true;
+    // 即使字幕尚未开启，也必须推进媒体代次边界。这样用户在 SPA 中
+    // 换过视频后再启动 Koe，只会回报换源后的 Performance 记录。
     mediaResourceFloor = Math.max(0, performanceClock() - 3_000);
     inlineHlsDefinitions = null;
     inlineHlsScannedAt = 0;
+    if (!activeSession) return;
+    awaitingMediaReset = true;
     clearOverlayText({ resetTimeline: false });
     if (activeSession.mode === "offline") resetOfflineCues();
   }
@@ -560,10 +567,6 @@
 
   function performanceClock() {
     try { return Number(performance?.now?.()) || 0; } catch { return 0; }
-  }
-
-  function performanceTimeOrigin() {
-    try { return Number(performance?.timeOrigin) || (Date.now() - performanceClock()); } catch { return Date.now(); }
   }
 
   async function loadOverlayPreferences() {

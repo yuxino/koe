@@ -41,4 +41,18 @@ printf '%s\n' \
 
 install -m 644 "$manifest" "$host_root/$host_name.json"
 install -m 644 "$manifest" "$ego_host_root/$host_name.json"
-print "Koe Helper 已为 ego-lite 安装。重新加载扩展后即可使用本地精准字幕。"
+
+# Native Messaging hosts stay alive while the extension keeps its port open.
+# Replacing the executable alone therefore leaves the browser running the old
+# inode until its next restart. Chromium appends the calling extension origin
+# as an argument, so match the exact executable path plus either no argument or
+# a following space; never touch another worktree's helper.
+while IFS= read -r pid; do
+  [[ "$pid" =~ '^[0-9]+$' ]] || continue
+  command_path="$(ps -ww -p "$pid" -o command= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  if [[ "$command_path" == "$install_root/koe-helper" || "$command_path" == "$install_root/koe-helper "* ]]; then
+    kill "$pid" 2>/dev/null || true
+  fi
+done < <(pgrep -x koe-helper 2>/dev/null || true)
+
+print "Koe Helper 已为 ego-lite 安装。首次安装请重新加载扩展；升级后重新开启字幕即可。"
