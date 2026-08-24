@@ -19,6 +19,11 @@
 
       <button id="start-button" class="start-button" type="button">开启实时字幕</button>
 
+      <section class="media-status" id="media-status" data-kind="idle" aria-live="polite" aria-atomic="true">
+        <strong id="media-status-title">字幕已关闭</strong>
+        <span id="media-status-detail">点上方按钮后才会开始处理当前视频</span>
+      </section>
+
       <label class="toggle-row" for="translate-toggle">
         <span id="translate-label">显示中文翻译</span>
         <input type="checkbox" id="translate-toggle" checked>
@@ -74,7 +79,7 @@
       </div>
 
       <footer>
-        <span id="hint">Alt+K：开启并跟随正在发声的标签页</span>
+        <span id="hint">Alt+K：打开 Koe 控制器</span>
       </footer>
     </main>
     <script src="preferences.js"></script>

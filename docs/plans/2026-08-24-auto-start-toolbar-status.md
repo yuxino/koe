@@ -1,5 +1,7 @@
 # Koe Auto-start and Toolbar Status Implementation Plan
 
+> **Status:** Superseded. Koe is now manually controlled and off by default; this file remains as historical context, while the toolbar-status work still applies.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use executing-plans to implement this plan task-by-task.
 
 **Goal:** Start local subtitles when the page's main video begins playing and expose the global Koe session state on the browser toolbar.

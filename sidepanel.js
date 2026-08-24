@@ -34,6 +34,9 @@ const elements = {
   version: document.querySelector("#version"),
   statusDot: document.querySelector("#status-dot"),
   startButton: document.querySelector("#start-button"),
+  mediaStatus: document.querySelector("#media-status"),
+  mediaStatusTitle: document.querySelector("#media-status-title"),
+  mediaStatusDetail: document.querySelector("#media-status-detail"),
   translateLabel: document.querySelector("#translate-label"),
   translateToggle: document.querySelector("#translate-toggle"),
   hideOriginalToggle: document.querySelector("#hide-original-toggle"),
@@ -117,8 +120,31 @@ chrome.tabs.onActivated.addListener(async () => {
 // 后台转发的字幕消息（LIVE_PARTIAL / LIVE_SUBTITLES / LIVE_TRANSLATED / LIVE_STOP）
 chrome.runtime.onMessage.addListener((message) => {
   if (!message || typeof message.type !== "string") return false;
+  if (message.type === "KOE_MEDIA_STATUS") {
+    if (activeJobId && message.jobId && String(message.jobId) !== activeJobId) return false;
+    const epoch = Math.max(0, Number(message.mediaEpoch) || 0);
+    if (message.mediaEpoch !== undefined && epoch < activeMediaEpoch) return false;
+    if (message.kind === "clear") {
+      currentState = { ...currentState, issueKind: "", issueCode: "", issueTitle: "", stageDetail: "" };
+    } else if (message.kind === "action" || message.kind === "error") {
+      currentState = {
+        ...currentState,
+        status: message.kind === "error" ? "error" : currentState.status,
+        issueKind: message.kind,
+        issueCode: String(message.issueCode || ""),
+        issueTitle: String(message.title || ""),
+        stageDetail: String(message.detail || "")
+      };
+    }
+    const view = renderState();
+    syncFeedPlaceholder(view);
+    return false;
+  }
   if (message.type === "LIVE_STATE") return false; // 状态以 GET_STATE 轮询为准
   if (message.type === "LIVE_STOP") {
+    if (activeJobId && message.jobId && String(message.jobId) !== activeJobId) return false;
+    if (message.mediaEpoch !== undefined
+        && (Number(message.mediaEpoch) || 0) < activeMediaEpoch) return false;
     clearDraft();
     return false;
   }
@@ -332,10 +358,8 @@ async function saveApiKey() {
   elements.apiKey.placeholder = "已保存 · 输入新 Key 可替换";
   elements.settings.open = false;
   updateSettingsSummary();
-  elements.hint.textContent = "API Key 已保存，正在开启字幕…";
+  elements.hint.textContent = "API Key 已保存 · 字幕仍保持关闭";
   renderState();
-  // 保存动作本身是一次用户手势：直接为当前标签页开启字幕
-  void startForTab();
 }
 
 async function refreshActiveTab() {
@@ -398,17 +422,9 @@ async function refreshState() {
     activeJobId = "";
     clearDraft();
   }
-  renderState();
+  const stateView = renderState();
   updateStatusHint();
-  // 空字幕流时的统一占位：未开启提示点按钮；捕获中提示等待识别结果
-  if (elements.feed.children.length === 0 && !draftEl) {
-    appendRow(
-      captureState.captureActive
-        ? "正在等待识别结果…视频有声音时，字幕会出现在这里"
-        : "点击「开启实时字幕」，字幕会持续滚动显示在这里",
-      "placeholder"
-    );
-  }
+  syncFeedPlaceholder(stateView);
 }
 
 // 状态变化时把一句话写进底部提示；空闲时恢复默认提示（不覆盖按钮启动的分步提示）
@@ -426,12 +442,12 @@ function updateStatusHint() {
   } else if (next === "error") {
     elements.hint.textContent = currentState.stageDetail || "已断开 · 点击「开启实时字幕」重试";
   } else if (next === "idle" && !String(elements.hint.textContent).startsWith("①")) {
-    elements.hint.textContent = "Alt+K：开启并跟随正在发声的标签页";
+    elements.hint.textContent = "Alt+K：打开 Koe 控制器";
   }
 }
 
 // 侧边栏里的点击不被 Chrome 认可为 tabCapture 授权手势（此版本已实测），
-// 所以不再自动尝试开启；标签页模式需走工具栏图标点击或 Alt+K。
+// 所以不再自动尝试开启；标签页模式需打开工具栏控制器，再点主按钮授权。
 
 async function startForTab() {
   // 全程可见进度：每一步都把状态写进 hint，任何失败都能被看到并定位
@@ -487,7 +503,7 @@ async function startForTab() {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (/gesture|invocation|permission|user gesture/i.test(message)) {
-      elements.hint.textContent = "需要先点一次工具栏 Koe 图标（弹窗里一键开启）或按 Alt+K 授权。也可以把字幕模式切成麦克风，完全不需要手势。";
+      elements.hint.textContent = "请打开工具栏 Koe 控制器，再点「继续开启字幕」完成标签页声音授权。";
     } else {
       elements.hint.textContent = `启动失败：${message}`;
     }
@@ -529,14 +545,95 @@ function renderState() {
   const live = status === "live";
   const captureActive = Boolean(currentState.captureActive);
   const local = currentState.engine === "local" || (!captureActive && currentMode().engine === "local");
-  const gesture = Boolean(currentState.captureNeedsGesture);
-  const error = status === "error";
-  const starting = !live && !error && !gesture && status !== "idle";
-  elements.statusDot.className = `dot ${error ? "bad" : live ? "ok" : gesture || starting ? "busy" : ""}`;
-  elements.startButton.textContent = captureActive
-    ? (local ? "停止本地字幕" : "停止实时字幕")
-    : (local ? "开启本地精准字幕" : "开启实时字幕");
+  const view = describeMediaState(currentState);
+  const error = view.kind === "error";
+  const action = view.kind === "action";
+  const starting = view.kind === "starting";
+  elements.statusDot.className = `dot ${error ? "bad" : live ? "ok" : action || starting ? "busy" : ""}`;
+  elements.startButton.textContent = error && !captureActive
+    ? "重新尝试"
+    : captureActive
+      ? (local ? "停止本地字幕" : "停止实时字幕")
+      : (local ? "开启本地精准字幕" : "开启实时字幕");
   elements.startButton.classList.toggle("active", captureActive);
+  renderMediaStatus(view);
+  return view;
+}
+
+function describeMediaState(state) {
+  const status = String(state?.status || "idle");
+  const issueKind = String(state?.issueKind || "");
+  const issueCode = String(state?.issueCode || "");
+  const detail = String(state?.stageDetail || "").trim();
+  if (status === "error" || issueKind === "error") {
+    const title = String(state?.issueTitle || "").trim() || mediaIssueTitle(issueCode);
+    return { kind: "error", title, detail: detail || "请重新尝试；如果仍然失败，可以复制诊断日志。", emptyText: detail || title };
+  }
+  if (state?.captureNeedsGesture || issueKind === "action") {
+    const title = String(state?.issueTitle || "").trim()
+      || (issueCode === "needs_tab_audio" ? "点一下 Koe 继续" : "需要你的操作");
+    const actionDetail = detail || "请点浏览器工具栏里的 Koe，允许读取这个标签页的声音。";
+    return { kind: "action", title, detail: actionDetail, emptyText: actionDetail };
+  }
+  if (status === "live") {
+    const otherTab = state?.tabId && activeTab?.id && state.tabId !== activeTab.id;
+    return {
+      kind: "live",
+      title: otherTab ? "字幕正在其他标签页运行" : "字幕已开启",
+      detail: otherTab ? "切回播放视频的标签页即可看到页面字幕。" : "正在等待下一句可识别的语音。",
+      emptyText: "正在等待识别结果…视频有声音时，字幕会出现在这里"
+    };
+  }
+  if (status !== "idle" || state?.captureActive) {
+    return {
+      kind: "starting",
+      title: "正在准备字幕",
+      detail: detail || "正在读取当前视频…",
+      emptyText: detail || "正在读取当前视频…"
+    };
+  }
+  return {
+    kind: "idle",
+    title: "字幕已关闭",
+    detail: detail || "点上方按钮后才会开始处理当前视频",
+    emptyText: detail || "点击上方开启按钮，字幕会持续滚动显示在这里"
+  };
+}
+
+function mediaIssueTitle(issueCode) {
+  return ({
+    protected_media: "此视频受保护，暂不支持",
+    unsupported_audio: "暂不支持此音轨",
+    unsupported_media: "暂不支持此视频",
+    media_unreadable: "暂时无法读取这个视频",
+    helper_unavailable: "Koe 本地服务没有连接",
+    helper_incompatible: "Koe 需要更新",
+    capture_failed: "字幕启动失败"
+  })[issueCode] || "字幕暂不可用";
+}
+
+function renderMediaStatus(view) {
+  if (!view) return;
+  if (elements.mediaStatus) elements.mediaStatus.dataset.kind = view.kind;
+  if (elements.mediaStatusTitle) elements.mediaStatusTitle.textContent = view.title;
+  if (elements.mediaStatusDetail) elements.mediaStatusDetail.textContent = view.detail;
+}
+
+function syncFeedPlaceholder(view) {
+  if (!view || draftEl) return;
+  const children = [...elements.feed.children];
+  const isPlaceholder = (row) => /(^|\s)placeholder(\s|$)/.test(String(row.className || ""));
+  if (children.some((row) => !isPlaceholder(row))) return;
+  const text = String(view.emptyText || view.detail || view.title || "").trim();
+  if (!text) return;
+  const placeholder = children.find(isPlaceholder);
+  if (!placeholder) {
+    appendRow(text, "placeholder");
+    return;
+  }
+  placeholder.dataset.text = text;
+  const textElement = placeholder.querySelector(".text");
+  if (textElement) textElement.textContent = text;
 }
 
 // ===== 字幕流：历史行累积 + 草稿行实时刷新（Mimi 模型）=====

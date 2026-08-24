@@ -1,10 +1,9 @@
-// Koe 弹窗：点图标直接开启页面字幕。侧边栏退回为可选的记录与设置面板，
-// 只有用户明确点「打开字幕记录与设置」时才占用屏幕空间。
+// Koe 弹窗：打开后只显示当前状态，由用户明确点击主按钮控制字幕开关。
+// 侧边栏仍是可选的记录与设置面板，只有明确点击时才占用屏幕空间。
 
 let activeTab;
 let lastWindowId = null;   // 最近一次拿到的窗口 id，供"点击时同步开面板"使用
 let currentState = { status: "idle" };
-let autoStartTried = false;
 
 const elements = {
   version: document.querySelector("#version"),
@@ -16,7 +15,8 @@ const elements = {
 
 document.addEventListener("DOMContentLoaded", init);
 elements.startButton.addEventListener("click", () => {
-  if (currentState.captureActive) void stop();
+  const view = describeState(currentState);
+  if (currentState.captureActive && view.kind !== "action" && view.kind !== "error") void stop();
   else void startRecommended();
 });
 elements.openPanel.addEventListener("click", () => {
@@ -30,8 +30,6 @@ async function init() {
   if (elements.version) elements.version.textContent = `v${chrome.runtime.getManifest().version}`;
   await refreshActiveTab();
   await refreshState();
-  if (currentState.captureActive || currentState.status === "live") return;
-  void tryAutoStart();
 }
 
 async function openPanelAndClose() {
@@ -77,17 +75,7 @@ async function refreshState() {
   render();
 }
 
-// 点图标 = 全自动：自动选目标（本页在播用本页，否则跟随正在发声的标签页），
-// 自动授权、自动开启。只有实在没有声音来源时才让用户手动点。
-async function tryAutoStart() {
-  if (autoStartTried) return;
-  autoStartTried = true;
-  if (!activeTab?.id) return;
-  if (currentState.captureActive || currentState.status === "live") return;
-  await startRecommended();
-}
-
-// 先问后台“该捕获谁”，再开：当前页没在播时自动跟随正在发声的标签页
+// 用户点开启后再问后台“该捕获谁”：当前页没在播时跟随正在发声的标签页。
 async function startRecommended() {
   if (!activeTab?.id) {
     setStatus("没有定位到标签页，请切到视频标签页再试", true);
@@ -113,8 +101,16 @@ async function start(targetIdOverride) {
     setStatus("没有定位到标签页，请切到视频标签页再试", true);
     return;
   }
+  currentState = {
+    ...currentState,
+    status: "starting",
+    captureNeedsGesture: false,
+    issueKind: "",
+    issueCode: "",
+    stageDetail: "正在连接当前视频…"
+  };
+  render();
   setBusy(true);
-  setStatus("正在开启…");
   try {
     // 本地模式会优先直接读取 HLS；遇到 DASH / blob / 普通 MP4 时才使用这份
     // 手势授权好的标签页音频流做本地实时回退。提前取到它不会上传或启动采集。
@@ -125,7 +121,10 @@ async function start(targetIdOverride) {
       streamId,
       pageUrl: tab.url
     });
-    if (!response?.ok) throw new Error(response?.error || "无法启动实时字幕。");
+    if (!response?.ok) {
+      if (response?.state) currentState = response.state;
+      throw new Error(response?.error || "无法启动实时字幕。");
+    }
     currentState = response.state || { status: "live" };
     render();
     // 页面字幕已接管显示，保持视频可视区域不被侧边栏挤压。
@@ -133,11 +132,28 @@ async function start(targetIdOverride) {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (/gesture|invocation|permission|user gesture/i.test(message)) {
-      setStatus("点上面的「开启实时字幕」按钮（这一步需要浏览器授权）", true);
+      currentState = {
+        ...currentState,
+        status: "waiting-media",
+        captureNeedsGesture: true,
+        issueKind: "action",
+        issueCode: "needs_tab_audio",
+        stageDetail: "点一下「继续开启字幕」，允许 Koe 读取这个标签页的声音。"
+      };
     } else {
-      setStatus(`失败：${message}`, true);
+      currentState = {
+        ...currentState,
+        status: "error",
+        captureNeedsGesture: false,
+        issueKind: "error",
+        issueCode: currentState.issueCode || "capture_failed",
+        stageDetail: currentState.stageDetail && currentState.issueKind === "error"
+          ? currentState.stageDetail
+          : message
+      };
     }
     setBusy(false);
+    render();
   }
 }
 
@@ -166,9 +182,10 @@ function setBusy(busy) {
   elements.startButton.disabled = Boolean(busy);
 }
 
-function setStatus(text, isError = false) {
+function setStatus(text, isError = false, isAction = false) {
   elements.statusText.textContent = text;
   elements.statusText.classList.toggle("error", isError);
+  elements.statusText.classList.toggle("action", isAction);
 }
 
 function render() {
@@ -176,17 +193,68 @@ function render() {
   const live = status === "live";
   const captureActive = Boolean(currentState.captureActive);
   const local = currentState.engine === "local";
-  const error = status === "error";
-  const gesture = Boolean(currentState.captureNeedsGesture);
-  const starting = !live && !error && !gesture && status !== "idle";
-  elements.statusDot.className = `dot ${error ? "bad" : live ? "ok" : gesture || starting ? "busy" : ""}`;
-  elements.startButton.textContent = captureActive
-    ? (local ? "停止本地字幕" : "停止实时字幕")
-    : (local ? "开启本地精准字幕" : "开启实时字幕");
+  const view = describeState(currentState);
+  const error = view.kind === "error";
+  const action = view.kind === "action";
+  const starting = view.kind === "starting";
+  elements.statusDot.className = `dot ${error ? "bad" : live ? "ok" : action || starting ? "busy" : ""}`;
+  elements.startButton.textContent = error
+    ? "重新尝试"
+    : action
+      ? "继续开启字幕"
+      : captureActive
+        ? (local ? "停止本地字幕" : "停止实时字幕")
+        : starting
+          ? "正在开启…"
+          : (local ? "开启本地精准字幕" : "开启实时字幕");
   elements.startButton.classList.toggle("active", captureActive);
-  if (live) {
-    // 字幕可能在别的标签页跑着：状态跟捕获会话走，别让用户以为没开
-    const otherTab = currentState.tabId && activeTab?.id && currentState.tabId !== activeTab.id;
-    setStatus(otherTab ? "字幕运行于其他标签页 · 停止按钮可关闭" : local ? "本地精准字幕已开启 · 音视频不会上传" : "字幕已开启 · 显示在视频画面上");
+  elements.startButton.classList.toggle("retry", error);
+  elements.startButton.classList.toggle("needs-action", action);
+  setStatus(view.text, error, action);
+}
+
+function describeState(state) {
+  const status = String(state?.status || "idle");
+  const issueKind = String(state?.issueKind || "");
+  const issueCode = String(state?.issueCode || "");
+  const detail = String(state?.stageDetail || "").trim();
+  if (status === "error" || issueKind === "error") {
+    const title = issueTitle(issueCode);
+    return { kind: "error", title, text: detail ? `${title} · ${detail}` : title };
   }
+  if (state?.captureNeedsGesture || issueKind === "action") {
+    const title = issueCode === "needs_tab_audio" ? "点一下 Koe 继续" : "需要你的操作";
+    return {
+      kind: "action",
+      title,
+      text: detail ? `${title} · ${detail}` : `${title}，允许读取当前标签页的声音`
+    };
+  }
+  if (status === "live") {
+    const otherTab = state?.tabId && activeTab?.id && state.tabId !== activeTab.id;
+    const local = state?.engine === "local";
+    return {
+      kind: "live",
+      title: "字幕已开启",
+      text: otherTab
+        ? "字幕运行于其他标签页 · 停止按钮可关闭"
+        : local ? "本地精准字幕已开启 · 音视频不会上传" : "字幕已开启 · 显示在视频画面上"
+    };
+  }
+  if (status !== "idle" || state?.captureActive) {
+    return { kind: "starting", title: "正在准备字幕", text: detail || "正在读取当前视频…" };
+  }
+  return { kind: "idle", title: "字幕已关闭", text: detail || "字幕已关闭 · 点上方按钮开启" };
+}
+
+function issueTitle(issueCode) {
+  return ({
+    protected_media: "此视频受保护，暂不支持",
+    unsupported_audio: "暂不支持此音轨",
+    unsupported_media: "暂不支持此视频",
+    media_unreadable: "暂时无法读取这个视频",
+    helper_unavailable: "Koe 本地服务没有连接",
+    helper_incompatible: "Koe 需要更新",
+    capture_failed: "字幕启动失败"
+  })[issueCode] || "字幕暂不可用";
 }

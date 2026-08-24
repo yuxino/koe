@@ -22,6 +22,11 @@
   let overlayHost = null;
   let overlayOriginal = null;
   let overlayTranslation = null;
+  let overlayNotice = null;
+  let overlayNoticeTitle = null;
+  let overlayNoticeDetail = null;
+  let noticeJobId = "";
+  let noticeMediaEpoch = 0;
   let overlayEnabled = true;
   let overlaySize = "medium";
   let hideOriginal = false;
@@ -185,17 +190,23 @@
 
   function handleLiveMessage(message) {
     if (!message || typeof message.type !== "string") return;
+    if (message.type === "KOE_MEDIA_STATUS") {
+      handleMediaStatus(message);
+      return;
+    }
     if (message.type === "OFFLINE_SESSION") {
       const nextJobId = String(message.jobId || "");
       const nextEpoch = Number(message.mediaEpoch) || 0;
       if (activeSession?.mode === "offline"
           && activeSession.jobId === nextJobId
           && nextEpoch < activeSession.mediaEpoch) return;
-      const replacingJob = !activeSession || activeSession.jobId !== nextJobId || activeSession.mode !== "offline";
+      const previousSession = activeSession;
+      const replacingJob = !previousSession || previousSession.jobId !== nextJobId || previousSession.mode !== "offline";
+      const replacingTimeline = replacingJob || previousSession.mediaEpoch !== nextEpoch;
       const translateChanged = activeSession?.mode === "offline"
         && activeSession.jobId === nextJobId
         && activeSession.translate !== (message.translate !== false);
-      if (!activeSession || activeSession.jobId !== nextJobId || activeSession.mediaEpoch !== nextEpoch || activeSession.mode !== "offline") {
+      if (replacingTimeline) {
         clearOverlayText();
         resetOfflineCues();
       }
@@ -205,6 +216,12 @@
         translate: message.translate !== false,
         mode: "offline"
       };
+      const noticeAlreadyTargetsNextTimeline = noticeJobId === nextJobId
+        && noticeMediaEpoch === nextEpoch
+        && (!previousSession
+          || previousSession.jobId !== nextJobId
+          || previousSession.mediaEpoch !== nextEpoch);
+      if (replacingTimeline && !noticeAlreadyTargetsNextTimeline) clearMediaNotice();
       awaitingMediaReset = false;
       if (replacingJob) {
         mediaDiscontinuityId = Math.max(0, Number(message.discontinuityId) || 0);
@@ -244,6 +261,7 @@
     }
     if (message.type === "OFFLINE_CUES") {
       if (!acceptOfflineMessage(message)) return;
+      clearMediaNotice();
       mergeOfflineCues(message.cues, message.revision);
       renderOfflineCue();
       return;
@@ -256,12 +274,23 @@
       clearOverlayText();
       activeSession = null;
       awaitingMediaReset = false;
+      if (message.type === "OFFLINE_STOP") clearMediaNotice();
       return;
     }
     if (message.type === "LIVE_SESSION") {
       const nextJobId = String(message.jobId || "");
       const nextEpoch = Number(message.mediaEpoch) || 0;
-      if (!activeSession || activeSession.jobId !== nextJobId || activeSession.mediaEpoch !== nextEpoch) {
+      const previousSession = activeSession;
+      // 同一实时 job 的时间线只能向前。旧启动/重连消息可能在 tab 交接后
+      // 迟到；若允许它把 epoch 降回去，随后对应的旧 STOP 就会误清新会话。
+      if (previousSession?.mode === "live"
+          && previousSession.jobId === nextJobId
+          && nextEpoch < previousSession.mediaEpoch) return;
+      const replacingTimeline = !previousSession
+        || previousSession.mode !== "live"
+        || previousSession.jobId !== nextJobId
+        || previousSession.mediaEpoch !== nextEpoch;
+      if (replacingTimeline) {
         clearOverlayText();
       }
       activeSession = {
@@ -270,6 +299,12 @@
         translate: message.translate !== false,
         mode: "live"
       };
+      const noticeAlreadyTargetsNextTimeline = noticeJobId === nextJobId
+        && noticeMediaEpoch === nextEpoch
+        && (!previousSession
+          || previousSession.jobId !== nextJobId
+          || previousSession.mediaEpoch !== nextEpoch);
+      if (replacingTimeline && !noticeAlreadyTargetsNextTimeline) clearMediaNotice();
       stopOfflineClock();
       resetOfflineCues();
       awaitingMediaReset = false;
@@ -278,16 +313,27 @@
       return;
     }
     if (message.type === "LIVE_STOP") {
+      if (activeSession && message.mediaEpoch !== undefined
+          && (Number(message.mediaEpoch) || 0) < activeSession.mediaEpoch) return;
+      if (!activeSession && noticeJobId && message.jobId
+          && String(message.jobId) !== noticeJobId) return;
+      if (!activeSession && noticeJobId && message.mediaEpoch !== undefined
+          && (Number(message.mediaEpoch) || 0) < noticeMediaEpoch) return;
       if (!activeSession || !message.jobId || message.jobId === activeSession.jobId) {
         clearOverlayText();
         activeSession = null;
         awaitingMediaReset = false;
+        // Helper 的终止错误会先把字幕会话停掉，再留下一个可读的失败原因。
+        // 这类 LIVE_STOP 不能像用户主动停止一样顺手抹掉终止提示。
+        if (!message.error && !message.issueCode) clearMediaNotice();
       }
       return;
     }
     if (message.type === "LIVE_RESET") {
       if (!activeSession || message.jobId !== activeSession.jobId) return;
-      activeSession.mediaEpoch = Number(message.mediaEpoch) || 0;
+      const nextEpoch = Number(message.mediaEpoch) || 0;
+      if (nextEpoch <= activeSession.mediaEpoch) return;
+      activeSession.mediaEpoch = nextEpoch;
       clearOverlayText();
       awaitingMediaReset = false;
       return;
@@ -549,6 +595,7 @@
     mediaResourceFloor = Math.max(0, performanceClock() - 3_000);
     inlineHlsDefinitions = null;
     inlineHlsScannedAt = 0;
+    clearMediaNotice();
     if (!activeSession) return;
     awaitingMediaReset = true;
     clearOverlayText({ resetTimeline: false });
@@ -653,6 +700,38 @@
           font-size: calc(clamp(20px, 2.1vw, 32px) * var(--koe-scale));
           font-weight: 620;
         }
+        .notice {
+          position: fixed;
+          z-index: 2147483647;
+          display: none;
+          flex-direction: column;
+          gap: 3px;
+          width: max-content;
+          max-width: min(360px, calc(100vw - 32px));
+          padding: 10px 12px;
+          box-sizing: border-box;
+          border: 1px solid rgba(255,255,255,.2);
+          border-radius: 9px;
+          background: rgba(12,12,12,.94);
+          color: #fff;
+          pointer-events: none;
+          font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+          text-align: left;
+        }
+        .notice.visible { display: flex; }
+        .notice-title {
+          font-size: 13px;
+          line-height: 1.35;
+          font-weight: 650;
+          letter-spacing: .01em;
+        }
+        .notice-detail {
+          color: rgba(255,255,255,.68);
+          font-size: 11px;
+          line-height: 1.45;
+          overflow-wrap: anywhere;
+        }
+        .notice-detail:empty { display: none; }
         @media (max-width: 540px) {
           .stage { padding-inline: 3%; }
           .stack { max-width: 96%; }
@@ -666,9 +745,16 @@
           <div class="line original"></div>
           <div class="line translation"></div>
         </div>
+      </div>
+      <div class="notice" role="status" aria-live="polite" aria-atomic="true">
+        <div class="notice-title"></div>
+        <div class="notice-detail"></div>
       </div>`;
     overlayOriginal = shadow.querySelector(".original");
     overlayTranslation = shadow.querySelector(".translation");
+    overlayNotice = shadow.querySelector(".notice");
+    overlayNoticeTitle = shadow.querySelector(".notice-title");
+    overlayNoticeDetail = shadow.querySelector(".notice-detail");
     mountOverlayForFullscreen();
     positionOverlay();
   }
@@ -710,12 +796,60 @@
       stage.style.left = "0px";
       stage.style.width = "100vw";
       stage.style.bottom = "8vh";
+      if (overlayNotice) {
+        overlayNotice.style.top = "16px";
+        overlayNotice.style.right = "16px";
+      }
       return;
     }
     const viewportHeight = document.documentElement.clientHeight || window.innerHeight || rect.bottom;
+    const viewportWidth = document.documentElement.clientWidth || window.innerWidth || rect.right;
     stage.style.left = `${Math.max(0, rect.left)}px`;
     stage.style.width = `${Math.max(1, Math.min(rect.width, document.documentElement.clientWidth || rect.width))}px`;
     stage.style.bottom = `${Math.max(18, viewportHeight - rect.bottom + Math.min(76, rect.height * 0.09))}px`;
+    if (overlayNotice) {
+      const inset = Math.max(10, Math.min(18, rect.width * 0.025, rect.height * 0.04));
+      overlayNotice.style.top = `${Math.max(10, rect.top + inset)}px`;
+      overlayNotice.style.right = `${Math.max(10, viewportWidth - rect.right + inset)}px`;
+    }
+  }
+
+  function handleMediaStatus(message) {
+    if (!acceptMediaStatus(message)) return;
+    if (message.kind === "clear") {
+      clearMediaNotice();
+      return;
+    }
+    if (message.kind !== "action" && message.kind !== "error") return;
+    ensureOverlay();
+    noticeJobId = String(message.jobId || "");
+    noticeMediaEpoch = Math.max(0, Number(message.mediaEpoch) || 0);
+    if (overlayNoticeTitle) overlayNoticeTitle.textContent = String(message.title || "字幕暂不可用").trim();
+    if (overlayNoticeDetail) overlayNoticeDetail.textContent = String(message.detail || "").trim();
+    overlayNotice?.classList.toggle("error", message.kind === "error");
+    overlayNotice?.classList.add("visible");
+    positionOverlay();
+  }
+
+  function acceptMediaStatus(message) {
+    const jobId = String(message.jobId || "");
+    const hasEpoch = message.mediaEpoch !== undefined && message.mediaEpoch !== null;
+    const epoch = Math.max(0, Number(message.mediaEpoch) || 0);
+    if (activeSession) {
+      if (jobId && jobId !== activeSession.jobId) return false;
+      if (hasEpoch && epoch < activeSession.mediaEpoch) return false;
+    }
+    if (noticeJobId && jobId && jobId === noticeJobId && hasEpoch && epoch < noticeMediaEpoch) return false;
+    return true;
+  }
+
+  function clearMediaNotice() {
+    noticeJobId = "";
+    noticeMediaEpoch = 0;
+    if (overlayNoticeTitle) overlayNoticeTitle.textContent = "";
+    if (overlayNoticeDetail) overlayNoticeDetail.textContent = "";
+    overlayNotice?.classList.remove("visible");
+    overlayNotice?.classList.remove("error");
   }
 
   function showOverlay(duration) {

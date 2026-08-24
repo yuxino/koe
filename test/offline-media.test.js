@@ -388,6 +388,24 @@ function makeContext() {
   check(refillRevisions.length === 2 && refillRevisions[0] === 4 && refillRevisions[1] === 5,
     "helper revisions are rebased monotonically across same-epoch refill batches");
 
+  run(`tabStates.set(23, {
+    tabId: 23, frameId: 0, jobId: "offline-23", mediaEpoch: 1,
+    captureStarted: true, status: "starting", engine: "local", sessionMode: "offline",
+    source: "tab", sourceUrl: "blob:https://video.example/dash", pageUrl: "https://video.example/watch",
+    translate: false
+  }); captureTabId = 23; mediaCandidatesByTab.delete(23);`);
+  const firstUnsupportedProbe = await run(`receiveMediaContext({
+    type: "MEDIA_CONTEXT", jobId: "offline-23", mediaEpoch: 1,
+    currentSrc: "blob:https://video.example/dash", resourceUrls: [],
+    currentTimeMs: 1_000, durationMs: 60_000, playbackRate: 1
+  }, { tab: { id: 23 }, frameId: 0 })`);
+  check(firstUnsupportedProbe.pending === true
+      && run(`Boolean(tabStates.get(23).offlineFallbackTimer)`) === true,
+    "the first HLS-less report schedules a prompt probe without waiting for the 3-second page heartbeat");
+  run(`resetOfflineBatchState(tabStates.get(23))`);
+  check(run(`tabStates.get(23).offlineFallbackTimer`) === 0,
+    "resetting a media timeline cancels its pending fallback probe");
+
   run(`tabStates.set(22, {
     tabId: 22, frameId: 0, jobId: "offline-22", mediaEpoch: 1,
     captureStarted: true, status: "starting", engine: "local", sessionMode: "offline",
@@ -404,6 +422,24 @@ function makeContext() {
       && run(`tabStates.get(22).captureNeedsGesture`) === true
       && run(`tabStates.get(22).captureStarted`) === true,
     "an HLS-less player waits for one browser gesture and keeps the local session recoverable");
+  const needsAudioStatus = h.contentMessages
+    .find((entry) => entry.message.type === "KOE_MEDIA_STATUS" && entry.message.jobId === "offline-22")?.message;
+  check(needsAudioStatus?.kind === "action"
+      && needsAudioStatus?.issueCode === "needs_tab_audio"
+      && /点/.test(needsAudioStatus?.title || ""),
+    "an HLS-less player explains the required tab-audio action over the video");
+
+  await run(`handleNativeMessage({
+    type: "error", jobId: "offline-22", mediaEpoch: 1,
+    issueCode: "protected_media", error: "这个 HLS 视频使用了暂不支持的分片加密。"
+  })`);
+  const protectedStatus = h.contentMessages
+    .find((entry) => entry.message.type === "KOE_MEDIA_STATUS"
+      && entry.message.jobId === "offline-22" && entry.message.kind === "error")?.message;
+  check(run(`tabStates.get(22).issueCode`) === "protected_media"
+      && protectedStatus?.issueCode === "protected_media"
+      && /暂/.test(protectedStatus?.title || ""),
+    "a native protected-media error remains classified and visible on the page");
 
   h.runtimeMessages.length = 0;
   h.events.length = 0;
@@ -563,18 +599,30 @@ function makeContext() {
       && !h.contentMessages.some((entry) => entry.message.type === "LIVE_SESSION"),
     "stopping during live preparation prevents a late offscreen capture start");
 
-  const auto = makeContext();
-  const autoRun = (source) => vm.runInContext(source, auto.ctx);
-  autoRun(`discoverVideoSource = async () => ({
+  const idle = makeContext();
+  const idleRun = (source) => vm.runInContext(source, idle.ctx);
+  idleRun(`discoverVideoSource = async () => ({
     hasVideo: true, playing: true, muted: false, frameId: 0,
     sourceUrl: "https://video.example/playing.m3u8", pageUrl: "https://site.example/watch"
   })`);
-  await autoRun(`ensureLiveCaptions({ tabId: 10, pageUrl: "https://site.example/watch" })`);
-  check(autoRun(`tabStates.get(10)?.captureStarted`) === true
-      && auto.nativeMessages.some((message) => message.type === "hello"),
-    "a playing local video starts subtitles without opening the popup");
-  check(autoRun(`tabStates.get(10)?.translate`) === true,
-    "an unknown native capability never disables the saved translation preference during cold start");
+  await idleRun(`ensureLiveCaptions({ tabId: 10, pageUrl: "https://site.example/watch" })`);
+  await idleRun(`videoChanged({ pageUrl: "https://site.example/watch" }, {
+    tab: { id: 10, url: "https://site.example/watch" }
+  })`);
+  check(idleRun(`tabStates.has(10)`) === false
+      && idleRun(`captureTabId`) === null
+      && !idle.nativeMessages.some((message) => message.type === "hello"),
+    "page-ready and video-change activity keep a fresh local session off by default");
+
+  const manualResponse = await idleRun(`startCaptureForTab({
+    tabId: 10, streamId: "", pageUrl: "https://site.example/watch"
+  })`);
+  check(manualResponse?.ok === true
+      && idleRun(`tabStates.get(10)?.captureStarted`) === true
+      && idle.nativeMessages.some((message) => message.type === "hello"),
+    "an explicit Koe start turns the local session on");
+  check(idleRun(`tabStates.get(10)?.translate`) === true,
+    "an unknown native capability never disables the saved translation preference during manual start");
 
   const paused = makeContext();
   const pausedRun = (source) => vm.runInContext(source, paused.ctx);
@@ -584,7 +632,7 @@ function makeContext() {
   })`);
   await pausedRun(`ensureLiveCaptions({ tabId: 20, pageUrl: "https://site.example/watch" })`);
   check(pausedRun(`tabStates.has(20)`) === false && paused.nativeMessages.length === 0,
-    "a paused local video does not auto-start in the background");
+    "a paused local video also remains off without a manual start");
 
   const stopped = makeContext();
   const stoppedRun = (source) => vm.runInContext(source, stopped.ctx);
@@ -601,11 +649,30 @@ function makeContext() {
   check(stoppedRun(`tabStates.get(30).captureStarted`) === false && stopped.nativeMessages.length === 0,
     "page activity still cannot restart a local session after the user stops it");
   await stoppedRun(`ensureLiveCaptions({ tabId: 30, pageUrl: "https://site.example/watch-next" })`);
+  check(stoppedRun(`tabStates.get(30).captureStarted`) === false
+      && stoppedRun(`tabStates.get(30).userStopped`) === true
+      && stoppedRun(`tabStates.get(30).jobId`) === "offline-30"
+      && !stopped.nativeMessages.some((message) => message.type === "hello"),
+    "navigating to a new page keeps a manually stopped session off");
+  await stoppedRun(`startCaptureForTab({
+    tabId: 30, streamId: "", pageUrl: "https://site.example/watch-next"
+  })`);
   check(stoppedRun(`tabStates.get(30).captureStarted`) === true
       && stoppedRun(`tabStates.get(30).userStopped`) === false
       && stoppedRun(`tabStates.get(30).jobId`) !== "offline-30"
       && stopped.nativeMessages.some((message) => message.type === "hello"),
-    "playing a new page in the same tab starts a fresh session after a manual stop");
+    "only another explicit start turns a stopped session back on");
+
+  const dormant = makeContext();
+  const dormantRun = (source) => vm.runInContext(source, dormant.ctx);
+  dormantRun(`tabStates.set(35, {
+    tabId: 35, frameId: 0, jobId: "offline-35", mediaEpoch: 0,
+    captureStarted: false, status: "idle", engine: "local", sessionMode: "offline",
+    source: "tab", pageUrl: "https://site.example/watch", translate: false, userStopped: false
+  });`);
+  await dormantRun(`resumeLocalTab(35)`);
+  check(dormantRun(`tabStates.get(35).captureStarted`) === false && dormant.nativeMessages.length === 0,
+    "activating a dormant tab cannot turn its local session on");
 
   const occupied = makeContext();
   const occupiedRun = (source) => vm.runInContext(source, occupied.ctx);
@@ -623,7 +690,7 @@ function makeContext() {
       && occupiedRun(`tabStates.get(40).captureStarted`) === true
       && occupiedRun(`tabStates.has(41)`) === false
       && !occupied.nativeMessages.some((message) => message.type === "cancel"),
-    "an automatic start in another tab cannot steal the active local session");
+    "page activity in another tab cannot create or steal the active local session");
 
   run(`tabStates.set(17, {
     tabId: 17, frameId: 0, jobId: "offline-17", mediaEpoch: 1,

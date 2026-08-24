@@ -117,8 +117,81 @@ function sendCaptureMessage(message, timing = activeTiming) {
   });
 }
 
+function captureSessionIdentity(value = {}) {
+  return {
+    tabId: Number(value.tabId) || 0,
+    jobId: String(value.jobId || ""),
+    mediaEpoch: Number(value.mediaEpoch) || 0
+  };
+}
+
+function hasCaptureSessionIdentity(message) {
+  return Boolean(message)
+    && Object.prototype.hasOwnProperty.call(message, "tabId")
+    && Object.prototype.hasOwnProperty.call(message, "jobId")
+    && Object.prototype.hasOwnProperty.call(message, "mediaEpoch");
+}
+
+function sameCaptureSession(left, right) {
+  return left.tabId === right.tabId
+    && left.jobId === right.jobId
+    && left.mediaEpoch === right.mediaEpoch;
+}
+
+function activeCaptureIntentIdentity() {
+  if (latestCaptureStart && latestCaptureStart.requestId === captureStartRequestId) {
+    return latestCaptureStart.identity;
+  }
+  return captureSessionIdentity({
+    tabId: captureTabId,
+    jobId: captureJobId,
+    mediaEpoch: captureMediaEpoch
+  });
+}
+
+function currentCaptureStatus() {
+  const pendingStart = Boolean(latestCaptureStart)
+    && latestCaptureStart.requestId === captureStartRequestId;
+  const pendingMessage = pendingStart ? latestCaptureStart.message : null;
+  const identity = pendingStart
+    ? latestCaptureStart.identity
+    : activeCaptureIntentIdentity();
+  const liveStream = Boolean(stream)
+    && (typeof stream.getTracks !== "function"
+      || stream.getTracks().some((track) => track?.readyState !== "ended"));
+  return {
+    ok: true,
+    active: liveStream || pendingStart,
+    ...identity,
+    engine: pendingMessage
+      ? (["webspeech", "local"].includes(pendingMessage.engine) ? pendingMessage.engine : "dashscope")
+      : captureEngine,
+    source: pendingMessage ? (pendingMessage.source === "mic" ? "mic" : "tab") : captureSource,
+    audioPositionMs: audioPositionMs()
+  };
+}
+
+function isCurrentCaptureStop(message) {
+  if (message?.force === true) return true;
+  if (!hasCaptureSessionIdentity(message)) return false;
+  return sameCaptureSession(captureSessionIdentity(message), activeCaptureIntentIdentity());
+}
+
+function isCurrentCaptureReset(message) {
+  if (!hasCaptureSessionIdentity(message)) return false;
+  const requested = captureSessionIdentity(message);
+  const current = activeCaptureIntentIdentity();
+  return requested.tabId === current.tabId
+    && requested.jobId === current.jobId
+    && requested.mediaEpoch >= current.mediaEpoch;
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message.type !== "string") return false;
+  if (message.type === "CAPTURE_STATUS") {
+    sendResponse(currentCaptureStatus());
+    return false;
+  }
   if (message.type === "CAPTURE_START") {
     startCapture(message).then(sendResponse).catch((error) => {
       sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -126,16 +199,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }  
   if (message.type === "CAPTURE_STOP") {
+    if (!isCurrentCaptureStop(message)) {
+      sendResponse({ ok: true, ignored: true });
+      return false;
+    }
     // 用户主动停止 = 彻底释放：停识别 + 释放音频流 + 停监听器。
     // 之前为了"再开不冲突"只停识别、保留流，导致点停止后标签页仍显示在捕获、
     // 声音仍走 Koe 通道，感觉"关不掉"。同类软件（Mimi/YouTube 实时字幕）
     // 停止即彻底释放。重新开启时 popup 点击会拿新的流，不受影响。
-    stopCapture().then(() => sendResponse({ ok: true })).catch((error) => {
+    stopCaptureAndFenceStarts().then(() => sendResponse({ ok: true })).catch((error) => {
       sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
     });
     return true;
   }
   if (message.type === "CAPTURE_RESET") {
+    if (!isCurrentCaptureReset(message)) {
+      sendResponse({ ok: true, ignored: true, audioPositionMs: audioPositionMs() });
+      return false;
+    }
     captureTranslate = Boolean(message.translate);
     if (Number.isFinite(Number(message.mediaEpoch))) captureMediaEpoch = Number(message.mediaEpoch);
     if (message.source) captureSource = message.source === "mic" ? "mic" : "tab";
@@ -158,16 +239,67 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-// 并发启动合并：弹窗自动开启 + 按钮点击可能同时到达，只允许一次启动在跑，
-// 避免双识别会话产生重复字幕。
-let startCapturePromise = null;
+// 同一会话的并发开启可以合并；切换标签页或媒体时则串行交接，并且只执行最新请求。
+// getUserMedia 本身不能可靠中止，所以旧请求拿到流后会先释放，再启动最新请求。
+let captureStartQueue = Promise.resolve();
+let latestCaptureStart = null;
+let captureStartRequestId = 0;
 
-async function startCapture(message) {
-  if (startCapturePromise) return startCapturePromise;
-  startCapturePromise = runStartCapture(message).finally(() => {
-    startCapturePromise = null;
+function sameCaptureStartRequest(left, right) {
+  return sameCaptureSession(left.identity, right.identity)
+    && String(left.message.streamId || "") === String(right.message.streamId || "")
+    && (left.message.source === "mic" ? "mic" : "tab") === (right.message.source === "mic" ? "mic" : "tab")
+    && (["webspeech", "local"].includes(left.message.engine) ? left.message.engine : "dashscope")
+      === (["webspeech", "local"].includes(right.message.engine) ? right.message.engine : "dashscope")
+    && Boolean(left.message.translate) === Boolean(right.message.translate)
+    && String(left.message.apiKey || "").trim() === String(right.message.apiKey || "").trim();
+}
+
+function invalidatePendingCaptureStarts() {
+  captureStartRequestId += 1;
+  latestCaptureStart = null;
+  captureOperationId += 1;
+}
+
+function stopCaptureAndFenceStarts() {
+  // STOP 必须立即作废仍在等待 getUserMedia 的旧启动；同时把完整清理加入
+  // 启动队列屏障，确保随后到达的 START(B) 不会被 STOP(A) 的迟到清理释放。
+  const pendingStart = captureStartQueue.catch(() => undefined);
+  invalidatePendingCaptureStarts();
+  const stoppingPromise = stopCapture({ cancelPendingStarts: false });
+  captureStartQueue = Promise.allSettled([pendingStart, stoppingPromise]).then(() => undefined);
+  return stoppingPromise;
+}
+
+function startCapture(message) {
+  const request = {
+    requestId: captureStartRequestId + 1,
+    identity: captureSessionIdentity(message),
+    message: { ...message },
+    promise: null
+  };
+  if (latestCaptureStart
+      && latestCaptureStart.requestId === captureStartRequestId
+      && sameCaptureStartRequest(latestCaptureStart, request)) {
+    return latestCaptureStart.promise;
+  }
+
+  captureStartRequestId = request.requestId;
+  // 让正在等待 getUserMedia / WebSocket 的旧启动在下一检查点退出。
+  captureOperationId += 1;
+  const previous = captureStartQueue;
+  request.promise = previous.catch(() => undefined).then(() => {
+    if (request.requestId !== captureStartRequestId) throw captureCancelledError();
+    return runStartCapture(request.message);
   });
-  return startCapturePromise;
+  latestCaptureStart = request;
+  captureStartQueue = request.promise.catch(() => undefined);
+  request.promise.then(clearLatest, clearLatest);
+  return request.promise;
+
+  function clearLatest() {
+    if (latestCaptureStart === request) latestCaptureStart = null;
+  }
 }
 
 async function runStartCapture({ streamId, translate, apiKey, source, engine, jobId, tabId, mediaEpoch }) {
@@ -234,7 +366,8 @@ async function runStartCapture({ streamId, translate, apiKey, source, engine, jo
     return { ok: true, mode: "direct", audioPositionMs: audioPositionMs() };
   } catch (error) {
     logEvent("start-failed", String(error?.message || error));
-    await stopCapture();
+    // 新标签页可能已经排在队尾；清理本次失败不能取消更新的启动意图。
+    await stopCapture({ cancelPendingStarts: false });
     throw error;
   }
 }
@@ -1551,8 +1684,9 @@ async function stopRecognitionOnly() {
   logEvent("stopped", "recognition-only (stream kept)");
 }
 
-async function stopCapture() {
+async function stopCapture({ cancelPendingStarts = true } = {}) {
   logEvent("stop", "full (stream released)");
+  if (cancelPendingStarts) invalidatePendingCaptureStarts();
   captureOperationId += 1;
   stopping = true;
   captureGeneration += 1;

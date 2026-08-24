@@ -39,6 +39,7 @@ actor SessionCoordinator {
                 await writer.send(.failure(
                     jobId: nil,
                     mediaEpoch: nil,
+                    issueCode: NativeIssueCode.captureFailed.rawValue,
                     message: "Koe Helper 收到的设置不完整。"
                 ))
                 return
@@ -50,6 +51,7 @@ actor SessionCoordinator {
                 await writer.send(.failure(
                     jobId: nil,
                     mediaEpoch: nil,
+                    issueCode: NativeIssueCode.captureFailed.rawValue,
                     message: "Koe Helper 暂时无法保存设置。"
                 ))
             }
@@ -61,6 +63,7 @@ actor SessionCoordinator {
                 await writer.send(.failure(
                     jobId: request.jobId,
                     mediaEpoch: request.mediaEpoch,
+                    issueCode: NativeIssueCode.classify(error).rawValue,
                     message: userFacing(error)
                 ))
             }
@@ -71,6 +74,7 @@ actor SessionCoordinator {
                 await writer.send(.failure(
                     jobId: request.jobId,
                     mediaEpoch: request.mediaEpoch,
+                    issueCode: NativeIssueCode.classify(error).rawValue,
                     message: userFacing(error)
                 ))
             }
@@ -81,6 +85,7 @@ actor SessionCoordinator {
                 await writer.send(.failure(
                     jobId: request.jobId,
                     mediaEpoch: request.mediaEpoch,
+                    issueCode: NativeIssueCode.classify(error).rawValue,
                     message: userFacing(error)
                 ))
             }
@@ -92,6 +97,7 @@ actor SessionCoordinator {
             await writer.send(.failure(
                 jobId: request.jobId,
                 mediaEpoch: request.mediaEpoch,
+                issueCode: NativeIssueCode.helperIncompatible.rawValue,
                 message: "Koe Helper 收到了未知请求。"
             ))
         }
@@ -250,6 +256,7 @@ actor SessionCoordinator {
             await writer.send(.failure(
                 jobId: key.jobId,
                 mediaEpoch: key.mediaEpoch,
+                issueCode: NativeIssueCode.classify(error).rawValue,
                 message: userFacing(error)
             ))
             activeStream = nil
@@ -426,6 +433,7 @@ actor SessionCoordinator {
             await writer.send(.failure(
                 jobId: key.jobId,
                 mediaEpoch: key.mediaEpoch,
+                issueCode: NativeIssueCode.classify(error).rawValue,
                 message: userFacing(error)
             ))
         }

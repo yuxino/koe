@@ -7,9 +7,10 @@ const realSetTimeout = setTimeout;
 
 function makeOffCtx({ tabGetUserMedia }) {
   const sent = [];
+  let runtimeListener = null;
   const ctx = {
     window: { addEventListener: () => undefined, removeEventListener: () => undefined },
-    chrome: { runtime: { onMessage: { addListener: () => undefined }, sendMessage: (m) => { sent.push(JSON.parse(JSON.stringify(m))); return Promise.resolve({ ok: true }); }, getURL: (p) => `chrome-extension://koe/${p}` } },
+    chrome: { runtime: { onMessage: { addListener: (listener) => { runtimeListener = listener; } }, sendMessage: (m) => { sent.push(JSON.parse(JSON.stringify(m))); return Promise.resolve({ ok: true }); }, getURL: (p) => `chrome-extension://koe/${p}` } },
     document: { body: { appendChild: () => undefined }, createElement: () => ({ style: {}, src: "", contentWindow: { postMessage: () => undefined } }) },
     WebSocket: function () {
       const self = this;
@@ -50,7 +51,19 @@ function makeOffCtx({ tabGetUserMedia }) {
   };
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync("offscreen.js", "utf8"), ctx);
-  return { ctx, sent };
+  const dispatch = (message) => new Promise((resolve, reject) => {
+    if (!runtimeListener) {
+      reject(new Error("offscreen runtime listener was not registered"));
+      return;
+    }
+    try {
+      const asyncResponse = runtimeListener(message, {}, resolve);
+      if (asyncResponse !== true) resolve(undefined);
+    } catch (error) {
+      reject(error);
+    }
+  });
+  return { ctx, sent, dispatch };
 }
 
 const fakeTabStream = () => ({ getTracks: () => [{ stop() {} }] });
@@ -206,6 +219,164 @@ captureSource = "tab"; captureEngine = "dashscope"; currentStreamSource = ""; st
     check(run(`stream === null && socket === null && stopping === true`) === true && stopped >= 1,
       "the late media stream is released and no recognizer restarts after stop");
     console.log("T7 stop-during-start race PASS");
+  }
+  {
+    // A 的授权仍在等待时切到 B：B 不能复用 A 的启动 Promise 或迟到的音频流。
+    // B 成为最新目标后，来自 A 的 STOP/RESET 也不能再改变 B 的会话。
+    let releaseFirstMedia;
+    let stoppedA = 0;
+    let stoppedB = 0;
+    const requestedStreamIds = [];
+    const h = makeOffCtx({
+      tabGetUserMedia: (constraints) => {
+        const streamId = String(constraints?.audio?.mandatory?.chromeMediaSourceId || "");
+        requestedStreamIds.push(streamId);
+        if (streamId === "stream-a") {
+          return new Promise((resolve) => {
+            releaseFirstMedia = () => resolve({
+              label: "A",
+              getTracks: () => [{ stop() { stoppedA += 1; } }]
+            });
+          });
+        }
+        return Promise.resolve({
+          label: "B",
+          getTracks: () => [{ stop() { stoppedB += 1; } }]
+        });
+      }
+    });
+    const run = (code) => vm.runInContext(code, h.ctx);
+    const startA = run(`startCapture({
+      streamId: "stream-a", translate: false, apiKey: "k", source: "tab", engine: "dashscope",
+      tabId: 101, jobId: "job-a", mediaEpoch: 3
+    }).then(() => ({ ok: true })).catch((error) => ({ ok: false, error: error.message }))`);
+    await flush();
+    const startB = run(`startCapture({
+      streamId: "stream-b", translate: false, apiKey: "k", source: "tab", engine: "dashscope",
+      tabId: 202, jobId: "job-b", mediaEpoch: 9
+    }).then(() => ({ ok: true })).catch((error) => ({ ok: false, error: error.message }))`);
+    await flush();
+    releaseFirstMedia();
+    const [resultA, resultB] = await Promise.all([startA, startB]);
+    await flush();
+
+    check(resultA.ok === false && resultA.error === "capture_start_cancelled",
+      "superseded A start is cancelled instead of reported as B success");
+    check(resultB.ok === true, `latest B start succeeds (${resultB.error || ""})`);
+    check(requestedStreamIds.join(",") === "stream-a,stream-b",
+      `latest B acquires its own stream (${requestedStreamIds.join(",")})`);
+    check(run(`captureTabId === 202 && captureJobId === "job-b" && captureMediaEpoch === 9
+      && currentStreamId === "stream-b" && stream?.label === "B"`) === true,
+      "B tab/job/epoch/stream identity is active");
+    check(stoppedA >= 1 && stoppedB === 0, "late A media is released without stopping B");
+
+    const staleReset = await h.dispatch({
+      type: "CAPTURE_RESET",
+      tabId: 101,
+      jobId: "job-a",
+      mediaEpoch: 3,
+      translate: true,
+      source: "mic",
+      engine: "local"
+    });
+    await flush();
+    check(staleReset?.ok === true && staleReset?.ignored === true,
+      "late RESET(A) is acknowledged as stale");
+    check(run(`captureTabId === 202 && captureJobId === "job-b" && captureMediaEpoch === 9
+      && captureSource === "tab" && captureEngine === "dashscope" && captureTranslate === false
+      && currentStreamId === "stream-b" && stream?.label === "B"`) === true,
+      "late RESET(A) cannot mutate B");
+
+    const staleStop = await h.dispatch({
+      type: "CAPTURE_STOP",
+      tabId: 101,
+      jobId: "job-a",
+      mediaEpoch: 3
+    });
+    await flush();
+    check(staleStop?.ok === true && staleStop?.ignored === true,
+      "late STOP(A) is acknowledged as stale");
+    check(run(`stream?.label === "B" && currentStreamId === "stream-b" && stopping === false`) === true
+      && stoppedB === 0,
+      "late STOP(A) cannot stop B");
+
+    const forcedStop = await h.dispatch({ type: "CAPTURE_STOP", force: true });
+    await flush();
+    check(forcedStop?.ok === true && run(`stream === null && stopping === true`) === true && stoppedB >= 1,
+      "explicit force stop still releases the active capture");
+    console.log("T8 latest-tab-wins handoff PASS");
+  }
+  {
+    // STOP(A) 已通过身份校验但仍在异步清理时，START(B) 必须等清理完成；
+    // 否则 A 的 releaseStream 会把刚拿到的 B 流一起释放。
+    let stoppedA = 0;
+    let stoppedB = 0;
+    const requestedStreamIds = [];
+    const h = makeOffCtx({
+      tabGetUserMedia: async (constraints) => {
+        const streamId = String(constraints?.audio?.mandatory?.chromeMediaSourceId || "");
+        requestedStreamIds.push(streamId);
+        return {
+          label: streamId === "stream-b" ? "B" : "A",
+          getTracks: () => [{
+            readyState: "live",
+            stop() {
+              if (streamId === "stream-b") stoppedB += 1;
+              else stoppedA += 1;
+            }
+          }]
+        };
+      }
+    });
+    const run = (code) => vm.runInContext(code, h.ctx);
+    const startedA = await h.dispatch({
+      type: "CAPTURE_START", streamId: "stream-a", translate: false, apiKey: "k",
+      source: "tab", engine: "local", tabId: 301, jobId: "job-a", mediaEpoch: 1
+    });
+    check(startedA?.ok === true, "barrier setup starts A");
+
+    run(`
+      globalThis.__releaseStopPcm = null;
+      globalThis.__stopPcmGate = new Promise((resolve) => { globalThis.__releaseStopPcm = resolve; });
+      globalThis.__realStopPcmCapture = stopPcmCapture;
+      stopPcmCapture = async () => {
+        await globalThis.__stopPcmGate;
+        return globalThis.__realStopPcmCapture();
+      };
+    `);
+    const stopA = h.dispatch({
+      type: "CAPTURE_STOP", tabId: 301, jobId: "job-a", mediaEpoch: 1
+    });
+    await flush();
+    const startB = h.dispatch({
+      type: "CAPTURE_START", streamId: "stream-b", translate: false, apiKey: "k",
+      source: "tab", engine: "dashscope", tabId: 302, jobId: "job-b", mediaEpoch: 2
+    });
+    await flush();
+    check(requestedStreamIds.join(",") === "stream-a",
+      "B waits behind the in-progress STOP(A) cleanup barrier");
+    const pendingStatus = await h.dispatch({ type: "CAPTURE_STATUS" });
+    check(pendingStatus?.active === true && pendingStatus.tabId === 302
+        && pendingStatus.jobId === "job-b" && pendingStatus.mediaEpoch === 2
+        && pendingStatus.engine === "dashscope" && pendingStatus.source === "tab",
+      "pending capture status reports B identity and B mode as one coherent snapshot");
+    run(`globalThis.__releaseStopPcm()`);
+    const [stoppedResult, startedB] = await Promise.all([stopA, startB]);
+    await flush();
+    check(stoppedResult?.ok === true && startedB?.ok === true,
+      "STOP(A) and queued START(B) both complete successfully");
+    check(run(`captureTabId === 302 && captureJobId === "job-b" && captureMediaEpoch === 2
+      && stream?.label === "B" && currentStreamId === "stream-b"`) === true,
+      "B remains the active identity after A cleanup finishes");
+    check(stoppedA >= 1 && stoppedB === 0,
+      "A cleanup releases only A and never releases B");
+
+    const status = await h.dispatch({ type: "CAPTURE_STATUS" });
+    check(status?.active === true && status.tabId === 302 && status.jobId === "job-b"
+        && status.mediaEpoch === 2 && status.engine === "dashscope",
+      "capture status reports the authoritative active offscreen identity");
+    await h.dispatch({ type: "CAPTURE_STOP", force: true });
+    console.log("T9 stop-start cleanup barrier PASS");
   }
   console.log(fail === 0 ? "ALL stream-reuse suites PASS" : `FAILURES: ${fail}`);
   process.exit(fail ? 1 : 0);

@@ -14,7 +14,7 @@ The regular live modes remain a pure Manifest V3 extension: they require no vide
 - **In-video captions** — captions sit near the bottom of the main player, with distinct original and Chinese lines, three text sizes, and fullscreen support.
 - **Media-timeline protection** — seeking, switching videos, or reconnecting recognition cannot replay stale captions or translations over the new scene.
 - **Optional progressive local subtitles** — on ego-lite for macOS, the Native Helper runs Whisper `large-v3` on short windows around the playhead, continues preparing the next window, and returns absolute media timestamps. Seeking cancels obsolete work instead of letting old subtitles catch up with the new scene.
-- **Starts when playback starts** — once local accurate mode is selected, playing the main video begins subtitle preparation without opening the extension; a manual stop remains stopped for that video.
+- **Manual by default** — playback, video changes, opening the popup, and saving settings never start processing on their own; Koe only runs after an explicit Start action.
 - **Visible toolbar status** — `··`, `ON`, and `!` on the Koe icon show preparation, running, and attention-required states globally, even after switching tabs.
 - **Optional subtitle history** — the side panel keeps confirmed lines, the current draft, and scroll-back history; recognition corrections replace only the affected row.
 - **Immediate streaming Chinese in live mode** — DashScope drafts and confirmed lines both use incremental `qwen-mt-flash`; the first Chinese chunk appears without a fixed wait, confirmed lines preempt stale drafts, and rolling translation memory improves the first visible result instead of correcting it after the scene has passed.
@@ -22,8 +22,8 @@ The regular live modes remain a pure Manifest V3 extension: they require no vide
 - **Multiple caption modes** — tab audio or microphone × DashScope / Chrome's built-in recognition (no API key).
 - **Recognition-correction handling** — when the server rewrites a line, only the affected row is replaced; duplicates are suppressed at the source.
 - **Low-latency audio path** — AudioWorklet capture and bounded weak-network buffering keep the feed current; short WebSocket interruptions reconnect automatically.
-- **Shortcut** — **Alt+K** (**Option+K** on macOS) starts captions and follows whichever tab is currently audible, including background playback.
-- **Toolbar icon** — opens a minimal controller and starts in-video captions without forcing the side panel open. History and settings remain one explicit click away.
+- **Shortcut** — **Alt+K** (**Option+K** on macOS) opens the Koe controller without changing the caption switch.
+- **Toolbar icon** — opens a minimal controller whose primary button explicitly starts or stops captions. History and settings remain one click away.
 - **Stops for real** — pressing Stop releases the audio stream entirely (no lingering "still listening" state).
 - **History survives tab switches** — the subtitle record is persisted in the background, so switching tabs (each tab has its own side-panel instance) restores the session's history.
 - **Privacy-friendly diagnostics** — copy or clear logs in one click; logs record timing, lengths, and errors, never subtitle text.
@@ -32,7 +32,7 @@ The regular live modes remain a pure Manifest V3 extension: they require no vide
 
 1. Open `chrome://extensions` and enable **Developer mode**.
 2. Choose **Load unpacked** and select this repository.
-3. Local accurate mode starts automatically when the main video begins playing. For other modes, click the Koe toolbar icon to start in-video captions for the current tab (or follow the audible tab). Open “Caption history & settings” only when you need to change the mode or size, or review history.
+3. Koe is off by default. Click the toolbar icon, then press the popup's primary button to start in-video captions for the current tab (or the audible tab). Open “Caption history & settings” only when you need to change the mode or size, or review history.
 4. DashScope modes require a saved DashScope API Key.
 
 ### Optional local subtitles for ego-lite

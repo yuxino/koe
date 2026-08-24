@@ -40,7 +40,7 @@
       "suggested_key": {
         "default": "Alt+K"
       },
-      "description": "Start live subtitles for the current tab"
+      "description": "Open Koe subtitle controls"
     }
   },
   "content_scripts": [

@@ -153,6 +153,84 @@ do {
     check(false, "media-complete status encoding: \(error)")
 }
 
+private enum CoreCheckFailure: Error {
+    case generic
+}
+
+@MainActor
+private func checkIssueCode(
+    _ error: Error,
+    equals expected: String,
+    _ label: String
+) {
+    do {
+        let response = HostResponse.failure(
+            jobId: "offline-issue",
+            mediaEpoch: 4,
+            issueCode: NativeIssueCode.classify(error).rawValue,
+            message: "保留给用户看的中文错误"
+        )
+        let encoded = try JSONEncoder().encode(response)
+        let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        check(object?["issueCode"] as? String == expected, label)
+        check(object?["error"] as? String == "保留给用户看的中文错误",
+              "stable issue codes preserve the localized error detail")
+    } catch {
+        check(false, "\(label): \(error)")
+    }
+}
+
+checkIssueCode(
+    HLSResolverError.unsupportedEncryption,
+    equals: "protected_media",
+    "protected HLS has a stable native issue code"
+)
+checkIssueCode(
+    HLSResolverError.unsupportedAudio,
+    equals: "unsupported_audio",
+    "unsupported HLS audio has a stable native issue code"
+)
+checkIssueCode(
+    HLSResolverError.unsupportedByteRange,
+    equals: "unsupported_media",
+    "unsupported HLS structure has a stable native issue code"
+)
+checkIssueCode(
+    HLSResolverError.invalidResponse,
+    equals: "media_unreadable",
+    "unreadable HLS has a stable native issue code"
+)
+checkIssueCode(
+    RequestValidationError.unsupportedProtocol,
+    equals: "helper_incompatible",
+    "protocol mismatch has a stable native issue code"
+)
+checkIssueCode(
+    RequestValidationError.invalidURL,
+    equals: "media_unreadable",
+    "invalid source URL has a stable native issue code"
+)
+checkIssueCode(
+    PCMStreamError.invalidFormat,
+    equals: "unsupported_audio",
+    "unsupported PCM format has a stable native issue code"
+)
+checkIssueCode(
+    PCMStreamError.invalidChunk,
+    equals: "capture_failed",
+    "invalid PCM capture has a stable native issue code"
+)
+checkIssueCode(
+    URLError(.timedOut),
+    equals: "media_unreadable",
+    "URL failures have a stable native issue code"
+)
+checkIssueCode(
+    CoreCheckFailure.generic,
+    equals: "capture_failed",
+    "generic local processing failures have a stable native issue code"
+)
+
 var languageState = MediaLanguageHintState()
 check(languageState.begin(mediaKey: "media-a") == nil,
       "the first window of a media item detects its language")

@@ -204,6 +204,54 @@ public enum RequestValidationError: LocalizedError, Equatable {
     }
 }
 
+public enum NativeIssueCode: String, Codable, Equatable, Sendable {
+    case protectedMedia = "protected_media"
+    case unsupportedAudio = "unsupported_audio"
+    case unsupportedMedia = "unsupported_media"
+    case mediaUnreadable = "media_unreadable"
+    case helperIncompatible = "helper_incompatible"
+    case captureFailed = "capture_failed"
+
+    public static func classify(_ error: Error) -> NativeIssueCode {
+        if let hlsError = error as? HLSResolverError {
+            switch hlsError {
+            case .unsupportedEncryption:
+                return .protectedMedia
+            case .unsupportedAudio:
+                return .unsupportedAudio
+            case .unsupportedByteRange, .unsupportedMediaChange:
+                return .unsupportedMedia
+            case .invalidResponse, .http, .manifestTooLarge, .emptyPlaylist, .unsafeRedirect:
+                return .mediaUnreadable
+            }
+        }
+        if let validationError = error as? RequestValidationError {
+            switch validationError {
+            case .unsupportedProtocol:
+                return .helperIncompatible
+            case .unsupportedMedia:
+                return .unsupportedMedia
+            case .invalidURL, .unsafeURL:
+                return .mediaUnreadable
+            case .missingField:
+                return .captureFailed
+            }
+        }
+        if let streamError = error as? PCMStreamError {
+            switch streamError {
+            case .invalidFormat:
+                return .unsupportedAudio
+            case .invalidChunk, .chunkTooLarge:
+                return .captureFailed
+            }
+        }
+        if error is URLError {
+            return .mediaUnreadable
+        }
+        return .captureFailed
+    }
+}
+
 public extension HostRequest {
     func validatedStart() throws -> StartRequest {
         guard protocolVersion == koeNativeProtocolVersion else {
@@ -431,6 +479,7 @@ public struct HostResponse: Encodable, Sendable {
     public let mediaComplete: Bool?
     public let cues: [SubtitleCue]?
     public let error: String?
+    public let issueCode: String?
     public let nativeTranslation: Bool?
     public let preferences: KoePreferences?
 
@@ -446,6 +495,7 @@ public struct HostResponse: Encodable, Sendable {
         mediaComplete: Bool? = nil,
         cues: [SubtitleCue]? = nil,
         error: String? = nil,
+        issueCode: String? = nil,
         nativeTranslation: Bool? = nil,
         preferences: KoePreferences? = nil
     ) {
@@ -460,6 +510,7 @@ public struct HostResponse: Encodable, Sendable {
         self.mediaComplete = mediaComplete
         self.cues = cues
         self.error = error
+        self.issueCode = issueCode
         self.nativeTranslation = nativeTranslation
         self.preferences = preferences
     }
@@ -499,8 +550,19 @@ public struct HostResponse: Encodable, Sendable {
         HostResponse(type: "streamCues", jobId: jobId, mediaEpoch: mediaEpoch, revision: revision, cues: cues)
     }
 
-    public static func failure(jobId: String?, mediaEpoch: Int?, message: String) -> HostResponse {
-        HostResponse(type: "error", jobId: jobId, mediaEpoch: mediaEpoch, error: message)
+    public static func failure(
+        jobId: String?,
+        mediaEpoch: Int?,
+        issueCode: String? = nil,
+        message: String
+    ) -> HostResponse {
+        HostResponse(
+            type: "error",
+            jobId: jobId,
+            mediaEpoch: mediaEpoch,
+            error: message,
+            issueCode: issueCode
+        )
     }
 
     public static func preferences(_ value: KoePreferences) -> HostResponse {

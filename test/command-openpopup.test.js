@@ -1,6 +1,6 @@
-// 回归：Alt+K 快捷键 → 打开弹窗（弹窗是可靠手势源，会自动开启字幕）。
+// 回归：Alt+K 快捷键 → 只打开弹窗控制器，不改变默认关闭的字幕开关。
 // Chrome 的 command 事件不是 tabCapture 手势（SO 77213045），
-// 直接 getMediaStreamId 必失败 → 旧实现"按了没反应"。
+// 直接 getMediaStreamId 必失败；用户随后在弹窗主按钮上明确开启。
 const fs = require("fs");
 const vm = require("vm");
 const path = require("path");
@@ -54,7 +54,9 @@ function makeCtx({ openPopupFails = false } = {}) {
     await flush();
     check(h.calls.openPopup === 1, `Alt+K 调用 openPopup（实际 ${h.calls.openPopup}）`);
     check(h.calls.getMediaStreamId === 0, "Alt+K 不再直接 getMediaStreamId（无手势必失败）");
-    console.log("T1 Alt+K 打开弹窗 PASS");
+    check(vm.runInContext(`tabStates.size === 0 && captureTabId === null`, h.ctx),
+      "Alt+K 打开控制器后字幕仍保持关闭");
+    console.log("T1 Alt+K 只打开弹窗，保持关闭 PASS");
   }
   {
     // 老 Chrome 不支持 openPopup → 退回开侧边栏，且仍不直接 getMediaStreamId

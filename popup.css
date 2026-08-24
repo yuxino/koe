@@ -43,6 +43,8 @@ body {
 }
 .start-button:hover { filter: brightness(1.05); }
 .start-button.active { background: transparent; color: var(--accent); }
+.start-button.retry,
+.start-button.needs-action { border-color: rgba(243, 236, 214, .72); background: var(--text); color: var(--bg); }
 .start-button:disabled { opacity: .55; cursor: wait; }
 
 .secondary-button {
@@ -60,3 +62,4 @@ body {
 
 .status { color: var(--muted); font-size: 12px; text-align: center; min-height: 18px; }
 .status.error { color: var(--danger); }
+.status.action { color: var(--text); }

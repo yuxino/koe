@@ -83,6 +83,12 @@ function makeContext() {
   h.badgeTextColors.length = 0;
   h.titles.length = 0;
 
+  await run(`syncActionIndicator()`);
+  check(run(`tabStates.size === 0 && captureTabId === null`)
+      && h.badgeTexts.at(-1)?.text === ""
+      && h.titles.at(-1)?.title === "Koe",
+    "a fresh startup is off and keeps the toolbar indicator idle");
+
   const starting = run(`actionIndicatorForState({ captureStarted: true, status: "starting", stageDetail: "正在定位视频媒体…" })`);
   check(starting.text === "··" && starting.title.includes("正在定位视频媒体"),
     "starting state maps to a visible preparing badge and detailed title");

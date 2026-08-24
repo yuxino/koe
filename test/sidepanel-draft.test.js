@@ -64,13 +64,15 @@ function makeCtx() {
     navigator: { clipboard: { writeText: async () => undefined } },
     chrome: {
       runtime: {
+        id: "test-extension-id",
         getManifest: () => ({ version: "1.6.11" }),
         onMessage: { addListener: (fn) => messageListeners.push(fn) },
         sendMessage: async () => ({ ok: true })
       },
       storage: { local: { get: async () => ({}), set: async () => undefined } },
       tabs: { onActivated: { addListener: () => undefined }, query: async () => [] },
-      windows: { getLastFocused: async () => [] }
+      windows: { getLastFocused: async () => [] },
+      declarativeNetRequest: { updateSessionRules: async () => undefined }
     }
   };
   vm.createContext(ctx);
@@ -200,6 +202,68 @@ const WAIT = 380;
       `本地准备中按钮显示停止（实际 ${JSON.stringify(h.els["#start-button"].textContent)}）`);
     check(h.els["#start-button"].classList.contains("active"), "本地准备中按钮保持 active 状态");
     console.log("T7 本地 Helper 准备中按钮状态 PASS");
+  }
+  {
+    // 场景：状态条与空记录使用同一份具体状态，准备/操作/错误不能退化成泛化占位。
+    const h = makeCtx();
+    vm.runInContext(`
+      currentState = {
+        status: "preparing-model", captureActive: true, engine: "local",
+        stageDetail: "正在准备本地识别模型（62%）"
+      };
+      const preparingView = renderState();
+      syncFeedPlaceholder(preparingView);
+    `, h.ctx);
+    check(h.els["#media-status-title"].textContent === "正在准备字幕",
+      `准备状态条标题具体（实际 ${JSON.stringify(h.els["#media-status-title"].textContent)}）`);
+    check(h.els["#media-status-detail"].textContent === "正在准备本地识别模型（62%）",
+      "准备状态条保留后台细节");
+    check(draftText(h.feed).includes("正在准备本地识别模型（62%）"),
+      "空字幕记录同步准备细节");
+
+    vm.runInContext(`
+      currentState = {
+        status: "waiting-media", captureActive: true, captureNeedsGesture: true,
+        issueKind: "action", issueCode: "needs_tab_audio",
+        stageDetail: "当前播放器需要一次标签页声音授权。"
+      };
+      const actionView = renderState();
+      syncFeedPlaceholder(actionView);
+    `, h.ctx);
+    check(h.els["#media-status-title"].textContent === "点一下 Koe 继续", "操作状态条给出明确动作");
+    check(draftText(h.feed).includes("当前播放器需要一次标签页声音授权。"),
+      "空字幕记录同步操作原因");
+
+    vm.runInContext(`
+      currentState = {
+        status: "error", issueKind: "error", issueCode: "unsupported_audio",
+        stageDetail: "这个播放器没有可读取的音频格式。"
+      };
+      const errorView = renderState();
+      syncFeedPlaceholder(errorView);
+    `, h.ctx);
+    check(h.els["#media-status-title"].textContent === "暂不支持此音轨", "错误状态条明确不支持的对象");
+    check(h.els["#media-status-detail"].textContent === "这个播放器没有可读取的音频格式。",
+      "错误状态条保留具体原因");
+    check(draftText(h.feed).includes("这个播放器没有可读取的音频格式。"),
+      "空字幕记录同步错误原因");
+    console.log("T8 状态条与空记录同步具体状态 PASS");
+  }
+  {
+    // 场景：保存配置不等于打开字幕；只有主开关可以发 START_CAPTURE。
+    const h = makeCtx();
+    const sent = [];
+    h.ctx.chrome.runtime.sendMessage = async (message) => {
+      sent.push(message);
+      return { ok: true };
+    };
+    h.els["#api-key"].value = "sk-test";
+    await vm.runInContext(`saveApiKey()`, h.ctx);
+    check(!sent.some((message) => message.type === "START_CAPTURE"),
+      "保存 API Key 不会隐式开启字幕");
+    check(h.els["#hint"].textContent.includes("仍保持关闭"),
+      `保存后明确提示保持关闭（实际 ${JSON.stringify(h.els["#hint"].textContent)}）`);
+    console.log("T9 保存设置不改变字幕开关 PASS");
   }
   console.log(fail === 0 ? "sidepanel-draft 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
