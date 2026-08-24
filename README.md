@@ -1,62 +1,51 @@
 <div align="center">
   <img src="./assets/koe-avatar.png" alt="Koe" width="128">
   <h1>Koe</h1>
-  <p>Live subtitles and Chinese translation for audio playing in your Chrome tab or microphone.</p>
+  <p>Local-first subtitles for video playing in a Chromium tab.</p>
   <p><a href="README_ZH.md">简体中文</a></p>
 </div>
 
-Koe（こえ / 声）turns speech from a browser tab or microphone into media-synced subtitles and optional Simplified Chinese translation. Only captions appear over the video; controls, prompts, and errors stay in the popup or side panel.
+Koe generates manually controlled, media-synced subtitles with optional Simplified Chinese translation. Only captions appear over the video; controls, prompts, and errors stay in the popup or side panel.
 
-The regular live modes remain a pure Manifest V3 extension: they require no video download, ffmpeg, Node.js, or localhost service. On ego-lite for macOS, you can optionally install Koe Helper for more accurate, progressive local subtitles.
+## How it works
 
-## Features
+- **Off by default** — while Koe is off, playback, page changes, settings, and opening Koe do not turn it on. Only an explicit Start action from Koe's controls or context menu starts a session; once started, it follows media changes until you stop it. **Alt+K** only opens the controller.
+- **Local accurate (default)** — Koe Helper runs Whisper `large-v3` on the Mac. Compatible public HLS uses the media timeline directly; when no usable HLS source is available, Koe can fall back to local tab-audio recognition.
+- **DashScope** — captures tab audio for cloud recognition and optional Chinese translation. This mode requires your own DashScope API Key.
+- **Video-safe UI** — captions follow seeking, video changes, and fullscreen. Status and errors never cover the video.
+- **One active session** — the toolbar shows global status, the side panel keeps recent confirmed lines from the current session plus diagnostics, and Stop releases tab capture.
 
-- **In-video captions** — captions sit near the bottom of the main player, with distinct original and Chinese lines, three text sizes, and fullscreen support.
-- **Media-timeline protection** — seeking, switching videos, or reconnecting recognition cannot replay stale captions or translations over the new scene.
-- **Optional progressive local subtitles** — on ego-lite for macOS, the Native Helper runs Whisper `large-v3` on short windows around the playhead, continues preparing the next window, and returns absolute media timestamps. Seeking cancels obsolete work instead of letting old subtitles catch up with the new scene.
-- **Manual by default** — playback, video changes, opening the popup, and saving settings never start processing on their own; Koe only runs after an explicit Start action.
-- **Visible toolbar status** — `··`, `ON`, and `!` on the Koe icon show preparation, running, and attention-required states globally, even after switching tabs.
-- **Optional subtitle history** — the side panel keeps confirmed lines, the current draft, and scroll-back history; recognition corrections replace only the affected row.
-- **Immediate streaming Chinese in live mode** — DashScope drafts and confirmed lines both use incremental `qwen-mt-flash`; the first Chinese chunk appears without a fixed wait, confirmed lines preempt stale drafts, and rolling translation memory improves the first visible result instead of correcting it after the scene has passed.
-- **Readable continuous speech** — long monologues split at natural pauses with hard two-line limits; burst results keep source and translation paired and give each confirmed line time to be read instead of flashing over one another.
-- **Multiple caption modes** — tab audio or microphone × DashScope / Chrome's built-in recognition (no API key).
-- **Recognition-correction handling** — when the server rewrites a line, only the affected row is replaced; duplicates are suppressed at the source.
-- **Low-latency audio path** — AudioWorklet capture and bounded weak-network buffering keep the feed current; short WebSocket interruptions reconnect automatically.
-- **Shortcut** — **Alt+K** (**Option+K** on macOS) opens the Koe controller without changing the caption switch.
-- **Toolbar icon** — opens a minimal controller whose primary button explicitly starts or stops captions. History and settings remain one click away.
-- **Stops for real** — pressing Stop releases the audio stream entirely (no lingering "still listening" state).
-- **History survives tab switches** — the subtitle record is persisted in the background, so switching tabs (each tab has its own side-panel instance) restores the session's history.
-- **Privacy-friendly diagnostics** — copy or clear logs in one click; logs record timing, lengths, and errors, never subtitle text.
+## Install
 
-## Setup
+1. Open `chrome://extensions`, enable **Developer mode**, and load this repository with **Load unpacked**.
+2. Use the default **Local accurate** mode after installing Koe Helper, or switch to **DashScope** and save an API Key in the side panel.
+3. Start from Koe's controls or context menu. Koe remains off until an explicit Start action.
 
-1. Open `chrome://extensions` and enable **Developer mode**.
-2. Choose **Load unpacked** and select this repository.
-3. Koe is off by default. Click the toolbar icon, then press the popup's primary button to start in-video captions for the current tab (or the audible tab). Open “Caption history & settings” only when you need to change the mode or size, or review history.
-4. DashScope modes require a saved DashScope API Key.
+## Koe Helper
 
-### Optional local subtitles for ego-lite
+Koe Helper is required only for Local accurate mode. The included installer targets ego-lite on macOS and requires macOS 15+, Swift 6, and a toolchain containing the macOS 26 SDK.
 
-Koe Helper currently requires **macOS 15 or later**, **ego-lite**, and an installed Swift 6 toolchain (Xcode Command Line Tools is sufficient). It is not a localhost server.
+```sh
+helper/scripts/install-ego-lite.sh <extension ID>
+```
 
-1. Find Koe's extension ID on `chrome://extensions` in ego-lite.
-2. From the repository root, run `helper/scripts/install-ego-lite.sh <extension ID>`.
-3. Reload Koe, open “Caption history & settings”, and choose “Tab video · Local accurate”.
+The first build downloads Swift dependencies; the first transcription downloads and caches the approximately 626 MB Whisper model. On Apple Silicon with macOS 26+, Chinese translation can also run through Apple's on-device Translation framework when the required language pack is installed. Other supported Macs show original-language subtitles only.
 
-The installer builds a user-scoped Native Messaging helper and registers it only for the supplied Koe extension ID in ego-lite. On first use, WhisperKit downloads the approximately 626 MB `large-v3` model; later sessions reuse the local cache. The helper supports unencrypted, non-byte-range MPEG-TS and CMAF/fMP4 HLS VOD (`.m3u8`). Plain MP4, DASH-only, and DRM media are currently unsupported, and the helper does not read browser cookies or authorization headers.
+The direct media path supports public, unencrypted, non-byte-range HLS VOD with MPEG-TS AAC or CMAF/fMP4 segments. Koe does not bypass DRM or read browser cookies and authorization headers. Pages without a usable direct HLS source may use the local tab-audio fallback instead. See [Koe Helper documentation](helper/README.md) for exact boundaries.
 
-### Privacy
+## Privacy
 
-In local mode, media preparation, audio extraction, and speech recognition happen on your Mac. The helper temporarily fetches only the media data needed for the current subtitle windows; audio and video are not uploaded to Koe, DashScope, or object storage. Recognized original-language subtitle text also stays local by default.
-
-On macOS 26+, local accurate mode can enable Simplified Chinese translation, also computed on-device by Apple's Translation framework, keeping the whole media/recognition/translation/display path on your Mac. For first use, open **System Settings → General → Language & Region → Translation Languages**, enable **On-Device**, and download the language pack; it gracefully falls back to original-only when the pack is missing or the Mac is on macOS 15–25.
-
-The DashScope API Key is stored in `chrome.storage.local` in your browser profile and is used only for direct DashScope requests.
+- **Local accurate:** recognition stays on the Mac and is never sent to DashScope. Koe may download the Whisper model and read needed media segments from the original server; Apple language packs must be installed separately in System Settings.
+- **DashScope:** captured tab audio is sent directly to DashScope for recognition; when translation is enabled, recognized text is also sent for translation. The video file itself is not uploaded.
+- The API Key stays in the browser profile's `chrome.storage.local` and is not sent to Koe Helper. Diagnostic logs contain timing and errors, not caption text.
 
 ## Development
 
-The extension runtime is plain Manifest V3 JavaScript. Reload it from `chrome://extensions` after changing the source. The optional local helper is a Swift package under `helper/`; see `helper/README.md` for its protocol, support boundaries, and development checks.
+The extension is plain Manifest V3 JavaScript with no build step. Reload it from `chrome://extensions` after changes. The optional Helper is a Swift package under `helper/`.
 
-Main pieces: `background.js` coordinates sessions, media timelines, state, and history; `offscreen.js` / `pcm-worklet.js` capture audio and run live recognition and translation; `content.js` detects video state and renders in-video captions; `popup.*` is the gesture-based controller; `sidepanel.*` provides settings, diagnostics, and scroll-back history; `helper/` provides the optional Native Messaging local pipeline.
+```sh
+for test_file in test/*.test.js; do node "$test_file" || exit 1; done
+swift run --package-path helper koe-helper-core-checks
+```
 
 © 2026 yuxino

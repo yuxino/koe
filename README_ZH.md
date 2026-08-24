@@ -1,62 +1,51 @@
 <div align="center">
   <img src="./assets/koe-avatar.png" alt="Koe" width="128">
   <h1>Koe</h1>
-  <p>给 Chrome 标签页（或麦克风）正在播放的声音加上实时字幕和中文翻译。</p>
+  <p>为 Chromium 标签页中的视频生成本地优先字幕。</p>
   <p><a href="README.md">English</a></p>
 </div>
 
-Koe（こえ / 声）把标签页声音或麦克风识别成与媒体时间线同步的字幕，并可选翻译成简体中文。视频画面只显示字幕；开关、操作提示和错误状态都留在弹窗或侧边栏。
+Koe 为浏览器视频生成可手动开关、与播放进度同步的字幕，并可选显示简体中文翻译。视频画面只显示字幕；开关、提示和错误都留在弹窗或侧边栏。
 
-常规实时模式仍然是纯 Manifest V3 扩展：不下载视频，不跑 ffmpeg，也不需要 Node.js 或 localhost 服务。在 macOS 的 ego-lite 中，还可以按需安装 Koe Helper，使用更准确的渐进式本地字幕。
+## 工作方式
 
-## 功能
-
-- **视频画面字幕** — 默认贴在主播放器底部，原文与中文译文分层显示，支持小 / 标准 / 大三档；网页全屏时会跟进全屏播放器。
-- **媒体时间线保护** — 拖动进度、切换视频或识别重连后，旧字幕和旧翻译不会追着新画面补播。
-- **可选的渐进式本地字幕** — 在 macOS 的 ego-lite 中，Native Helper 使用 Whisper `large-v3` 识别播放位置附近的短窗口，并提前准备下一个窗口，以视频绝对时间返回字幕；拖动进度后会取消过期任务，不让旧字幕追赶新画面。
-- **手动开启，默认关闭** — 页面播放、切换视频、打开弹窗或保存设置都不会自行启动；只有明确点击开启后，Koe 才处理当前视频。
-- **工具栏状态可见** — Koe 图标用 `··`、`ON`、`!` 分别显示准备中、运行中和需要处理的错误，切换标签页后也能看见全局会话状态。
-- **可选的字幕记录** — 侧边栏保留已确认句子、实时草稿和完整回看；识别修正时只替换受影响的一行。
-- **实时模式中文流式即刻出现** — DashScope 草稿与稳定句统一使用增量 `qwen-mt-flash`，取消固定等待；稳定句会抢占过期草稿，滚动翻译记忆直接提高第一次可见结果，不再等画面过去后做无意义的二次精修。
-- **连续长句也能读** — 长段对白优先在自然停顿处切块，原文和译文各自限制在两行内；同一时刻返回的多条稳定字幕会保持中英文配对并留出阅读时间，不再互相闪掉。
-- **多种字幕模式** — 标签页声音或麦克风 × DashScope / Chrome 内置识别（免 Key）。
-- **识别修正处理** — 服务端改写句子时只替换受影响的那一行，重复在源头被抑制。
-- **低延迟音频链路** — 使用 AudioWorklet 采集，并限制弱网积压；WebSocket 短暂断开后自动重连。
-- **快捷键** — **Alt+K**（macOS 为 **Option+K**）打开 Koe 控制器，不会直接改变字幕开关。
-- **点工具栏图标** — 弹出极简控制器；由主按钮明确开启或停止字幕，记录与设置面板按需打开。
-- **停止即彻底释放** — 点停止会完整释放音频流，不会留下"还在听"的状态。
-- **切标签页不丢记录** — 字幕记录持久化在后台（每个标签页有独立的侧边栏实例），切回来自动恢复本次会话的历史。
-- **隐私友好的诊断日志** — 侧边栏可一键复制 / 清空日志；日志只记录长度、时序和错误，不保存字幕正文。
+- **默认关闭** — Koe 关闭时，播放视频、切换页面、保存设置或打开 Koe 都不会把它开启。只有通过 Koe 控件或右键菜单明确执行开启操作才会启动会话；开启后会跟随媒体变化，直到用户停止。**Alt+K** 只打开控制器。
+- **本地精准（默认）** — Koe Helper 在 Mac 上运行 Whisper `large-v3`。兼容的公开 HLS 直接按媒体时间线处理；没有可用 HLS 来源时，可回退到本地标签页音频识别。
+- **DashScope** — 采集标签页声音并使用云端识别，可选中文翻译；需要用户自己的 DashScope API Key。
+- **不遮挡视频** — 字幕跟随拖动进度、切换视频和全屏播放器；状态与错误不会压在视频画面上。
+- **单一活动会话** — 工具栏显示全局状态，侧边栏保留当前会话近期确认字幕和诊断信息；停止会释放标签页声音。
 
 ## 安装
 
-1. 打开 `chrome://extensions`，开启 **开发者模式**。
-2. 选择 **加载已解压的扩展程序**，加载本项目目录。
-3. Koe 默认关闭。点工具栏 Koe 图标，再点弹窗主按钮，为当前标签页（或正在发声的标签页）开启画面字幕；需要改模式、字号或回看记录时，再点「打开字幕记录与设置」。
-4. DashScope 模式需要填写并保存 DashScope API Key。
+1. 打开 `chrome://extensions`，开启 **开发者模式**，选择 **加载已解压的扩展程序**并加载本仓库。
+2. 安装 Koe Helper 后使用默认的**本地精准**模式；也可以切换到 **DashScope**，并在侧边栏保存 API Key。
+3. 通过 Koe 控件或右键菜单明确开启；执行开启操作前，Koe 始终保持关闭。
 
-### ego-lite 可选本地字幕
+## Koe Helper
 
-Koe Helper 目前要求 **macOS 15 或更高版本**、**ego-lite**，以及已安装的 Swift 6 工具链（Xcode Command Line Tools 即可）。它不是 localhost 服务。
+只有本地精准模式需要 Koe Helper。仓库内的安装脚本面向 macOS 上的 ego-lite；运行环境要求 macOS 15+，构建需要 Swift 6 和包含 macOS 26 SDK 的工具链。
 
-1. 在 ego-lite 的 `chrome://extensions` 中找到 Koe 的扩展 ID。
-2. 在仓库根目录运行 `helper/scripts/install-ego-lite.sh <扩展 ID>`。
-3. 重新加载 Koe，打开「字幕记录与设置」，选择「标签页视频 · 本地精准」。
+```sh
+helper/scripts/install-ego-lite.sh <扩展 ID>
+```
 
-安装脚本会构建用户级 Native Messaging Helper，并且只允许 ego-lite 中指定扩展 ID 的 Koe 调用。首次使用时，WhisperKit 会下载约 626 MB 的 `large-v3` 模型，之后复用本机缓存。Helper 支持未加密、非 byte-range 的 MPEG-TS 与 CMAF/fMP4 HLS 点播（`.m3u8`）；普通 MP4、纯 DASH 与 DRM 媒体暂不支持，也不会读取浏览器 Cookie 或 Authorization。
+首次构建会下载 Swift 依赖，首次识别会下载并缓存约 626 MB 的 Whisper 模型。在 Apple Silicon 与 macOS 26+ 上，安装对应语言包后还可使用 Apple 本机翻译；其他受支持的 Mac 只显示原文字幕。
 
-### 隐私
+媒体直读支持公开、未加密、非 byte-range 的 HLS VOD，以及 MPEG-TS AAC 或 CMAF/fMP4 分片。Koe 不绕过 DRM，也不读取浏览器 Cookie 或 Authorization；没有可用 HLS 直读来源的页面可以尝试本地标签页音频回退。准确边界见 [Koe Helper 文档](helper/README.md)。
 
-本地模式的媒体准备、音频提取和语音识别都在 Mac 上完成。Helper 只临时获取当前字幕窗口所需的媒体数据；音频和视频不会上传到 Koe、DashScope 或对象存储。识别出的原文字幕默认也只留在本机。
+## 隐私
 
-本地精准模式在 macOS 26+ 上可开启中文翻译：识别与翻译都由本机的 Apple 翻译框架完成，媒体读取、识别、翻译与显示整条链路都留在设备上。首次使用前请到「系统设置 → 通用 → 语言与地区 → 翻译语言」勾选 **On-Device** 并下载对应语言包；未安装语言包或在 macOS 15–25 上运行时自动回退为原文字幕。
-
-DashScope API Key 只保存在当前浏览器配置的 `chrome.storage.local` 中，Koe 仅在直连 DashScope 时使用它。
+- **本地精准：**识别留在 Mac，不会发送给 DashScope。Koe 可能下载 Whisper 模型，并从原媒体服务器读取所需分片；Apple 语言包需用户另行在系统设置中安装。
+- **DashScope：**标签页音频会直接发送给 DashScope 识别；开启翻译时，识别出的原文也会发送给 DashScope。视频文件本身不会上传。
+- API Key 保存在浏览器配置的 `chrome.storage.local` 中，不会发送给 Koe Helper。诊断日志只记录时序和错误，不保存字幕正文。
 
 ## 开发
 
-扩展运行时是纯 Manifest V3 JavaScript。修改代码后在 `chrome://extensions` 重新加载扩展即可。可选本地 Helper 是 `helper/` 下的 Swift Package；协议、支持边界和开发检查见 `helper/README.md`。
+扩展是无需构建的 Manifest V3 JavaScript；修改后在 `chrome://extensions` 重新加载。可选 Helper 是 `helper/` 下的 Swift Package。
 
-主要模块：`background.js` 负责会话调度、媒体时间线、状态与字幕记录；`offscreen.js` / `pcm-worklet.js` 负责音频采集、实时识别与翻译；`content.js` 负责视频探测和画面字幕；`popup.*` 是手势入口弹窗；`sidepanel.*` 负责设置、诊断与滚动记录；`helper/` 提供可选的 Native Messaging 本地链路。
+```sh
+for test_file in test/*.test.js; do node "$test_file" || exit 1; done
+swift run --package-path helper koe-helper-core-checks
+```
 
 © 2026 yuxino
