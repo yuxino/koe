@@ -23,12 +23,14 @@ function createMediaIdentity() {
   return uuid || `media-${Date.now()}-${mediaIdentityCounter}-${Math.random().toString(36).slice(2)}`;
 }
 
-function resetOfflineBatchState(state) {
+function resetOfflineBatchState(state, { preserveRevision = false } = {}) {
   if (!state) return;
+  state.offlineStartToken = (Number(state.offlineStartToken) || 0) + 1;
   state.offlineStartedEpoch = undefined;
   state.offlineRunActive = false;
   state.offlinePreparedUntilMs = 0;
-  state.offlineCueRevision = 0;
+  state.offlineMissingMediaSince = 0;
+  if (!preserveRevision) state.offlineCueRevision = 0;
 }
 
 installMediaRequestObserver();
@@ -116,18 +118,10 @@ function isHlsUrl(value) {
   }
 }
 
-function isDirectMediaUrl(value) {
-  try {
-    return /\.(?:m3u8|mp4|m4v|mov|webm)$/i.test(new URL(String(value || "")).pathname);
-  } catch {
-    return false;
-  }
-}
-
 function rememberMediaCandidate(tabId, candidate) {
   const id = Number(tabId);
   const url = String(candidate?.url || "");
-  if (!Number.isInteger(id) || !isDirectMediaUrl(url) || isAdSource(url)) return;
+  if (!Number.isInteger(id) || !isHlsUrl(url) || isAdSource(url)) return;
   const now = Date.now();
   const existing = (mediaCandidatesByTab.get(id) || [])
     .filter((item) => now - Number(item.seenAt || 0) <= MEDIA_CANDIDATE_TTL_MS && item.url !== url);
@@ -146,9 +140,9 @@ function selectMediaCandidate(tabId, context = {}) {
   const frameId = Number(context.frameId) || 0;
   const now = Date.now();
   const direct = String(context.currentSrc || "");
-  if (isDirectMediaUrl(direct)) {
+  if (isHlsUrl(direct)) {
     rememberMediaCandidate(id, { url: direct, frameId, seenAt: now, source: "video" });
-    // currentSrc 是播放器此刻明确使用的资源，必须压过旧视频留下的 HLS 缓存。
+    // currentSrc 是播放器此刻明确使用的 HLS，必须压过旧视频留下的缓存。
     return { url: direct, frameId, seenAt: now, source: "video" };
   }
   for (const item of Array.isArray(context.resourceUrls) ? context.resourceUrls : []) {
@@ -166,6 +160,7 @@ function mediaCandidateScore(candidate, frameId) {
   if (Number(candidate.frameId) === Number(frameId)) score += 1_000;
   if (candidate.source === "webRequest") score += 300;
   if (candidate.source === "video") score += 200;
+  score += playlistStructureScore(candidate.url);
   if (candidate.source === "page-definition") {
     score += 900;
     // 识别只需要音轨，优先最低画质能显著减少本地分片下载量。
@@ -173,6 +168,32 @@ function mediaCandidateScore(candidate, frameId) {
   }
   score += Math.max(-60, Math.min(0, ((Number(candidate.seenAt) || 0) - Date.now()) / 1_000));
   return score;
+}
+
+// MSE 播放器通常先请求 master playlist，再请求当前画质的 media playlist。
+// 把 master 交给 Helper，它才能自行选最低码率；若误选 1080p 分支，首次字幕
+// 会多下载数十 MB，弱网下很容易在字幕出现前超时。
+function playlistStructureScore(value) {
+  try {
+    const url = new URL(String(value || ""));
+    const hostname = url.hostname.toLowerCase();
+    const segments = url.pathname.split("/").filter(Boolean);
+    const filename = String(segments[segments.length - 1] || "").toLowerCase();
+    const path = url.pathname.toLowerCase();
+    let score = Math.max(0, 600 - segments.length * 100);
+    if (/(^|[._-])master([._-]|$)/.test(filename)) score += 900;
+    else if (/(^|[._-])(manifest|playlist)([._-]|$)/.test(filename)) score += 450;
+    if (/(^|[\/_-])(2160|1440|1080|fhd|uhd|high)([\/_-]|$)/.test(path)) score -= 700;
+    else if (/(^|[\/_-])(720|hd)([\/_-]|$)/.test(path)) score -= 350;
+    if (/(^|[\/_-])(144|180|240|low|ld)([\/_-]|$)/.test(path)) score += 150;
+    // Dailymotion 的 dmxleo 端点虽然以 .m3u8 结尾，返回的是不含媒体
+    // 分片的动态元数据；真正的 master playlist 来自 cdndirector。
+    if (hostname === "dmxleo.dailymotion.com") score -= 2_000;
+    if (hostname === "cdndirector.dailymotion.com") score += 800;
+    return score;
+  } catch {
+    return 0;
+  }
 }
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== CONTEXT_MENU_ID) return;
@@ -330,7 +351,7 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
     state.jobId = `${sessionMode}-${tabId}-${Date.now()}`;
     state.mediaEpoch = (Number(state.mediaEpoch) || 0) + 1;
     state.lastDiscontinuityId = 0;
-    state.offlineStartedEpoch = undefined;
+    resetOfflineBatchState(state);
     state.offlineSourceUrl = "";
     state.offlineContext = undefined;
     mediaCandidatesByTab.delete(tabId);
@@ -414,7 +435,7 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
         // Helper 缺失/断开时仍要完成页面时间线切换。
       }
       state.mediaEpoch = previousEpoch + 1;
-      state.offlineStartedEpoch = undefined;
+      resetOfflineBatchState(state);
       state.offlineSourceUrl = "";
       state.offlineContext = undefined;
       mediaCandidatesByTab.delete(tabId);
@@ -488,7 +509,7 @@ async function startOfflineSession(state) {
   state.captureNeedsGesture = false;
   state.status = "starting";
   state.stageDetail = "正在定位视频媒体…";
-  state.offlineStartedEpoch = undefined;
+  resetOfflineBatchState(state);
   captureTabId = state.tabId;
   const startIdentity = sessionIdentity(state);
   await clearTranscript();
@@ -546,6 +567,8 @@ async function receiveMediaContext(message, sender) {
   const frameId = Number(sender?.frameId) || 0;
   if (frameId !== Number(state.frameId || 0)) return { ok: true, ignored: true };
   const identity = sessionIdentity(state);
+  const contextVersion = (Number(state.offlineContextVersion) || 0) + 1;
+  state.offlineContextVersion = contextVersion;
   const context = {
     frameId,
     currentSrc: String(message.currentSrc || ""),
@@ -561,7 +584,9 @@ async function receiveMediaContext(message, sender) {
   const pageDefinitions = await discoverPageMediaDefinitions(tabId, frameId).catch(() => []);
   // executeScript 期间可能发生 seek / 换源 / 停止。旧页面返回的签名地址和
   // 时间点绝不能覆盖新 epoch，也不能把已停止的会话重新启动。
-  if (!isCurrentSession(state, identity, true) || state.engine !== "local") {
+  if (!isCurrentSession(state, identity, true)
+      || state.engine !== "local"
+      || state.offlineContextVersion !== contextVersion) {
     return { ok: true, ignored: true };
   }
   for (const definition of pageDefinitions) {
@@ -575,11 +600,16 @@ async function receiveMediaContext(message, sender) {
   }
   const candidate = selectMediaCandidate(tabId, context);
   if (!candidate) {
-    state.status = "starting";
-    state.stageDetail = "暂未找到视频媒体，播放几秒后会自动重试…";
+    if (!state.offlineMissingMediaSince) state.offlineMissingMediaSince = Date.now();
+    const waitingMs = Date.now() - state.offlineMissingMediaSince;
+    state.status = waitingMs >= 10_000 ? "error" : "starting";
+    state.stageDetail = waitingMs >= 10_000
+      ? "这个播放器没有提供可读取的 HLS 视频；DASH、普通 MP4 或 DRM 暂不支持。"
+      : "正在寻找 HLS 视频媒体，播放几秒后会自动重试…";
     await persistStates();
     return { ok: true, pending: true };
   }
+  state.offlineMissingMediaSince = 0;
   state.offlineSourceUrl = candidate.url;
   state.offlineContext = context;
   await beginOfflineEpoch(state);
@@ -587,60 +617,75 @@ async function receiveMediaContext(message, sender) {
   return { ok: true };
 }
 
-// 本地精准只在启动时预置[当前位置, +120s]一批。播放推进到接近该批边界时，
-// 重跑一次 beginOfflineEpoch 续下一批（复用同一 job/epoch，网页按 cueId 合并去重，
-// Helper 会先取消旧任务再重新预处理）。避免“播放一阵子就没字幕”。
+// 本地精准按批预置[当前位置, +120s]。播放接近或越过边界后自动续批；
+// 同一时刻只允许一批运行，避免周期性的媒体回报重复启动 Helper。
 function maybeExtendOfflinePrep(state) {
-  if (!state?.captureStarted || state.engine !== "local") return;
+  if (shouldStartOfflineBatch(state)) void beginOfflineEpoch(state);
+}
+
+function shouldStartOfflineBatch(state) {
+  if (!state?.captureStarted || state.engine !== "local" || state.offlineRunActive) return false;
   const epoch = Number(state.mediaEpoch) || 0;
-  if (state.offlineStartedEpoch !== epoch) return;              // 本批尚未启动
-  const currentMs = Number(state.offlineContext?.currentTimeMs) || 0;
-  const preparedUntilMs = Number(state.preparedUntilMs) || 0;
-  const durationMs = Number(state.offlineContext?.durationMs) || 0;
-  if (preparedUntilMs <= currentMs) return;                     // 没有预置边界
-  if (currentMs < preparedUntilMs - 60_000) return;             // 距边界还远，不急着续
-  if (durationMs > 0 && currentMs >= durationMs - 1_000) return; // 已到片尾
-  state.offlineStartedEpoch = undefined;                        // 允许重跑本批
-  void beginOfflineEpoch(state);
+  if (state.offlineStartedEpoch !== epoch) return true;
+  const context = state.offlineContext || {};
+  const currentMs = Math.max(0, Number(context.currentTimeMs) || 0);
+  const durationMs = Math.max(0, Number(context.durationMs) || 0);
+  if (durationMs > 0 && currentMs >= durationMs - 1_000) return false;
+  const preparedUntilMs = Math.max(0, Number(state.offlinePreparedUntilMs) || 0);
+  if (preparedUntilMs <= 0) return true;
+  const playbackRate = Math.max(0.25, Math.min(4, Number(context.playbackRate) || 1));
+  return currentMs + OFFLINE_REFILL_LEAD_MS * playbackRate >= preparedUntilMs;
 }
 
 async function beginOfflineEpoch(state) {
   const epoch = Number(state.mediaEpoch) || 0;
-  if (!state?.captureStarted || state.engine !== "local" || state.offlineStartedEpoch === epoch) return;
+  if (!shouldStartOfflineBatch(state)) return;
   const identity = sessionIdentity(state);
   if (!state.mediaIdentity) state.mediaIdentity = createMediaIdentity();
   const sourceUrl = String(state.offlineSourceUrl || "");
-  if (!isDirectMediaUrl(sourceUrl)) return;
-  const context = state.offlineContext || {};
+  if (!isHlsUrl(sourceUrl)) return;
+  const contextVersion = Number(state.offlineContextVersion) || 0;
+  const context = { ...(state.offlineContext || {}) };
   const pageUrl = String(state.pageUrl || "");
   let origin = "";
   try { origin = new URL(pageUrl).origin; } catch { /* optional */ }
+  const startToken = (Number(state.offlineStartToken) || 0) + 1;
+  state.offlineStartToken = startToken;
   state.offlineStartedEpoch = epoch;
+  state.offlineRunActive = true;
   state.status = "starting";
   state.stageDetail = "本地 Helper 正在准备当前位置…";
   await persistStates();
   if (!isCurrentSession(state, identity, true)
       || state.engine !== "local"
-      || state.offlineStartedEpoch !== epoch
-      || state.offlineSourceUrl !== sourceUrl) return;
-  postNativeMessage({
-    type: "start",
-    protocolVersion: NATIVE_PROTOCOL_VERSION,
-    jobId: state.jobId,
-    mediaEpoch: epoch,
-    mediaKey: state.mediaIdentity,
-    source: {
-      url: sourceUrl,
-      headers: {
-        referer: pageUrl,
-        origin
-      }
-    },
-    currentTimeMs: Math.max(0, Number(context.currentTimeMs) || 0),
-    durationMs: Math.max(0, Number(context.durationMs) || 0),
-    playbackRate: Math.max(0.25, Math.min(4, Number(context.playbackRate) || 1)),
-    translate: Boolean(state.translate)
-  });
+      || state.offlineStartToken !== startToken) return;
+  if (state.offlineSourceUrl !== sourceUrl || state.offlineContextVersion !== contextVersion) {
+    state.offlineRunActive = false;
+    return beginOfflineEpoch(state);
+  }
+  try {
+    postNativeMessage({
+      type: "start",
+      protocolVersion: NATIVE_PROTOCOL_VERSION,
+      jobId: state.jobId,
+      mediaEpoch: epoch,
+      mediaKey: state.mediaIdentity,
+      source: {
+        url: sourceUrl,
+        headers: {
+          referer: pageUrl,
+          origin
+        }
+      },
+      currentTimeMs: Math.max(0, Number(context.currentTimeMs) || 0),
+      durationMs: Math.max(0, Number(context.durationMs) || 0),
+      playbackRate: Math.max(0.25, Math.min(4, Number(context.playbackRate) || 1)),
+      translate: Boolean(state.translate)
+    });
+  } catch (error) {
+    if (state.offlineStartToken === startToken) state.offlineRunActive = false;
+    throw error;
+  }
 }
 
 function connectNativeHelper() {
@@ -661,7 +706,7 @@ function connectNativeHelper() {
       state.captureStarted = false;
       state.status = "error";
       state.userStopped = true;
-      state.offlineStartedEpoch = undefined;
+      resetOfflineBatchState(state);
       state.offlineSourceUrl = "";
       state.offlineContext = undefined;
       state.sourceUrl = normalizeSourceKey(state.sourceUrl || "");
@@ -698,8 +743,13 @@ async function handleNativeMessage(message) {
     state.status = ["forward", "ready"].includes(message.stage) ? "live" : "starting";
     state.stageDetail = String(message.detail || "本地精准字幕处理中…");
     // Helper 报告本批字幕预置到哪个媒体时刻；播放逼近该边界时用它续批。
-    state.preparedUntilMs = Number(message.preparedUntilMs) || 0;
+    const preparedUntilMs = Number(message.preparedUntilMs);
+    if (Number.isFinite(preparedUntilMs) && preparedUntilMs > 0) {
+      state.offlinePreparedUntilMs = Math.max(Number(state.offlinePreparedUntilMs) || 0, preparedUntilMs);
+    }
+    if (message.stage === "ready") state.offlineRunActive = false;
     await persistStates();
+    if (message.stage === "ready") maybeExtendOfflinePrep(state);
     return;
   }
   if (message.type === "cues") {
@@ -710,11 +760,16 @@ async function handleNativeMessage(message) {
     if (cues.length === 0) return;
     state.status = "live";
     state.stageDetail = "本地精准字幕已就绪";
+    const revision = Math.max(
+      (Number(state.offlineCueRevision) || 0) + 1,
+      Math.max(0, Number(message.revision) || 0)
+    );
+    state.offlineCueRevision = revision;
     await sendToContent(state, {
       type: "OFFLINE_CUES",
       jobId: state.jobId,
       mediaEpoch: Number(state.mediaEpoch) || 0,
-      revision: Number(message.revision) || 0,
+      revision,
       cues
     });
     await persistStates();
@@ -724,12 +779,13 @@ async function handleNativeMessage(message) {
     state.captureStarted = false;
     state.status = "error";
     state.userStopped = true;
-    state.offlineStartedEpoch = undefined;
+    resetOfflineBatchState(state);
     state.offlineSourceUrl = "";
     state.offlineContext = undefined;
     state.sourceUrl = normalizeSourceKey(state.sourceUrl || "");
     mediaCandidatesByTab.delete(state.tabId);
     state.stageDetail = String(message.error || "本地字幕处理失败");
+    void appendLog({ event: "native-error", detail: state.stageDetail });
     if (captureTabId === state.tabId) captureTabId = null;
     await sendToContent(state, {
       type: "OFFLINE_ERROR",
@@ -975,7 +1031,7 @@ async function stopCapture(state) {
     } catch {
       // Helper 已断开时任务自然终止。
     }
-    state.offlineStartedEpoch = undefined;
+    resetOfflineBatchState(state);
     state.offlineSourceUrl = "";
     state.offlineContext = undefined;
     state.sourceUrl = normalizeSourceKey(state.sourceUrl || "");
@@ -1233,7 +1289,7 @@ async function stopCaptureForTab(request) {
     state.captureNeedsGesture = false;
   }
   if (state.engine === "local") {
-    state.offlineStartedEpoch = undefined;
+    resetOfflineBatchState(state);
     state.offlineSourceUrl = "";
     state.offlineContext = undefined;
     state.sourceUrl = normalizeSourceKey(state.sourceUrl || "");
@@ -1353,7 +1409,7 @@ async function setTranslate(tabId, translate) {
   if (state.captureStarted && state.engine === "local") {
     // Helper 只在 start 时读取 translate。切换翻译时重跑一次 offline epoch，
     // 让 Helper 用新的开关重新开始，并作废旧任务的排队结果。
-    state.offlineStartedEpoch = undefined;
+    resetOfflineBatchState(state, { preserveRevision: true });
     await beginOfflineEpoch(state);
     await sendToContent(state, {
       type: "OFFLINE_SESSION",
@@ -1415,7 +1471,7 @@ async function setCaptureConfig(tabId) {
   state.jobId = `${state.engine === "local" ? "offline" : "live"}-${state.tabId}-${Date.now()}`;
   state.mediaEpoch = (Number(state.mediaEpoch) || 0) + 1;
   state.captureStarted = false;
-  state.offlineStartedEpoch = undefined;
+  resetOfflineBatchState(state);
   state.offlineSourceUrl = "";
   state.offlineContext = undefined;
   state.mediaIdentity = createMediaIdentity();
@@ -1466,7 +1522,7 @@ async function mediaDiscontinuity(message, sender) {
   state.mediaEpoch = previousEpoch + 1;
   if (state.engine === "local") {
     try { postNativeMessage({ type: "cancel", jobId: state.jobId, mediaEpoch: previousEpoch }); } catch { /* disconnected */ }
-    state.offlineStartedEpoch = undefined;
+    resetOfflineBatchState(state);
     // HLS 地址通常带短时签名。拖动进度条后重新向页面取一次当前地址，
     // 避免 Helper 在旧签名上等待超时，也避免旧视频候选重新胜出。
     state.offlineSourceUrl = "";
@@ -1643,6 +1699,10 @@ async function listVideos(tabId) {
     target: { tabId, allFrames: true },
     func: () => [...document.querySelectorAll("video")].map((video, index) => {
       const rect = video.getBoundingClientRect();
+      const viewportWidth = Math.max(0, Number(window.innerWidth) || 0);
+      const viewportHeight = Math.max(0, Number(window.innerHeight) || 0);
+      const visibleWidth = Math.max(0, Math.min(rect.right, viewportWidth) - Math.max(rect.left, 0));
+      const visibleHeight = Math.max(0, Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0));
       const ancestry = [video, video.parentElement, video.parentElement?.parentElement]
         .map((node) => `${node?.id || ""} ${node?.className || ""}`).join(" ");
       return {
@@ -1653,6 +1713,8 @@ async function listVideos(tabId) {
         durationMs: Number.isFinite(video.duration) ? Math.round(video.duration * 1_000) : null,
         width: Math.max(Number(video.videoWidth || 0), Number(rect.width || 0)),
         height: Math.max(Number(video.videoHeight || 0), Number(rect.height || 0)),
+        viewportArea: visibleWidth * visibleHeight,
+        inViewport: visibleWidth >= 80 && visibleHeight >= 60,
         playing: Boolean(!video.paused && video.readyState >= 2),
         muted: Boolean(video.muted),
         adLike: /(^|[\s_-])(ad|ads|advert|preroll|postroll|pauseroll|gifvideo)([\s_-]|$)/i.test(ancestry)
@@ -1681,6 +1743,8 @@ function videoScore(video) {
   // 大画面、正在播放、未静音的主播放器优先；
   // 小广告和隐藏预览必须明显降权，避免选错 frame。
   let score = Number(video.width || 0) * Number(video.height || 0);
+  score += Number(video.viewportArea || 0) * 2;
+  if (video.inViewport === false) score -= 800_000_000;
   if (Number(video.width) > 0 && (Number(video.width) < 320 || Number(video.height) < 180)) {
     score -= 500_000_000;
   }
@@ -1706,7 +1770,7 @@ async function discoverPageMediaDefinitions(tabId, frameId = 0) {
           let valid = false;
           try {
             const parsed = new URL(url);
-            valid = /^https?:$/i.test(parsed.protocol) && /\.(?:m3u8|mp4|m4v|mov|webm)$/i.test(parsed.pathname);
+            valid = /^https?:$/i.test(parsed.protocol) && /\.m3u8$/i.test(parsed.pathname);
           } catch {
             valid = false;
           }

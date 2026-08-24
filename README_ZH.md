@@ -41,7 +41,7 @@ Koe Helper 目前要求 **macOS 15 或更高版本**、**ego-lite**，以及已�
 2. 在仓库根目录运行 `helper/scripts/install-ego-lite.sh <扩展 ID>`。
 3. 重新加载 Koe，打开「字幕记录与设置」，选择「标签页视频 · 本地精准」。
 
-安装脚本会构建用户级 Native Messaging Helper，并且只允许 ego-lite 中指定扩展 ID 的 Koe 调用。首次使用时，WhisperKit 会下载约 626 MB 的 `large-v3` 模型，之后复用本机缓存。Helper 支持媒体直链，以及未加密、非 byte-range 的 MPEG-TS HLS 点播；不会绕过 DRM，也不会读取浏览器 Cookie 或 Authorization。
+安装脚本会构建用户级 Native Messaging Helper，并且只允许 ego-lite 中指定扩展 ID 的 Koe 调用。首次使用时，WhisperKit 会下载约 626 MB 的 `large-v3` 模型，之后复用本机缓存。Helper 支持未加密、非 byte-range 的 MPEG-TS HLS 点播（`.m3u8`）；普通 MP4、DASH/MSE 与 DRM 媒体暂不支持，也不会读取浏览器 Cookie 或 Authorization。
 
 ### 隐私
 

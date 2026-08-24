@@ -223,7 +223,8 @@ public enum MediaURLSafety {
                 NI_NUMERICHOST
             ) == 0 else { return false }
             sawAddress = true
-            guard publicAddressStatus(String(cString: buffer)) == true else { return false }
+            let addressBytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+            guard publicAddressStatus(String(decoding: addressBytes, as: UTF8.self)) == true else { return false }
         }
         return sawAddress
     }

@@ -108,7 +108,22 @@ function makeContext() {
     "media fingerprint removes the complete signed query instead of relying on a token-name blacklist");
   const currentMp4 = "https://video.example/media/new.mp4?token=NEW_SECRET";
   const explicit = run(`selectMediaCandidate(5, { frameId: 0, currentSrc: ${JSON.stringify(currentMp4)}, resourceUrls: [] })`);
-  check(explicit?.url === currentMp4, "the player's explicit current source outranks a cached HLS from an old video");
+  check(explicit?.url === signed,
+    "an unsupported MP4 currentSrc cannot displace a usable HLS playlist");
+  const genericMaster = "https://video.example/title/master.m3u8";
+  const generic1080 = "https://video.example/title/1080/high.m3u8";
+  run(`mediaCandidatesByTab.delete(21);
+    rememberMediaCandidate(21, { url: ${JSON.stringify(genericMaster)}, frameId: 0, source: "performance", seenAt: Date.now() - 50 });
+    rememberMediaCandidate(21, { url: ${JSON.stringify(generic1080)}, frameId: 0, source: "webRequest", seenAt: Date.now() });`);
+  const genericSelected = run(`selectMediaCandidate(21, { frameId: 0, currentSrc: "blob:https://site.example/id", resourceUrls: [] })`);
+  check(genericSelected?.url === genericMaster,
+    "a generic HLS master outranks a newer high-resolution media playlist");
+  check(run(`playlistStructureScore("https://cdndirector.dailymotion.com/path/title/master.m3u8")`)
+      > run(`playlistStructureScore("https://dmxleo.dailymotion.com/path/title/master.m3u8")`),
+    "Dailymotion's media director outranks its non-media .m3u8 metadata endpoint");
+  check(run(`videoScore({ width: 989, height: 556, viewportArea: 549_884, inViewport: true, playing: false, muted: false })`)
+      > run(`videoScore({ width: 950, height: 250, viewportArea: 0, inViewport: false, playing: true, muted: false })`),
+    "an off-screen autoplay banner cannot outrank the visible main player");
   check(run(`normalizeOfflineCue({ startMs: 1_793_500, endMs: 1_794_000, text: "x" }, 1_793_000)`) === null,
     "duration clamping cannot create an inverted cue");
 
@@ -243,6 +258,109 @@ function makeContext() {
       && raceStarts[0].currentTimeMs === 500_000 && raceStarts[0].source.url === freshSigned,
     "only the fresh media context starts Helper at the new playback position");
   run(`chrome.scripting.executeScript = async () => []`);
+
+  const raceOld = "https://video.example/race/old.m3u8?token=OLD";
+  const raceFresh = "https://video.example/race/fresh.m3u8?token=FRESH";
+  h.nativeMessages.length = 0;
+  run(`tabStates.set(20, {
+    tabId: 20, frameId: 0, jobId: "offline-20", mediaEpoch: 6,
+    captureStarted: true, status: "starting", engine: "local", sessionMode: "offline",
+    source: "tab", sourceUrl: ${JSON.stringify(raceOld)}, pageUrl: "https://site.example/watch",
+    translate: false, mediaIdentity: "identity-20"
+  }); captureTabId = 20;
+  originalSessionSetForRace = chrome.storage.session.set;
+  firstPersistForRace = true;
+  chrome.storage.session.set = (values) => {
+    if (values.koeTabs && firstPersistForRace) {
+      firstPersistForRace = false;
+      return new Promise((resolve) => { releaseFirstPersistForRace = () => {
+        Object.assign(${JSON.stringify(h.sessionStore)}, values);
+        resolve();
+      }; });
+    }
+    return originalSessionSetForRace(values);
+  };`);
+  const firstSameEpochContext = run(`receiveMediaContext({
+    type: "MEDIA_CONTEXT", jobId: "offline-20", mediaEpoch: 6,
+    currentSrc: ${JSON.stringify(raceOld)}, resourceUrls: [],
+    currentTimeMs: 10_000, durationMs: 600_000, playbackRate: 1
+  }, { tab: { id: 20 }, frameId: 0 })`);
+  await settle();
+  const secondSameEpochContext = run(`receiveMediaContext({
+    type: "MEDIA_CONTEXT", jobId: "offline-20", mediaEpoch: 6,
+    currentSrc: ${JSON.stringify(raceFresh)}, resourceUrls: [],
+    currentTimeMs: 12_000, durationMs: 600_000, playbackRate: 1
+  }, { tab: { id: 20 }, frameId: 0 })`);
+  await settle();
+  run(`releaseFirstPersistForRace();`);
+  await Promise.all([firstSameEpochContext, secondSameEpochContext]);
+  await settle();
+  run(`chrome.storage.session.set = originalSessionSetForRace;`);
+  const sameEpochStarts = h.nativeMessages.filter((message) => message.type === "start" && message.jobId === "offline-20");
+  check(sameEpochStarts.length === 1
+      && sameEpochStarts[0].source.url === raceFresh
+      && sameEpochStarts[0].currentTimeMs === 12_000,
+    "a newer same-epoch media context replaces an in-flight reservation and starts exactly once");
+
+  h.nativeMessages.length = 0;
+  h.contentMessages.length = 0;
+  run(`tabStates.set(19, {
+    tabId: 19, frameId: 0, jobId: "offline-19", mediaEpoch: 5,
+    captureStarted: true, status: "live", engine: "local", sessionMode: "offline",
+    source: "tab", sourceUrl: ${JSON.stringify(signed)}, pageUrl: "https://site.example/watch",
+    translate: false, mediaIdentity: "identity-19", offlineStartedEpoch: 5,
+    offlineRunActive: false, offlinePreparedUntilMs: 120_000, offlineCueRevision: 0,
+    offlineSourceUrl: ${JSON.stringify(signed)}, offlineContextVersion: 1,
+    offlineContext: { currentTimeMs: 50_000, durationMs: 600_000, playbackRate: 1 }
+  }); captureTabId = 19;`);
+  run(`maybeExtendOfflinePrep(tabStates.get(19))`);
+  await settle();
+  check(!h.nativeMessages.some((message) => message.type === "start"),
+    "a comfortably buffered local batch is not restarted by a heartbeat");
+  run(`tabStates.get(19).offlineContext.currentTimeMs = 76_000;
+    maybeExtendOfflinePrep(tabStates.get(19));
+    maybeExtendOfflinePrep(tabStates.get(19));`);
+  await settle();
+  check(h.nativeMessages.filter((message) => message.type === "start").length === 1,
+    "approaching the prepared boundary starts exactly one refill batch");
+  await run(`handleNativeMessage({
+    type: "status", jobId: "offline-19", mediaEpoch: 5, stage: "ready",
+    detail: "ready", preparedUntilMs: 196_000
+  })`);
+  run(`tabStates.get(19).offlineContext.currentTimeMs = 200_000;
+    maybeExtendOfflinePrep(tabStates.get(19));`);
+  await settle();
+  check(h.nativeMessages.filter((message) => message.type === "start").length === 2,
+    "passing a prepared boundary immediately starts the next refill instead of stalling");
+  await run(`handleNativeMessage({
+    type: "cues", jobId: "offline-19", mediaEpoch: 5, revision: 4,
+    cues: [{ cueId: "batch-a", startMs: 201_000, endMs: 202_000, text: "First batch." }]
+  })`);
+  await run(`handleNativeMessage({
+    type: "cues", jobId: "offline-19", mediaEpoch: 5, revision: 1,
+    cues: [{ cueId: "batch-b", startMs: 203_000, endMs: 204_000, text: "Second batch." }]
+  })`);
+  const refillRevisions = h.contentMessages
+    .filter((entry) => entry.message.type === "OFFLINE_CUES" && entry.message.jobId === "offline-19")
+    .map((entry) => entry.message.revision);
+  check(refillRevisions.length === 2 && refillRevisions[0] === 4 && refillRevisions[1] === 5,
+    "helper revisions are rebased monotonically across same-epoch refill batches");
+
+  run(`tabStates.set(22, {
+    tabId: 22, frameId: 0, jobId: "offline-22", mediaEpoch: 1,
+    captureStarted: true, status: "starting", engine: "local", sessionMode: "offline",
+    source: "tab", sourceUrl: "blob:https://video.example/dash", pageUrl: "https://video.example/watch",
+    translate: false, offlineMissingMediaSince: Date.now() - 11_000
+  }); captureTabId = 22; mediaCandidatesByTab.delete(22);`);
+  const unsupportedPending = await run(`receiveMediaContext({
+    type: "MEDIA_CONTEXT", jobId: "offline-22", mediaEpoch: 1,
+    currentSrc: "blob:https://video.example/dash", resourceUrls: [],
+    currentTimeMs: 12_000, durationMs: 60_000, playbackRate: 1
+  }, { tab: { id: 22 }, frameId: 0 })`);
+  check(unsupportedPending.pending === true
+      && run(`tabStates.get(22).status`) === "error"
+      && run(`tabStates.get(22).captureStarted`) === true,
+    "an HLS-less player receives a clear recoverable unsupported-format state instead of spinning forever");
 
   h.runtimeMessages.length = 0;
   h.events.length = 0;

@@ -41,7 +41,7 @@ Koe Helper currently requires **macOS 15 or later**, **ego-lite**, and an instal
 2. From the repository root, run `helper/scripts/install-ego-lite.sh <extension ID>`.
 3. Reload Koe, open “Caption history & settings”, and choose “Tab video · Local accurate”.
 
-The installer builds a user-scoped Native Messaging helper and registers it only for the supplied Koe extension ID in ego-lite. On first use, WhisperKit downloads the approximately 626 MB `large-v3` model; later sessions reuse the local cache. The helper supports direct media and unencrypted, non-byte-range MPEG-TS HLS VOD. It does not bypass DRM or read browser cookies or authorization headers.
+The installer builds a user-scoped Native Messaging helper and registers it only for the supplied Koe extension ID in ego-lite. On first use, WhisperKit downloads the approximately 626 MB `large-v3` model; later sessions reuse the local cache. The helper supports unencrypted, non-byte-range MPEG-TS HLS VOD (`.m3u8`). Plain MP4, DASH/MSE, and DRM media are currently unsupported, and the helper does not read browser cookies or authorization headers.
 
 ### Privacy
 

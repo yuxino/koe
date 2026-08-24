@@ -21,6 +21,6 @@ Koe Helper 是可选的 macOS 本地字幕处理器。扩展通过 Native Messag
 
 ## 支持边界
 
-- 支持直链媒体，以及未加密、非 byte-range 的 MPEG-TS HLS VOD。
+- 支持未加密、非 byte-range 的 MPEG-TS HLS VOD（`.m3u8`）；普通 MP4、DASH/MSE 和 DRM 媒体会明确提示暂不支持。
 - 不绕过 DRM，也不读取 Cookie 或 Authorization。
 - Helper 会拒绝 localhost、回环、链路本地和私有网段，包括 HLS 重定向与分片地址。

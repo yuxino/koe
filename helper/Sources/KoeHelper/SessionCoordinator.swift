@@ -8,6 +8,7 @@ actor SessionCoordinator {
     private let scheduler = WindowScheduler()
     private var activeKey: SessionKey?
     private var activeTask: Task<Void, Never>?
+    private var nextRunID = 0
 
     init(writer: NativeMessageWriter) throws {
         self.writer = writer
@@ -48,7 +49,12 @@ actor SessionCoordinator {
     }
 
     private func startSession(_ request: StartRequest) {
-        let key = SessionKey(jobId: request.jobId, mediaEpoch: request.mediaEpoch)
+        nextRunID += 1
+        let key = SessionKey(
+            jobId: request.jobId,
+            mediaEpoch: request.mediaEpoch,
+            runID: nextRunID
+        )
         activeTask?.cancel()
         activeKey = key
         let next = Task { [weak self] in
@@ -291,6 +297,10 @@ actor SessionCoordinator {
 private struct SessionKey: Equatable, Sendable {
     let jobId: String
     let mediaEpoch: Int
+    /// Refill batches intentionally reuse the public job/epoch. Keep an
+    /// internal identity so a cancelled older task cannot clear or report for
+    /// the newer batch that replaced it.
+    let runID: Int
 }
 
 private struct ExtractedAudio {

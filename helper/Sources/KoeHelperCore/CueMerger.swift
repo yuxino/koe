@@ -63,14 +63,23 @@ public struct CueAccumulator: Sendable {
 
             let chunks = Self.readableChunks(text, durationMs: end - start)
             let durations = Self.chunkDurations(chunks, totalDurationMs: end - start)
-            var chunkStart = start
+            let wordTimings = Self.wordTimedRanges(raw: raw, chunks: chunks)
+            var proportionalStart = start
             for index in chunks.indices {
                 let chunk = chunks[index]
-                let chunkEnd = index == chunks.index(before: chunks.endIndex)
-                    ? end
-                    : min(end, chunkStart + durations[index])
+                let chunkStart: Double
+                let chunkEnd: Double
+                if let timing = wordTimings?[index] {
+                    chunkStart = max(window.startMs, window.startMs + timing.startSeconds * 1_000)
+                    chunkEnd = min(durationMs, window.startMs + timing.endSeconds * 1_000)
+                } else {
+                    chunkStart = proportionalStart
+                    chunkEnd = index == chunks.index(before: chunks.endIndex)
+                        ? end
+                        : min(end, chunkStart + durations[index])
+                    proportionalStart = chunkEnd
+                }
                 let midpoint = (chunkStart + chunkEnd) / 2
-                defer { chunkStart = chunkEnd }
                 guard chunkEnd > chunkStart, midpoint >= window.emitAfterMs else { continue }
                 let candidate = SubtitleCue(
                     cueId: Self.cueID(startMs: chunkStart, endMs: chunkEnd, text: chunk.text),
@@ -136,6 +145,74 @@ public struct CueAccumulator: Sendable {
             ))
         }
         return chunks.count > 1 ? chunks : [complete]
+    }
+
+    /// Map readable chunks back to complete Whisper words so every split uses
+    /// the real spoken boundary. If token text or timing is ambiguous, the
+    /// caller falls back to the conservative proportional timeline.
+    private static func wordTimedRanges(
+        raw: RawCue,
+        chunks: [ReadableChunk]
+    ) -> [(startSeconds: Double, endSeconds: Double)]? {
+        guard chunks.count > 1,
+              !containsCJK(raw.text),
+              !raw.timedWords.isEmpty else { return nil }
+
+        let compactRaw = compactCharacters(raw.text)
+        let compactWords = raw.timedWords.map { compactCharacters($0.text) }
+        guard !compactRaw.isEmpty,
+              compactWords.allSatisfy({ !$0.isEmpty }),
+              compactWords.flatMap({ $0 }) == compactRaw else { return nil }
+
+        let compactChunks = chunks.map { compactCharacters($0.text) }
+        guard compactChunks.allSatisfy({ !$0.isEmpty }),
+              compactChunks.flatMap({ $0 }) == compactRaw else { return nil }
+
+        var ranges: [(startSeconds: Double, endSeconds: Double)] = []
+        var wordIndex = 0
+        var previousEnd = -Double.infinity
+        for chunk in compactChunks {
+            let firstWord = wordIndex
+            var consumedCharacters = 0
+            while wordIndex < compactWords.count,
+                  consumedCharacters < chunk.count {
+                consumedCharacters += compactWords[wordIndex].count
+                wordIndex += 1
+            }
+            guard consumedCharacters == chunk.count, wordIndex > firstWord else { return nil }
+
+            let startSeconds = raw.timedWords[firstWord].startSeconds
+            let endSeconds = raw.timedWords[wordIndex - 1].endSeconds
+            guard startSeconds.isFinite,
+                  endSeconds.isFinite,
+                  startSeconds >= raw.startSeconds,
+                  endSeconds <= raw.endSeconds,
+                  startSeconds >= previousEnd,
+                  endSeconds > startSeconds else { return nil }
+            ranges.append((startSeconds, endSeconds))
+            previousEnd = endSeconds
+        }
+        guard wordIndex == raw.timedWords.count else { return nil }
+        return ranges
+    }
+
+    private static func compactCharacters(_ text: String) -> [Character] {
+        text.filter { !isWhitespace($0) }
+    }
+
+    private static func containsCJK(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x1100...0x11ff,
+                 0x2e80...0x9fff,
+                 0xac00...0xd7af,
+                 0xf900...0xfaff,
+                 0x20000...0x2fa1f:
+                return true
+            default:
+                return false
+            }
+        }
     }
 
     private static func bestBreakIndex(
