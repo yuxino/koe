@@ -21,6 +21,7 @@ function makeContext() {
   const requestListeners = [];
   const runtimeMessages = [];
   const events = [];
+  const scriptInjections = [];
   const localConfig = { koeCaptureSource: "tab", koeAsrEngine: "local", koeTranslate: true };
   const port = {
     postMessage(message) {
@@ -78,7 +79,12 @@ function makeContext() {
       action: { openPopup: async () => undefined, setPopup: async () => undefined, setBadgeText: async () => undefined },
       sidePanel: { open: async () => undefined, setOptions: async () => undefined, setPanelBehavior: async () => undefined },
       tabCapture: { getMediaStreamId: async () => "stream" },
-      scripting: { executeScript: async () => [] },
+      scripting: {
+        executeScript: async (details) => {
+          scriptInjections.push(JSON.parse(JSON.stringify(details)));
+          return [];
+        }
+      },
       offscreen: { createDocument: async () => undefined },
       declarativeNetRequest: { updateSessionRules: async () => undefined }
     },
@@ -86,12 +92,24 @@ function makeContext() {
   };
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync("background.js", "utf8"), ctx, { filename: "background.js" });
-  return { ctx, sessionStore, nativeMessages, contentMessages, requestListeners, runtimeMessages, events, localConfig };
+  return {
+    ctx, sessionStore, nativeMessages, contentMessages, requestListeners,
+    runtimeMessages, events, scriptInjections, localConfig
+  };
 }
 
 (async () => {
   const h = makeContext();
   const run = (source) => vm.runInContext(source, h.ctx);
+  await run(`bootPromise`);
+  run(`tabStates.set(31, { tabId: 31, frameId: 2, jobId: "offline-upgrade-31", engine: "local" })`);
+  await run(`refreshKnownContentScripts()`);
+  check(h.scriptInjections.some((details) => details.target?.tabId === 31
+      && details.target?.frameIds?.[0] === 2
+      && details.files?.includes("content.js")),
+    "an extension update reinjects the content script into known sessions to remove legacy page UI");
+  run(`tabStates.delete(31)`);
+  h.scriptInjections.length = 0;
   const signed = "https://video.example/media/master.m3u8?token=TOP_SECRET&hash=HASH_SECRET&hdnea=EDGE_SECRET&expires=999999";
   h.requestListeners[0]?.({ tabId: 4, frameId: 0, url: signed, timeStamp: Date.now() });
   check(run(`selectMediaCandidate(4, { frameId: 0, currentSrc: "blob:https://site.example/inactive", resourceUrls: [] })`) === null,
@@ -410,7 +428,7 @@ function makeContext() {
     tabId: 22, frameId: 0, jobId: "offline-22", mediaEpoch: 1,
     captureStarted: true, status: "starting", engine: "local", sessionMode: "offline",
     source: "tab", sourceUrl: "blob:https://video.example/dash", pageUrl: "https://video.example/watch",
-    translate: false, offlineMissingMediaSince: Date.now() - 11_000
+    translate: false, startedAt: Date.now(), offlineMissingMediaSince: Date.now() - 11_000
   }); captureTabId = 22; mediaCandidatesByTab.delete(22);`);
   const unsupportedPending = await run(`receiveMediaContext({
     type: "MEDIA_CONTEXT", jobId: "offline-22", mediaEpoch: 1,
@@ -422,24 +440,33 @@ function makeContext() {
       && run(`tabStates.get(22).captureNeedsGesture`) === true
       && run(`tabStates.get(22).captureStarted`) === true,
     "an HLS-less player waits for one browser gesture and keeps the local session recoverable");
-  const needsAudioStatus = h.contentMessages
-    .find((entry) => entry.message.type === "KOE_MEDIA_STATUS" && entry.message.jobId === "offline-22")?.message;
-  check(needsAudioStatus?.kind === "action"
-      && needsAudioStatus?.issueCode === "needs_tab_audio"
-      && /点/.test(needsAudioStatus?.title || ""),
-    "an HLS-less player explains the required tab-audio action over the video");
+  const needsAudioPageStatuses = h.contentMessages
+    .filter((entry) => entry.tabId === 22 && entry.message.type === "KOE_MEDIA_STATUS")
+    .map((entry) => entry.message);
+  const needsAudioControllerState = (await run(`handle({ type: "GET_STATE" }, {})`)).state;
+  check(needsAudioControllerState?.issueKind === "action"
+      && needsAudioControllerState?.issueCode === "needs_tab_audio"
+      && needsAudioPageStatuses.length > 0
+      && needsAudioPageStatuses.every((message) => message.kind === "clear"
+        && !message.jobId && message.mediaEpoch === undefined),
+    "an HLS-less player keeps the required action in controller state without showing it over the video");
 
+  const statusCountBeforeProtectedError = needsAudioPageStatuses.length;
   await run(`handleNativeMessage({
     type: "error", jobId: "offline-22", mediaEpoch: 1,
     issueCode: "protected_media", error: "这个 HLS 视频使用了暂不支持的分片加密。"
   })`);
-  const protectedStatus = h.contentMessages
-    .find((entry) => entry.message.type === "KOE_MEDIA_STATUS"
-      && entry.message.jobId === "offline-22" && entry.message.kind === "error")?.message;
-  check(run(`tabStates.get(22).issueCode`) === "protected_media"
-      && protectedStatus?.issueCode === "protected_media"
-      && /暂/.test(protectedStatus?.title || ""),
-    "a native protected-media error remains classified and visible on the page");
+  const protectedPageStatuses = h.contentMessages
+    .filter((entry) => entry.tabId === 22 && entry.message.type === "KOE_MEDIA_STATUS")
+    .map((entry) => entry.message);
+  const protectedControllerState = (await run(`handle({ type: "GET_STATE" }, {})`)).state;
+  check(protectedControllerState?.issueCode === "protected_media"
+      && protectedControllerState?.issueKind === "error"
+      && protectedControllerState?.status === "error"
+      && protectedPageStatuses.length > statusCountBeforeProtectedError
+      && protectedPageStatuses.every((message) => message.kind === "clear"
+        && !message.jobId && message.mediaEpoch === undefined),
+    "a protected-media error remains classified in controller state without showing it over the video");
 
   h.runtimeMessages.length = 0;
   h.events.length = 0;

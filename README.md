@@ -5,7 +5,7 @@
   <p><a href="README_ZH.md">简体中文</a></p>
 </div>
 
-Koe（こえ / 声）turns speech from a browser tab or microphone into media-synced subtitles and optional Simplified Chinese translation. Captions appear directly over the video; the side panel opens only when you want settings or scroll-back history.
+Koe（こえ / 声）turns speech from a browser tab or microphone into media-synced subtitles and optional Simplified Chinese translation. Only captions appear over the video; controls, prompts, and errors stay in the popup or side panel.
 
 The regular live modes remain a pure Manifest V3 extension: they require no video download, ffmpeg, Node.js, or localhost service. On ego-lite for macOS, you can optionally install Koe Helper for more accurate, progressive local subtitles.
 

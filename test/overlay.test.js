@@ -30,10 +30,7 @@ function makeElement(tag = "div") {
     const nodes = {
       ".stage": makeElement("stage"),
       ".original": makeElement("original"),
-      ".translation": makeElement("translation"),
-      ".notice": makeElement("notice"),
-      ".notice-title": makeElement("notice-title"),
-      ".notice-detail": makeElement("notice-detail")
+      ".translation": makeElement("translation")
     };
     element.shadowRoot = { innerHTML: "", querySelector: (selector) => nodes[selector] };
     return element.shadowRoot;
@@ -116,46 +113,31 @@ function makeElement(tag = "div") {
   vm.runInContext(fs.readFileSync("content.js", "utf8"), ctx, { filename: "content.js" });
   const send = (message) => messageListeners.forEach((listener) => listener(message));
 
-  // 页面级状态与字幕是两套独立展示：需要操作/不支持必须一直留在视频右上角，
-  // 直到重试成功、换源或停止，不能像字幕一样几秒后自动消失。
+  // 操作提示和错误状态属于 Koe 控制器，不能为了显示状态而在视频页挂载 UI。
   send({
     type: "KOE_MEDIA_STATUS", jobId: "offline-wait", mediaEpoch: 1,
     kind: "action", issueCode: "needs_tab_audio",
     title: "点一下 Koe 继续", detail: "当前播放器需要一次标签页声音授权。"
   });
-  const statusOverlay = root.children[0];
-  const notice = statusOverlay.shadowRoot.querySelector(".notice");
-  check(notice.classList.contains("visible"), "recoverable media status shows a persistent page notice");
-  check(statusOverlay.shadowRoot.querySelector(".notice-title").textContent === "点一下 Koe 继续",
-    "recoverable notice keeps the exact action title");
-  check(statusOverlay.shadowRoot.querySelector(".notice-detail").textContent === "当前播放器需要一次标签页声音授权。",
-    "recoverable notice keeps the exact action detail");
-  advance(30_000);
-  check(notice.classList.contains("visible"), "media notice does not auto-hide with subtitle timers");
-
-  send({ type: "OFFLINE_SESSION", jobId: "offline-wait", mediaEpoch: 1, translate: true });
-  check(notice.classList.contains("visible"), "the matching session does not erase an action status that arrived first");
-  send({ type: "OFFLINE_SESSION", jobId: "offline-wait", mediaEpoch: 1, translate: true });
-  check(notice.classList.contains("visible"), "same-session heartbeats keep the persistent action notice visible");
-  send({ type: "OFFLINE_SESSION", jobId: "offline-wait", mediaEpoch: 2, translate: true });
-  check(!notice.classList.contains("visible"), "new offline session clears the action notice");
+  check(root.children.length === 0, "recoverable media status does not mount an in-video notice");
   send({
-    type: "KOE_MEDIA_STATUS", jobId: "offline-wait", mediaEpoch: 2,
+    type: "KOE_MEDIA_STATUS", jobId: "offline-wait", mediaEpoch: 1,
     kind: "error", issueCode: "unsupported_audio",
     title: "暂不支持此音轨", detail: "这个播放器没有可读取的音频格式。"
   });
-  check(notice.classList.contains("visible"), "terminal media issue shows a persistent page notice");
-  check(statusOverlay.shadowRoot.querySelector(".notice-title").textContent === "暂不支持此音轨",
-    "terminal notice states that the audio is unsupported");
+  check(root.children.length === 0, "terminal media status does not mount an in-video notice");
+
+  send({ type: "OFFLINE_SESSION", jobId: "offline-wait", mediaEpoch: 2, translate: true });
+  const overlay = root.children[0];
+  check(!overlay.shadowRoot.innerHTML.includes('class="notice"'),
+    "the subtitle shadow tree contains no status-card markup");
   send({
     type: "OFFLINE_CUES", jobId: "offline-wait", mediaEpoch: 2, revision: 1,
     cues: [{ cueId: "recovered", startMs: 0, endMs: 1_000, text: "Recovered." }]
   });
-  check(!notice.classList.contains("visible"), "successful cues clear the terminal notice");
 
   send({ type: "LIVE_SESSION", jobId: "job-1", mediaEpoch: 3, translate: true });
   send({ type: "LIVE_SUBTITLES", jobId: "job-1", mediaEpoch: 3, seq: 1, unit: true, lines: [{ text: "Original line" }] });
-  const overlay = root.children[0];
   check(overlay.shadowRoot.querySelector(".original").textContent === "Original line", "current epoch original renders");
   send({ type: "LIVE_TRANSLATED", jobId: "job-1", mediaEpoch: 2, seq: 1, unit: true, lines: [{ translated: "旧字幕" }] });
   check(overlay.shadowRoot.querySelector(".translation").textContent === "", "stale epoch translation rejected");
@@ -170,7 +152,7 @@ function makeElement(tag = "div") {
   });
   send({ type: "LIVE_SESSION", jobId: "epoch-job", mediaEpoch: 9, translate: true });
   send({ type: "LIVE_STOP", jobId: "epoch-job", mediaEpoch: 9 });
-  check(notice.classList.contains("visible"), "an older-epoch stop cannot clear the current live notice");
+  check(!overlay.shadowRoot.querySelector(".notice"), "media errors remain absent from the active video overlay");
   send({
     type: "LIVE_SUBTITLES", jobId: "epoch-job", mediaEpoch: 10, seq: 1, unit: true,
     lines: [{ text: "Current epoch still active" }]
@@ -189,11 +171,9 @@ function makeElement(tag = "div") {
     type: "LIVE_STOP", jobId: "job-1", mediaEpoch: 3,
     issueCode: "unsupported_audio", error: "这个播放器没有可读取的音频格式。"
   });
-  check(notice.classList.contains("visible"), "terminal live stop preserves the visible failure reason");
   send({ type: "LIVE_STOP", jobId: "older-job", mediaEpoch: 99 });
-  check(notice.classList.contains("visible"), "a stale stop from another job cannot clear the current failure notice");
   send({ type: "LIVE_STOP", jobId: "job-1", mediaEpoch: 3 });
-  check(!notice.classList.contains("visible"), "an explicit normal live stop clears the failure notice");
+  check(!overlay.shadowRoot.querySelector(".notice"), "terminal stops cannot add a status card to the video");
 
   send({ type: "LIVE_SESSION", jobId: "job-1", mediaEpoch: 3, translate: true });
 
@@ -291,14 +271,13 @@ function makeElement(tag = "div") {
     title: "点一下 Koe 继续", detail: "需要重新取得标签页声音。"
   });
   documentListeners.emptied({ target: video });
-  check(!notice.classList.contains("visible"), "a media source change clears the page notice");
   send({
     type: "KOE_MEDIA_STATUS", jobId: "offline-1", mediaEpoch: 7,
     kind: "error", issueCode: "media_unreadable",
     title: "暂时无法读取这个视频", detail: "请重试。"
   });
   send({ type: "OFFLINE_STOP", jobId: "offline-1", mediaEpoch: 7 });
-  check(!notice.classList.contains("visible"), "stopping a session clears the page notice");
+  check(!overlay.shadowRoot.querySelector(".notice"), "source changes and stops keep the video free of status cards");
 
   console.log(fail === 0 ? "overlay regression PASS" : `${fail} failures`);
   process.exit(fail ? 1 : 0);

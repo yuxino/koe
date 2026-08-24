@@ -2,9 +2,11 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+> **Product update:** This plan was revised after review to remove the in-video media-status notice. Media issues remain visible in the popup and side panel; the page overlay now contains subtitles only.
+
 **Goal:** Keep local subtitles alive across tab/service-worker transitions and make recoverable or unsupported media states immediately visible without disrupting the video.
 
-**Architecture:** Preserve and resume the active local session from `chrome.storage.session`, make offscreen capture starts identity-aware, and carry a stable `issueCode` plus user-facing detail from the Helper through the background state. Render that shared state as a compact persistent notice over the video and as explicit status text in the popup and side panel; clear it as soon as the session recovers or the media changes.
+**Architecture:** Preserve and resume the active local session from `chrome.storage.session`, make offscreen capture starts identity-aware, and carry a stable `issueCode` plus user-facing detail from the Helper through the background state. Render that shared state as explicit status text in the popup and side panel; keep the page overlay subtitle-only and clear issue state as soon as the session recovers or the media changes.
 
 **Tech Stack:** Chrome Manifest V3 service worker/content scripts/offscreen document, vanilla HTML/CSS/JavaScript, Swift Native Messaging Helper, Node VM regression tests, Swift Package checks.
 
@@ -94,17 +96,17 @@ Verify these states:
 - helper disconnect → `helper_unavailable`, toolbar `!`
 - successful cues/status → issue fields cleared
 
-Also assert that the background sends a page status message containing `kind`, `issueCode`, `title`, and `detail`.
+Also assert that `GET_STATE` keeps returning the issue after a terminal failure releases `captureTabId`, while the page receives only a legacy `clear` message and never an actionable/error card.
 
 **Step 2: Run tests and verify failure**
 
 Run: `node test/offline-media.test.js && node test/action-indicator.test.js`
 
-Expected: current state has only `stageDetail`, and recoverable status never reaches the page.
+Expected: current state has only `stageDetail`, terminal errors disappear from controller queries after capture ends, and actionable/error status still reaches the page.
 
 **Step 3: Implement status helpers**
 
-Create a small background helper that updates `status`, `stageDetail`, `issueCode`, and `issueKind`, persists the state, and sends `KOE_MEDIA_STATUS` to the correct content frame. Use it for waiting-for-tab-audio, native errors, helper disconnects, and capture failures. Clear issue fields on new session, retry, `live`, or successful cues.
+Create a small background helper that updates `status`, `stageDetail`, `issueCode`, and `issueKind`, persists the state, and sends only a legacy `KOE_MEDIA_STATUS` clear to the correct content frame. Use it for waiting-for-tab-audio, native errors, helper disconnects, and capture failures. Clear issue fields on new session, retry, `live`, or successful cues, and expose the most recent terminal issue to controller queries after capture ends.
 
 **Step 4: Run tests and verify pass**
 
@@ -112,7 +114,7 @@ Run: `node test/offline-media.test.js && node test/action-indicator.test.js`
 
 Expected: status propagation and badge semantics pass without relying on localized string parsing.
 
-### Task 4: Render the status visibly and consistently
+### Task 4: Render controller status visibly and consistently
 
 **Files:**
 - Modify: `content.js`
@@ -127,17 +129,17 @@ Expected: status propagation and badge semantics pass without relying on localiz
 
 **Step 1: Write failing UI regressions**
 
-Assert that a recoverable status produces a persistent in-video notice with the exact action, a terminal issue produces a clear unsupported/failure notice, and `OFFLINE_SESSION`, successful cues, retry, source change, or stop clears it. Assert popup and side panel render `starting`, `captureNeedsGesture`, and `error` details instead of generic copy.
+Assert that recoverable and terminal statuses do not mount an in-video notice, while popup and side panel render `starting`, `captureNeedsGesture`, and `error` details instead of generic copy. Keep successful subtitle rendering covered independently.
 
 **Step 2: Run the UI tests and verify failure**
 
 Run: `node test/overlay.test.js && node test/panel-open.test.js && node test/sidepanel-draft.test.js`
 
-Expected: current page handling discards errors and the extension surfaces render only generic text.
+Expected: current page handling still mounts a status notice and the extension surfaces render only generic text.
 
-**Step 3: Implement the in-video notice**
+**Step 3: Keep the video overlay subtitle-only**
 
-Add a separate `.notice` inside the existing Shadow DOM. Position it at the video's upper-right, use a near-black background, white primary text, muted secondary text, a 1px neutral border, no gradient, and no pointer interception. Keep it visible until state changes; do not reuse the subtitle lines or their bottom placement.
+Remove the `.notice` markup, styling, state, and message handling from the content script. Keep issue classification in background state for controller surfaces, and send only a legacy `clear` page message so an already-open page from an older build can dismiss an existing notice.
 
 **Step 4: Implement popup and side-panel states**
 
@@ -147,7 +149,7 @@ Make popup `render()` always set status copy for idle, starting, needs-action, l
 
 Run: `node test/overlay.test.js && node test/panel-open.test.js && node test/sidepanel-draft.test.js`
 
-Expected: all UI state regressions pass.
+Expected: all UI state regressions pass, and only actual subtitles can mount over the video.
 
 ### Task 5: Full verification and visual QA
 
@@ -170,7 +172,7 @@ Expected: Helper checks pass and the diff has no whitespace errors.
 
 **Step 3: Visual QA in ego-lite**
 
-Load the unpacked extension, verify a supported HLS video, a non-HLS page requiring tab-audio permission, and a forced terminal error. Confirm the notice stays within the video at normal and fullscreen sizes, does not cover subtitles, and clears immediately when retry succeeds or media changes.
+Load the unpacked extension, verify a supported HLS video, a non-HLS page requiring tab-audio permission, and a forced terminal error. Confirm the video shows subtitles only at normal and fullscreen sizes, while action/error detail remains available in the popup and side panel and clears immediately when retry succeeds or media changes.
 
 **Step 4: Review the final diff**
 

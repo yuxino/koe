@@ -18,23 +18,39 @@ function makeElement() {
 }
 
 // sendMessageThrows=true 模拟扩展上下文失效（同步 throw）
-function runContent({ version = "1.6.28", sendMessageThrows = false } = {}) {
+function runContent({
+  version = "1.6.28",
+  sendMessageThrows = false,
+  initialLoadedVersion,
+  legacyOverlay = false
+} = {}) {
   const intervalCallbacks = [];
   const root = makeElement();
+  const legacyNotice = legacyOverlay ? {
+    removed: false,
+    remove() { this.removed = true; }
+  } : null;
+  const legacyHost = legacyOverlay ? {
+    removed: false,
+    shadowRoot: { querySelector: (selector) => selector === ".notice" && !legacyNotice.removed ? legacyNotice : null },
+    remove() { this.removed = true; }
+  } : null;
   root.querySelectorAll = () => [{
     currentSrc: "https://cdn.example/v.mp4", src: "", paused: false, muted: false, readyState: 4
   }];
   const ctx = {
     console, Date, JSON, String, Number, Boolean, Promise, Math, URL, location: { href: "https://youtu.be/abc" },
     window: {
-      __koeLoaded: undefined,
+      __koeLoaded: initialLoadedVersion,
       setInterval: (fn) => { intervalCallbacks.push(fn); return intervalCallbacks.length; },
       addEventListener: () => undefined,
       setTimeout: () => 0, clearTimeout: () => undefined
     },
     document: {
       querySelector: () => root,
-      querySelectorAll: () => root.querySelectorAll(),
+      querySelectorAll: (selector) => selector === "#koe-caption-root"
+        ? (legacyHost && !legacyHost.removed ? [legacyHost] : [])
+        : root.querySelectorAll(selector),
       createElement: () => makeElement(),
       addEventListener: () => undefined,
       documentElement: { appendChild: () => undefined }
@@ -53,7 +69,7 @@ function runContent({ version = "1.6.28", sendMessageThrows = false } = {}) {
   };
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8"), ctx, { filename: "content.js" });
-  return { ctx, intervalCallbacks };
+  return { ctx, intervalCallbacks, legacyHost, legacyNotice };
 }
 
 (async () => {
@@ -78,17 +94,20 @@ function runContent({ version = "1.6.28", sendMessageThrows = false } = {}) {
     console.log("T2 上下文失效 safeSend 吞掉同步 throw PASS");
   }
   {
-    // 场景：版本升级后新副本注入，旧副本检测版本变化自停（不调失效的 chrome API）
-    const h1 = runContent({ version: "1.6.27" }); // 旧副本先加载
-    const h2 = runContent({ version: "1.6.28", sendMessageThrows: true }); // 新副本（上下文有效）
-    check(h2.ctx.window.__koeLoaded === "1.6.28", "新副本版本号不同 → 重新注入");
-    // 旧副本的 interval 回调：检测 __koeLoaded 已是新版本 → 直接 return，不碰 chrome
-    let threw = false;
-    for (const cb of h1.intervalCallbacks) {
-      try { cb(); } catch { threw = true; }
-    }
-    check(!threw, "旧副本检测版本变化后自停，不再抛错");
-    console.log("T3 版本升级旧副本自停 PASS");
+    // 升级后页面可能仍残留旧 Shadow DOM；新副本必须移除旧卡片与旧根节点。
+    const h = runContent({ version: "1.8.3", initialLoadedVersion: "1.8.2", legacyOverlay: true });
+    check(h.ctx.window.__koeLoaded === "1.8.3", "新副本版本号不同 → 重新注入");
+    check(h.legacyNotice.removed, "升级时先移除旧版视频状态卡");
+    check(h.legacyHost.removed, "升级时移除旧字幕根节点，由新副本接管");
+    console.log("T3 版本升级清理旧页面 UI PASS");
+  }
+  {
+    // 开发态同版本重载会命中版本守卫；仍要先摘掉旧状态卡。
+    const h = runContent({ version: "1.8.3", initialLoadedVersion: "1.8.3", legacyOverlay: true });
+    check(h.legacyNotice.removed, "同版本重新注入也会移除旧版视频状态卡");
+    check(!h.legacyHost.removed && h.intervalCallbacks.length === 0,
+      "同版本副本保留原字幕根节点并停止重复初始化");
+    console.log("T4 同版本重载清理旧状态卡 PASS");
   }
   console.log(fail === 0 ? "content-safe 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);

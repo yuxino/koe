@@ -112,7 +112,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.runtime.onStartup.addListener(() => { bootPromise = boot(); });
-chrome.runtime.onInstalled.addListener(() => { bootPromise = boot(); });
+chrome.runtime.onInstalled.addListener(() => {
+  bootPromise = boot();
+  // Chrome 不会自动把更新后的静态 content script 注入已打开页面。
+  // 主动接管已知会话，才能在升级后立刻移除旧版视频状态卡。
+  void bootPromise.then(refreshKnownContentScripts).catch(() => undefined);
+});
 chrome.storage?.onChanged?.addListener((changes, areaName) => {
   if (areaName !== "local" || !PREFERENCE_KEYS.some((key) => changes[key])) return;
   schedulePreferenceMirror();
@@ -419,8 +424,9 @@ async function handle(message, sender) {
   if (message.type === "MEDIA_DISCONTINUITY") return mediaDiscontinuity(message, sender);
   if (message.type === "OFFLINE_VISIBLE_REPORT") return recordOfflineVisible(message, sender);
   if (message.type === "GET_STATE") {
-    // 不带 tabId 时返回“正在捕获的会话”状态（侧边栏字幕流跟随捕获目标，而不是激活页）
-    const state = tabStates.get(tabId) || (message.tabId === undefined ? tabStates.get(captureTabId) : null);
+    // 不带 tabId 时优先返回正在捕获的会话；终止错误已释放 captureTabId，
+    // 此时回退到动作徽标使用的最近状态，让弹窗/侧边栏仍能展示失败原因。
+    const state = tabStates.get(tabId) || (message.tabId === undefined ? currentActionState() : null);
     return { ok: true, state: publicState(state) };
   }
   if (message.type === "CAPTURE_LINES") return forwardCaptureLines(message, "LIVE_SUBTITLES");
@@ -859,7 +865,6 @@ async function runLocalLiveFallback(state, streamId) {
     await publishMediaIssue(state, {
       kind: "action",
       issueCode: "needs_tab_audio",
-      title: "点一下 Koe，继续生成字幕",
       detail: state.stageDetail,
       status: "starting",
       captureNeedsGesture: true
@@ -970,7 +975,6 @@ async function runLocalLiveFallback(state, streamId) {
     await publishMediaIssue(state, {
       kind: "action",
       issueCode: "needs_tab_audio",
-      title: "点一下 Koe，重新读取标签页声音",
       detail: state.stageDetail,
       status: "starting",
       captureNeedsGesture: true
@@ -1059,7 +1063,6 @@ async function resetLocalLiveSession(state, reason = "media") {
     await publishMediaIssue(state, {
       kind: "action",
       issueCode: "needs_tab_audio",
-      title: "点一下 Koe，重新对齐字幕",
       detail: state.stageDetail,
       status: "starting",
       captureNeedsGesture: true
@@ -1549,7 +1552,6 @@ async function runCaptureAuthorization(state) {
         await publishMediaIssue(state, {
           kind: "action",
           issueCode: "needs_tab_audio",
-          title: "点一下 Koe，继续生成字幕",
           detail: state.stageDetail,
           status: "starting",
           captureNeedsGesture: true
@@ -1794,7 +1796,6 @@ async function resetCaptureSession(state) {
       await publishMediaIssue(state, {
         kind: "action",
         issueCode: "needs_tab_audio",
-        title: "点一下 Koe，重新对齐字幕",
         detail: "播放器已经切换，需要重新读取一次标签页声音。",
         status: "starting",
         captureNeedsGesture: true
@@ -2497,7 +2498,6 @@ function mediaIssueTitle(issueCode, kind = "error") {
 async function publishMediaIssue(state, {
   kind = "error",
   issueCode = "media_unreadable",
-  title = "",
   detail = "",
   status,
   captureNeedsGesture
@@ -2508,16 +2508,20 @@ async function publishMediaIssue(state, {
   if (status) state.status = status;
   if (captureNeedsGesture !== undefined) state.captureNeedsGesture = Boolean(captureNeedsGesture);
   if (detail) state.stageDetail = detail;
+  // 状态保留给弹窗与侧边栏；页面只收到 clear，用来清掉升级前内容脚本
+  // 可能已经挂在视频上的旧提示卡。
+  await clearPageMediaStatus(state);
+  await persistStates();
+}
+
+async function clearPageMediaStatus(state) {
   await sendToContent(state, {
     type: "KOE_MEDIA_STATUS",
-    jobId: state.jobId,
-    mediaEpoch: Number(state.mediaEpoch) || 0,
-    kind,
-    issueCode,
-    title: title || mediaIssueTitle(issueCode, kind),
-    detail: String(detail || state.stageDetail || "")
+    kind: "clear",
+    issueCode: "",
+    title: "",
+    detail: ""
   });
-  await persistStates();
 }
 
 async function clearMediaIssue(state, { notify = true } = {}) {
@@ -2526,15 +2530,7 @@ async function clearMediaIssue(state, { notify = true } = {}) {
   state.issueKind = "";
   state.issueCode = "";
   if (!notify || !hadIssue) return;
-  await sendToContent(state, {
-    type: "KOE_MEDIA_STATUS",
-    jobId: state.jobId,
-    mediaEpoch: Number(state.mediaEpoch) || 0,
-    kind: "clear",
-    issueCode: "",
-    title: "",
-    detail: ""
-  });
+  await clearPageMediaStatus(state);
 }
 
 async function resumeLocalTab(tabId) {
@@ -2901,6 +2897,14 @@ async function ensureContentScript(tabId, frameId = 0) {
     target: { tabId, frameIds: [frameId] },
     files: ["media-discovery.js", "content.js"]
   });
+}
+
+async function refreshKnownContentScripts() {
+  const targets = [...tabStates.values()].map((state) => ({
+    tabId: state.tabId,
+    frameId: Number(state.frameId) || 0
+  }));
+  await Promise.allSettled(targets.map(({ tabId, frameId }) => ensureContentScript(tabId, frameId)));
 }
 
 function resolveCaptureState(message = {}) {
