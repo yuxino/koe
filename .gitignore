@@ -1,6 +1,7 @@
 .env
 node_modules/
 coverage/
+dist/
 .DS_Store
 helper/.build/
 helper/.swiftpm/

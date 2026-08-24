@@ -1,7 +1,7 @@
 import Foundation
 import KoeHelperCore
 
-#if canImport(Translation)
+#if canImport(Translation) && !KOE_DISABLE_NATIVE_TRANSLATION
 @preconcurrency import Translation
 import NaturalLanguage
 #endif
@@ -13,7 +13,7 @@ import NaturalLanguage
 /// System Settings and degrade to original-only otherwise).
 enum NativeTranslationCapability {
     static func available() async -> Bool {
-        #if canImport(Translation) && arch(arm64)
+        #if canImport(Translation) && arch(arm64) && !KOE_DISABLE_NATIVE_TRANSLATION
         guard #available(macOS 26.0, *) else { return false }
         // The framework is present on this host. Whether a *specific* source→zh-Hans
         // pair is installed is decided per translation (degrading to original-only),
@@ -29,6 +29,7 @@ enum NativeTranslationCapability {
 /// `Translation` framework. Only usable on macOS 26+; callers must gate access
 /// with `#available(macOS 26.0, *)`. Keeps a session per source language so a
 /// long media item does not re-prepare the pair for every window.
+#if canImport(Translation) && !KOE_DISABLE_NATIVE_TRANSLATION
 @available(macOS 26.0, *)
 actor LocalTranslator {
     static let shared = LocalTranslator()
@@ -89,3 +90,12 @@ actor LocalTranslator {
         return Locale.Language(identifier: best)
     }
 }
+#else
+actor LocalTranslator {
+    static let shared = LocalTranslator()
+
+    func translate(_ text: String, sourceLanguageHint: String?) async -> String? {
+        nil
+    }
+}
+#endif
