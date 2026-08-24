@@ -400,9 +400,10 @@ function makeContext() {
     currentTimeMs: 12_000, durationMs: 60_000, playbackRate: 1
   }, { tab: { id: 22 }, frameId: 0 })`);
   check(unsupportedPending.pending === true
-      && run(`tabStates.get(22).status`) === "error"
+      && run(`tabStates.get(22).status`) === "starting"
+      && run(`tabStates.get(22).captureNeedsGesture`) === true
       && run(`tabStates.get(22).captureStarted`) === true,
-    "an HLS-less player receives a clear recoverable unsupported-format state instead of spinning forever");
+    "an HLS-less player waits for one browser gesture and keeps the local session recoverable");
 
   h.runtimeMessages.length = 0;
   h.events.length = 0;

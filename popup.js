@@ -116,16 +116,9 @@ async function start(targetIdOverride) {
   setBusy(true);
   setStatus("正在开启…");
   try {
-    let koeAsrEngine = "";
-    try {
-      ({ koeAsrEngine } = await chrome.storage.local.get("koeAsrEngine"));
-    } catch {
-      // 旧测试环境或 storage 暂不可用时沿用实时模式。
-    }
-    // 本地精准模式直接读取媒体资源，不捕获标签页声音；实时模式仍需浏览器手势授权。
-    const streamId = koeAsrEngine === "local"
-      ? ""
-      : await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
+    // 本地模式会优先直接读取 HLS；遇到 DASH / blob / 普通 MP4 时才使用这份
+    // 手势授权好的标签页音频流做本地实时回退。提前取到它不会上传或启动采集。
+    const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
     const response = await chrome.runtime.sendMessage({
       type: "START_CAPTURE",
       tabId: tab.id,

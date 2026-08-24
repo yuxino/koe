@@ -95,6 +95,11 @@ function makeContext() {
   check(error.text === "!" && error.title.includes("Helper 已断开"),
     "error state maps to the attention badge and error detail");
 
+  const gesture = run(`actionIndicatorForState({ captureStarted: true, status: "starting", captureNeedsGesture: true,
+    stageDetail: "点一次 Koe 继续本地字幕" })`);
+  check(gesture.text === "··" && gesture.title.includes("点一次 Koe"),
+    "a pending browser gesture stays neutral instead of looking like a failure");
+
   const idle = run(`actionIndicatorForState({ captureStarted: false, status: "idle", userStopped: true })`);
   check(idle.text === "" && idle.title === "Koe", "idle state clears the toolbar badge");
 

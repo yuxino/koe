@@ -8,11 +8,13 @@ const NATIVE_HOST_NAME = "app.yuxino.koe.helper";
 const NATIVE_PROTOCOL_VERSION = 1;
 const MEDIA_CANDIDATE_TTL_MS = 60_000;
 const OFFLINE_REFILL_LEAD_MS = 45_000;
+const LOCAL_LIVE_FALLBACK_DELAY_MS = 1_800;
 const preferenceTools = globalThis.KoePreferences || createPreferenceFallback();
 const PREFERENCE_KEYS = [...preferenceTools.keys];
 const tabStates = new Map();
 const captureStreamIds = new Map();
 const captureStartPromises = new Map();
+const localFallbackPromises = new Map();
 const mediaCandidatesByTab = new Map();
 let captureTabId = null;
 let bootPromise;
@@ -413,6 +415,7 @@ async function handle(message, sender) {
   if (message.type === "CAPTURE_TRANSLATED") return forwardCaptureLines(message, "LIVE_TRANSLATED");
   if (message.type === "CAPTURE_REVOKE") return forwardRevoke(message);
   if (message.type === "CAPTURE_ERROR") return handleCaptureError(message);
+  if (message.type === "LOCAL_PCM_CHUNK") return forwardLocalPCM(message);
   if (message.type === "START_CAPTURE") return startCaptureForTab(message);
   if (message.type === "RECOMMEND_TAB") return recommendCaptureTab(Number(message.tabId));
   if (message.type === "KOE_LOG") return appendLog(message);
@@ -592,30 +595,44 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
       });
       await persistStates();
     } else if (state.captureStarted && sessionMode === "offline") {
-      const previousEpoch = Number(state.mediaEpoch) || 0;
-      try {
-        postNativeMessage({ type: "cancel", jobId: state.jobId, mediaEpoch: previousEpoch });
-      } catch {
-        // Helper 缺失/断开时仍要完成页面时间线切换。
+      if (state.localFallbackActive) {
+        await resetLocalLiveSession(state, forceReset ? "manual" : "source");
+      } else {
+        const previousEpoch = Number(state.mediaEpoch) || 0;
+        try {
+          postNativeMessage({ type: "cancel", jobId: state.jobId, mediaEpoch: previousEpoch });
+        } catch {
+          // Helper 缺失/断开时仍要完成页面时间线切换。
+        }
+        state.mediaEpoch = previousEpoch + 1;
+        resetOfflineBatchState(state);
+        state.offlineSourceUrl = "";
+        state.offlineContext = undefined;
+        mediaCandidatesByTab.delete(tabId);
+        await sendToContent(state, {
+          type: "OFFLINE_RESET",
+          jobId: state.jobId,
+          mediaEpoch: state.mediaEpoch,
+          reason: forceReset ? "manual" : "source"
+        });
+        await persistStates();
       }
-      state.mediaEpoch = previousEpoch + 1;
-      resetOfflineBatchState(state);
-      state.offlineSourceUrl = "";
-      state.offlineContext = undefined;
-      mediaCandidatesByTab.delete(tabId);
-      await sendToContent(state, {
-        type: "OFFLINE_RESET",
-        jobId: state.jobId,
-        mediaEpoch: state.mediaEpoch,
-        reason: forceReset ? "manual" : "source"
-      });
-      await persistStates();
     }
   }
 
   state = tabStates.get(tabId);
   if (!state) return { ok: true };
   if (state.engine === "local") {
+    if (state.localFallbackActive) {
+      await sendToContent(state, {
+        type: "LIVE_SESSION",
+        jobId: state.jobId,
+        mediaEpoch: Number(state.mediaEpoch) || 0,
+        translate: state.translate,
+        audioPositionMs: Number(state.localAudioPositionMs) || 0
+      });
+      return { ok: true };
+    }
     if (!state.captureStarted) {
       await startOfflineSession(state, { allowHandoff: forceReset });
     } else {
@@ -676,6 +693,7 @@ async function startOfflineSession(state, { allowHandoff = true } = {}) {
     previous.captureNeedsGesture = false;
   }
   state.captureStarted = true;
+  state.localFallbackActive = false;
   state.captureNeedsGesture = false;
   state.status = "starting";
   state.stageDetail = "正在定位视频媒体…";
@@ -720,7 +738,7 @@ function isCurrentSession(state, identity, requireActive = false) {
 }
 
 async function requestOfflineMediaContext(state) {
-  if (!state?.captureStarted || state.engine !== "local") return;
+  if (!state?.captureStarted || state.engine !== "local" || state.localFallbackActive) return;
   await sendToContent(state, {
     type: "OFFLINE_DISCOVER",
     jobId: state.jobId,
@@ -728,10 +746,193 @@ async function requestOfflineMediaContext(state) {
   });
 }
 
+async function startLocalLiveFallback(state, streamId = captureStreamIds.get(state?.tabId) || "") {
+  if (!state?.captureStarted || state.engine !== "local" || state.userStopped) return false;
+  if (state.localFallbackActive) return true;
+  const existing = localFallbackPromises.get(state.tabId);
+  if (existing) return existing;
+  const pending = runLocalLiveFallback(state, String(streamId || ""));
+  localFallbackPromises.set(state.tabId, pending);
+  try {
+    return await pending;
+  } finally {
+    if (localFallbackPromises.get(state.tabId) === pending) localFallbackPromises.delete(state.tabId);
+  }
+}
+
+async function runLocalLiveFallback(state, streamId) {
+  const identity = sessionIdentity(state);
+  if (!streamId) {
+    state.status = "starting";
+    state.captureNeedsGesture = true;
+    state.stageDetail = "这个网站需要点一次 Koe 来读取标签页声音；音频只在本机处理";
+    await persistStates();
+    return false;
+  }
+
+  connectNativeHelper();
+  await ensureContentScript(state.tabId, state.frameId || 0);
+  if (!isCurrentSession(state, identity, true)) return false;
+  await ensureOffscreen();
+  if (!isCurrentSession(state, identity, true)) return false;
+
+  try {
+    // 同一个 Helper 同时只跑一种本地任务。先终止可能仍在排队的 HLS 批次，
+    // 然后把页面从媒体时间轴字幕无缝切换到音频流时间轴字幕。
+    try {
+      postNativeMessage({
+        type: "cancel",
+        jobId: state.jobId,
+        mediaEpoch: Number(state.mediaEpoch) || 0
+      });
+    } catch {
+      // 新会话尚未真正进入 Helper 时 cancel 可以安全忽略。
+    }
+    resetOfflineBatchState(state);
+    state.offlineSourceUrl = "";
+    state.offlineContext = undefined;
+    mediaCandidatesByTab.delete(state.tabId);
+    state.localFallbackActive = true;
+    if (!state.mediaIdentity) state.mediaIdentity = createMediaIdentity();
+    state.localLiveSeq = 0;
+    state.localAudioPositionMs = 0;
+    state.localCueSequences = Object.create(null);
+    state.localCueOriginals = Object.create(null);
+    state.localCueTranslations = Object.create(null);
+    state.captureNeedsGesture = false;
+    state.status = "starting";
+    state.stageDetail = "正在启动本地实时字幕…";
+    captureTabId = state.tabId;
+    await clearTranscript();
+    if (!isCurrentSession(state, identity, true)) return false;
+    await sendToContent(state, {
+      type: "OFFLINE_STOP",
+      jobId: state.jobId,
+      mediaEpoch: Number(state.mediaEpoch) || 0
+    });
+    await sendToContent(state, {
+      type: "LIVE_SESSION",
+      jobId: state.jobId,
+      mediaEpoch: Number(state.mediaEpoch) || 0,
+      translate: state.translate,
+      audioPositionMs: 0
+    });
+    postNativeMessage({
+      type: "streamStart",
+      protocolVersion: NATIVE_PROTOCOL_VERSION,
+      jobId: state.jobId,
+      mediaEpoch: Number(state.mediaEpoch) || 0,
+      mediaKey: state.mediaIdentity,
+      sampleRate: 16_000,
+      channels: 1,
+      translate: Boolean(state.translate)
+    });
+    const response = await chrome.runtime.sendMessage({
+      type: "CAPTURE_START",
+      streamId,
+      apiKey: "",
+      translate: state.translate,
+      source: "tab",
+      engine: "local",
+      tabId: state.tabId,
+      jobId: state.jobId,
+      mediaEpoch: Number(state.mediaEpoch) || 0
+    });
+    if (!isCurrentSession(state, identity, true)) {
+      try { await chrome.runtime.sendMessage({ type: "CAPTURE_STOP" }); } catch { /* stopped */ }
+      return false;
+    }
+    if (!response?.ok) throw new Error(response?.error || "无法读取标签页声音。");
+    state.status = "starting";
+    state.stageDetail = "本地模型正在听取第一句…";
+    await persistStates();
+    return true;
+  } catch (error) {
+    if (!isCurrentSession(state, identity, true)) return false;
+    try {
+      postNativeMessage({
+        type: "streamStop",
+        jobId: state.jobId,
+        mediaEpoch: Number(state.mediaEpoch) || 0
+      });
+    } catch { /* Helper disconnected */ }
+    try { await chrome.runtime.sendMessage({ type: "CAPTURE_STOP" }); } catch { /* offscreen unavailable */ }
+    state.localFallbackActive = false;
+    state.captureNeedsGesture = true;
+    state.status = "starting";
+    state.stageDetail = `点一次 Koe 重试标签页声音：${error instanceof Error ? error.message : String(error)}`;
+    await sendToContent(state, { type: "LIVE_STOP", jobId: state.jobId, mediaEpoch: state.mediaEpoch });
+    await sendToContent(state, {
+      type: "OFFLINE_SESSION",
+      jobId: state.jobId,
+      mediaEpoch: Number(state.mediaEpoch) || 0,
+      translate: state.translate,
+      discontinuityId: Number(state.lastDiscontinuityId) || 0
+    });
+    await persistStates();
+    return false;
+  }
+}
+
+async function resetLocalLiveSession(state, reason = "media") {
+  if (!state?.captureStarted || !state.localFallbackActive) return null;
+  const previousEpoch = Number(state.mediaEpoch) || 0;
+  try {
+    postNativeMessage({ type: "cancel", jobId: state.jobId, mediaEpoch: previousEpoch });
+  } catch {
+    // Helper 断开时下面的 streamStart 会给出统一错误。
+  }
+  state.mediaEpoch = previousEpoch + 1;
+  state.localLiveSeq = 0;
+  state.localAudioPositionMs = 0;
+  state.localCueSequences = Object.create(null);
+  state.localCueOriginals = Object.create(null);
+  state.localCueTranslations = Object.create(null);
+  state.status = "starting";
+  state.stageDetail = "正在重新对齐本地字幕…";
+  await sendToContent(state, {
+    type: "LIVE_RESET",
+    jobId: state.jobId,
+    mediaEpoch: state.mediaEpoch,
+    reason
+  });
+  postNativeMessage({
+    type: "streamStart",
+    protocolVersion: NATIVE_PROTOCOL_VERSION,
+    jobId: state.jobId,
+    mediaEpoch: state.mediaEpoch,
+    mediaKey: state.mediaIdentity || createMediaIdentity(),
+    sampleRate: 16_000,
+    channels: 1,
+    translate: Boolean(state.translate)
+  });
+  const response = await chrome.runtime.sendMessage({
+    type: "CAPTURE_RESET",
+    translate: state.translate,
+    source: "tab",
+    engine: "local",
+    tabId: state.tabId,
+    jobId: state.jobId,
+    mediaEpoch: state.mediaEpoch
+  });
+  if (!response?.ok) throw new Error(response?.error || "本地音频时间轴重置失败。");
+  await sendToContent(state, {
+    type: "LIVE_SESSION",
+    jobId: state.jobId,
+    mediaEpoch: state.mediaEpoch,
+    translate: state.translate,
+    audioPositionMs: Number(response.audioPositionMs) || 0
+  });
+  await persistStates();
+  return response;
+}
+
 async function receiveMediaContext(message, sender) {
   const tabId = Number(sender?.tab?.id);
   const state = tabStates.get(tabId);
-  if (!state?.captureStarted || state.engine !== "local") return { ok: true, ignored: true };
+  if (!state?.captureStarted || state.engine !== "local" || state.localFallbackActive) {
+    return { ok: true, ignored: true };
+  }
   if (String(message.jobId || "") !== state.jobId) return { ok: true, ignored: true };
   if ((Number(message.mediaEpoch) || 0) !== (Number(state.mediaEpoch) || 0)) return { ok: true, ignored: true };
   const frameId = Number(sender?.frameId) || 0;
@@ -761,6 +962,7 @@ async function receiveMediaContext(message, sender) {
   // 时间点绝不能覆盖新 epoch，也不能把已停止的会话重新启动。
   if (!isCurrentSession(state, identity, true)
       || state.engine !== "local"
+      || state.localFallbackActive
       || state.offlineContextVersion !== contextVersion) {
     return { ok: true, ignored: true };
   }
@@ -777,10 +979,12 @@ async function receiveMediaContext(message, sender) {
   if (!candidate) {
     if (!state.offlineMissingMediaSince) state.offlineMissingMediaSince = Date.now();
     const waitingMs = Date.now() - state.offlineMissingMediaSince;
-    state.status = waitingMs >= 10_000 ? "error" : "starting";
-    state.stageDetail = waitingMs >= 10_000
-      ? "这个播放器没有提供可读取的 HLS 视频；DASH、普通 MP4 或 DRM 暂不支持。"
-      : "正在寻找 HLS 视频媒体，播放几秒后会自动重试…";
+    if (waitingMs >= LOCAL_LIVE_FALLBACK_DELAY_MS) {
+      const started = await startLocalLiveFallback(state);
+      return { ok: true, pending: !started, fallback: started };
+    }
+    state.status = "starting";
+    state.stageDetail = "正在判断最快的本地字幕方式…";
     await persistStates();
     return { ok: true, pending: true };
   }
@@ -799,7 +1003,8 @@ function maybeExtendOfflinePrep(state) {
 }
 
 function shouldStartOfflineBatch(state) {
-  if (!state?.captureStarted || state.engine !== "local" || state.offlineRunActive) return false;
+  if (!state?.captureStarted || state.engine !== "local"
+      || state.localFallbackActive || state.offlineRunActive) return false;
   if (state.offlineMediaComplete === true) return false;
   const epoch = Number(state.mediaEpoch) || 0;
   if (state.offlineStartedEpoch !== epoch) return true;
@@ -883,18 +1088,27 @@ function connectNativeHelper() {
     void appendLog({ event: "native-disconnect", detail: String(detail) });
     for (const state of tabStates.values()) {
       if (!state.captureStarted || state.engine !== "local") continue;
+      const wasLocalLive = Boolean(state.localFallbackActive);
       state.captureStarted = false;
       state.status = "error";
       state.userStopped = true;
       resetOfflineBatchState(state);
       state.offlineSourceUrl = "";
       state.offlineContext = undefined;
+      state.localFallbackActive = false;
       state.sourceUrl = normalizeSourceKey(state.sourceUrl || "");
       mediaCandidatesByTab.delete(state.tabId);
       state.stageDetail = /native messaging host|not found/i.test(detail)
         ? `未安装本地 Koe Helper：${String(detail)}`
         : `本地 Koe Helper 已断开：${String(detail)}`;
-      void sendToContent(state, { type: "OFFLINE_STOP", jobId: state.jobId, mediaEpoch: state.mediaEpoch });
+      if (wasLocalLive) {
+        void chrome.runtime.sendMessage({ type: "CAPTURE_STOP" }).catch(() => undefined);
+      }
+      void sendToContent(state, {
+        type: wasLocalLive ? "LIVE_STOP" : "OFFLINE_STOP",
+        jobId: state.jobId,
+        mediaEpoch: state.mediaEpoch
+      });
     }
     void persistStates();
   });
@@ -904,6 +1118,82 @@ function connectNativeHelper() {
 function postNativeMessage(message) {
   const port = connectNativeHelper();
   port.postMessage(message);
+}
+
+function forwardLocalPCM(message) {
+  const tabId = Number(message?.tabId);
+  const state = Number.isInteger(tabId) ? tabStates.get(tabId) : null;
+  if (!state?.captureStarted || state.engine !== "local" || !state.localFallbackActive) {
+    return { ok: true, ignored: true };
+  }
+  if (String(message.jobId || "") !== state.jobId
+      || (Number(message.mediaEpoch) || 0) !== (Number(state.mediaEpoch) || 0)) {
+    return { ok: true, ignored: true };
+  }
+  const pcmBase64 = String(message.pcmBase64 || "");
+  if (!pcmBase64 || pcmBase64.length > 700_000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(pcmBase64)) {
+    return { ok: false, error: "本地音频片段无效。" };
+  }
+  state.localAudioPositionMs = Math.max(
+    Number(state.localAudioPositionMs) || 0,
+    Math.max(0, Number(message.audioPositionMs) || 0)
+  );
+  postNativeMessage({
+    type: "streamAudio",
+    protocolVersion: NATIVE_PROTOCOL_VERSION,
+    jobId: state.jobId,
+    mediaEpoch: Number(state.mediaEpoch) || 0,
+    sampleRate: 16_000,
+    channels: 1,
+    pcmBase64
+  });
+  return { ok: true };
+}
+
+async function forwardLocalStreamCues(state, message) {
+  const cues = (Array.isArray(message.cues) ? message.cues : [])
+    .map((cue) => normalizeOfflineCue(cue))
+    .filter(Boolean)
+    .sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs);
+  if (cues.length === 0) return;
+  if (!state.localCueSequences) state.localCueSequences = Object.create(null);
+  if (!state.localCueOriginals) state.localCueOriginals = Object.create(null);
+  if (!state.localCueTranslations) state.localCueTranslations = Object.create(null);
+  for (const cue of cues) {
+    let seq = Number(state.localCueSequences[cue.cueId]) || 0;
+    if (!seq) {
+      seq = (Number(state.localLiveSeq) || 0) + 1;
+      state.localLiveSeq = seq;
+      state.localCueSequences[cue.cueId] = seq;
+    }
+    const timing = {
+      tabId: state.tabId,
+      jobId: state.jobId,
+      mediaEpoch: Number(state.mediaEpoch) || 0,
+      seq,
+      unit: true,
+      beginTimeMs: cue.startMs,
+      endTimeMs: cue.endMs,
+      audioPositionMs: Math.max(Number(state.localAudioPositionMs) || 0, cue.endMs),
+      sentenceId: cue.cueId
+    };
+    if (!state.localCueOriginals[cue.cueId]) {
+      state.localCueOriginals[cue.cueId] = cue.text;
+      await forwardCaptureLines({ ...timing, lines: [{ text: cue.text }] }, "LIVE_SUBTITLES");
+    }
+    if (state.translate && cue.translated
+        && state.localCueTranslations[cue.cueId] !== cue.translated) {
+      state.localCueTranslations[cue.cueId] = cue.translated;
+      await forwardCaptureLines({
+        ...timing,
+        streaming: false,
+        lines: [{ translated: cue.translated }]
+      }, "LIVE_TRANSLATED");
+    }
+  }
+  state.status = "live";
+  state.stageDetail = "本地实时字幕运行中";
+  await persistStates();
 }
 
 async function handleNativeMessage(message) {
@@ -927,6 +1217,12 @@ async function handleNativeMessage(message) {
   if (!state?.captureStarted || state.engine !== "local") return;
   if ((Number(message.mediaEpoch) || 0) !== (Number(state.mediaEpoch) || 0)) return;
   if (message.type === "status") {
+    if (state.localFallbackActive) {
+      state.status = message.stage === "stream-live" ? "live" : "starting";
+      state.stageDetail = String(message.detail || "本地实时字幕处理中…");
+      await persistStates();
+      return;
+    }
     // forward 只是在后台预取后续窗口；首批 cue 此时已经可播放，UI 不应
     // 再退回“准备中”。
     state.status = ["forward", "ready"].includes(message.stage) ? "live" : "starting";
@@ -942,6 +1238,10 @@ async function handleNativeMessage(message) {
     }
     await persistStates();
     if (message.stage === "ready") maybeExtendOfflinePrep(state);
+    return;
+  }
+  if (message.type === "streamCues" && state.localFallbackActive) {
+    await forwardLocalStreamCues(state, message);
     return;
   }
   if (message.type === "cues") {
@@ -968,19 +1268,24 @@ async function handleNativeMessage(message) {
     return;
   }
   if (message.type === "error") {
+    const wasLocalLive = Boolean(state.localFallbackActive);
     state.captureStarted = false;
     state.status = "error";
     state.userStopped = true;
     resetOfflineBatchState(state);
     state.offlineSourceUrl = "";
     state.offlineContext = undefined;
+    state.localFallbackActive = false;
     state.sourceUrl = normalizeSourceKey(state.sourceUrl || "");
     mediaCandidatesByTab.delete(state.tabId);
     state.stageDetail = String(message.error || "本地字幕处理失败");
     void appendLog({ event: "native-error", detail: state.stageDetail });
     if (captureTabId === state.tabId) captureTabId = null;
+    if (wasLocalLive) {
+      try { await chrome.runtime.sendMessage({ type: "CAPTURE_STOP" }); } catch { /* offscreen unavailable */ }
+    }
     await sendToContent(state, {
-      type: "OFFLINE_ERROR",
+      type: wasLocalLive ? "LIVE_STOP" : "OFFLINE_ERROR",
       jobId: state.jobId,
       mediaEpoch: Number(state.mediaEpoch) || 0,
       error: state.stageDetail
@@ -1214,19 +1519,36 @@ async function resetCaptureSession(state) {
 
 async function stopCapture(state) {
   if (!state?.captureStarted) return;
+  const wasLocalLive = state.engine === "local" && Boolean(state.localFallbackActive);
   state.captureStarted = false;
   state.status = "starting";
   if (captureTabId === state.tabId) captureTabId = null;
   if (state.engine === "local") {
     try {
-      postNativeMessage({ type: "cancel", jobId: state.jobId, mediaEpoch: Number(state.mediaEpoch) || 0 });
+      postNativeMessage({
+        type: wasLocalLive ? "streamStop" : "cancel",
+        jobId: state.jobId,
+        mediaEpoch: Number(state.mediaEpoch) || 0
+      });
     } catch {
       // Helper 已断开时任务自然终止。
+    }
+    if (wasLocalLive) {
+      try {
+        await chrome.runtime.sendMessage({ type: "CAPTURE_STOP" });
+      } catch {
+        // 离屏采集页可能已经结束。
+      }
     }
     resetOfflineBatchState(state);
     state.offlineSourceUrl = "";
     state.offlineContext = undefined;
     state.sourceUrl = normalizeSourceKey(state.sourceUrl || "");
+    state.localFallbackActive = false;
+    state.localCueSequences = undefined;
+    state.localCueOriginals = undefined;
+    state.localCueTranslations = undefined;
+    state.localAudioPositionMs = 0;
     mediaCandidatesByTab.delete(state.tabId);
   } else {
     try {
@@ -1241,7 +1563,7 @@ async function stopCapture(state) {
     // 侧边栏未打开时忽略
   }
   await sendToContent(state, {
-    type: state.engine === "local" ? "OFFLINE_STOP" : "LIVE_STOP",
+    type: state.engine === "local" && !wasLocalLive ? "OFFLINE_STOP" : "LIVE_STOP",
     jobId: state.jobId,
     mediaEpoch: state.mediaEpoch
   });
@@ -1432,8 +1754,17 @@ async function startCaptureForTab({ tabId, streamId, pageUrl = "" }) {
     if (preState) {
       preState.captureNeedsGesture = false;
       preState.status = "starting";
-      preState.stageDetail = "正在连接 DashScope…";
+      preState.stageDetail = preState.engine === "local"
+        ? "正在启动本地字幕…"
+        : "正在连接 DashScope…";
     }
+  }
+  // 自动本地回退已经等在浏览器手势时，用户这次点击只需补上 streamId；
+  // 不再重新跑一轮 HLS 探测，点击后立即开始本机实时识别。
+  if (streamId && preState?.captureStarted && preState.engine === "local"
+      && (preState.captureNeedsGesture || preState.offlineMissingMediaSince)) {
+    const started = await startLocalLiveFallback(preState, streamId);
+    if (started) return { ok: true, state: publicState(preState) };
   }
   await ensureLiveCaptions({ tabId: id, pageUrl, forceReset: true });
   const state = tabStates.get(id);
@@ -1579,6 +1910,16 @@ async function handleCaptureError(message) {
   state.captureStarted = false;
   state.status = "error";
   state.captureNeedsGesture = true;
+  if (state.engine === "local" && state.localFallbackActive) {
+    try {
+      postNativeMessage({
+        type: "streamStop",
+        jobId: state.jobId,
+        mediaEpoch: Number(state.mediaEpoch) || 0
+      });
+    } catch { /* Helper unavailable */ }
+    state.localFallbackActive = false;
+  }
   state.stageDetail = "实时字幕已断开 · 点击 Koe 图标或按 Alt+K 重试";
   captureStreamIds.delete(tabId);
   try {
@@ -1599,6 +1940,10 @@ async function setTranslate(tabId, translate) {
     : Boolean(translate);
   state.translate = allowed;
   if (state.captureStarted && state.engine === "local") {
+    if (state.localFallbackActive) {
+      await resetLocalLiveSession(state, "translate");
+      return { ok: true, state: publicState(state) };
+    }
     // Helper 只在 start 时读取 translate。切换翻译时重跑一次 offline epoch，
     // 让 Helper 用新的开关重新开始，并作废旧任务的排队结果。
     resetOfflineBatchState(state, { preserveRevision: true });
@@ -1710,6 +2055,10 @@ async function mediaDiscontinuity(message, sender) {
     return { ok: true, ignored: true };
   }
   state.lastDiscontinuityId = incomingDiscontinuityId;
+  if (state.engine === "local" && state.localFallbackActive) {
+    await resetLocalLiveSession(state, String(message.reason || "media"));
+    return { ok: true, mediaEpoch: state.mediaEpoch };
+  }
   const previousEpoch = Number(state.mediaEpoch) || 0;
   state.mediaEpoch = previousEpoch + 1;
   if (state.engine === "local") {
@@ -1754,7 +2103,9 @@ async function mediaDiscontinuity(message, sender) {
 async function recordOfflineVisible(message, sender) {
   const tabId = Number(sender?.tab?.id);
   const state = tabStates.get(tabId);
-  if (!state?.captureStarted || state.engine !== "local") return { ok: true, ignored: true };
+  if (!state?.captureStarted || state.engine !== "local" || state.localFallbackActive) {
+    return { ok: true, ignored: true };
+  }
   if (Number(sender?.frameId || 0) !== Number(state.frameId || 0)) return { ok: true, ignored: true };
   if (String(message.jobId || "") !== state.jobId) return { ok: true, ignored: true };
   const epoch = Number(message.mediaEpoch) || 0;
@@ -1816,6 +2167,7 @@ function cleanupTab(tabId) {
   if (captureTabId === tabId) captureTabId = null;
   captureStreamIds.delete(tabId);
   captureStartPromises.delete(tabId);
+  localFallbackPromises.delete(tabId);
   mediaCandidatesByTab.delete(tabId);
   void persistStates();
 }
@@ -1828,11 +2180,18 @@ function actionIndicatorForState(state) {
   if (status === "idle" || (state.userStopped && !state.captureStarted && status !== "error")) {
     return idle;
   }
-  if (status === "error" || state.captureNeedsGesture) {
+  if (status === "error") {
     return {
       text: "!",
       color: "#B3261E",
       title: `Koe · ${detail || "字幕启动失败，点击查看详情"}`
+    };
+  }
+  if (state.captureNeedsGesture) {
+    return {
+      text: "··",
+      color: "#5F6368",
+      title: `Koe · ${detail || "点一次 Koe 继续本地字幕"}`
     };
   }
   if (status === "live" && state.captureStarted) {
@@ -2130,6 +2489,7 @@ function publicState(state) {
     sessionMode: state.sessionMode || (state.engine === "local" ? "offline" : "live"),
     captureActive: Boolean(state.captureStarted),
     captureNeedsGesture: Boolean(state.captureNeedsGesture),
+    localFallbackActive: Boolean(state.localFallbackActive),
     stageDetail: state.stageDetail,
     nativeTranslation: nativeTranslationAvailable,
     tabId: state.tabId

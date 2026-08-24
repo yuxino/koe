@@ -1,5 +1,5 @@
-// Koe offscreen capture: tab audio -> 16 kHz PCM -> DashScope directly.
-// No localhost helper is required at runtime.
+// Koe offscreen capture: tab audio -> 16 kHz PCM -> cloud realtime ASR or the
+// local Native Messaging Helper. Local mode never sends audio to a network API.
 
 const DASHSCOPE_WS = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/";
 const TRANSLATE_ENDPOINT = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation";
@@ -25,6 +25,7 @@ function recentTranslationMemory() {
   return translationMemory.slice(-5);
 }
 const PCM_FRAME_BYTES = 3_200; // 100 ms, 16 kHz mono int16
+const LOCAL_PCM_BATCH_FRAMES = 5; // Native Messaging 每 500 ms 一包，降低开销又不积累延迟
 const PCM_QUEUE_LIMIT = 20; // 最多保留约 2 秒；网络追不上时优先保持实时
 const SOCKET_BACKPRESSURE_BYTES = 128 * 1_024;
 const MAX_AUTO_RETRIES = 5;
@@ -44,7 +45,7 @@ let taskReady = false;
 let captureTranslate = false;
 let captureApiKey = "";
 let captureSource = "tab"; // "tab" | "mic"
-let captureEngine = "dashscope"; // "dashscope" | "webspeech"
+let captureEngine = "dashscope"; // "dashscope" | "webspeech" | "local"
 let recognition = null;
 let retryCount = 0;
 let retryTimer = null;
@@ -138,11 +139,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     captureTranslate = Boolean(message.translate);
     if (Number.isFinite(Number(message.mediaEpoch))) captureMediaEpoch = Number(message.mediaEpoch);
     if (message.source) captureSource = message.source === "mic" ? "mic" : "tab";
-    if (message.engine) captureEngine = String(message.engine);
+    if (message.engine) {
+      captureEngine = ["webspeech", "local"].includes(message.engine)
+        ? String(message.engine)
+        : "dashscope";
+    }
     // 内置识别不需要重连 WebSocket：重启识别会话即可
     const restart = captureEngine === "webspeech"
       ? restartWebSpeech()
-      : resetSocket();
+      : captureEngine === "local"
+        ? resetLocalPcmTimeline()
+        : resetSocket();
     restart.then(() => sendResponse({ ok: true, audioPositionMs: audioPositionMs() })).catch((error) => {
       sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
     });
@@ -180,7 +187,7 @@ async function runStartCapture({ streamId, translate, apiKey, source, engine, jo
   stopping = false;
   assertCaptureOperation(operationId);
   captureSource = source === "mic" ? "mic" : "tab";
-  captureEngine = ["webspeech"].includes(engine) ? engine : "dashscope";
+  captureEngine = ["webspeech", "local"].includes(engine) ? engine : "dashscope";
   captureApiKey = String(apiKey || "").trim();
   captureTranslate = Boolean(translate);
   captureJobId = nextJobId;
@@ -215,6 +222,11 @@ async function runStartCapture({ streamId, translate, apiKey, source, engine, jo
     const started = await startPcmCapture();
     assertCaptureOperation(operationId);
     if (!started) throw new Error("浏览器不支持 16kHz 音频采集。");
+    if (captureEngine === "local") {
+      flushFrames();
+      logEvent("started", "mode=local");
+      return { ok: true, mode: "local", audioPositionMs: audioPositionMs() };
+    }
     await connectRealtime();
     assertCaptureOperation(operationId);
     flushFrames();
@@ -254,7 +266,9 @@ async function acquireStreamForSource(streamId) {
     });
   } else {
     if (!streamId) throw new Error("缺少标签页音频流。");
-    if (!captureApiKey) throw new Error("请先在 Koe 中保存 DashScope API Key。");
+    if (captureEngine === "dashscope" && !captureApiKey) {
+      throw new Error("请先在 Koe 中保存 DashScope API Key。");
+    }
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -1366,6 +1380,10 @@ function enqueueSamples(samples) {
 }
 
 function flushFrames() {
+  if (captureEngine === "local") {
+    flushLocalFrames();
+    return;
+  }
   if (!taskReady || !socket || socket.readyState !== WebSocket.OPEN) return;
   while (frameQueue.length > 0 && Number(socket.bufferedAmount || 0) < SOCKET_BACKPRESSURE_BYTES) {
     const frame = frameQueue.shift();
@@ -1376,6 +1394,40 @@ function flushFrames() {
       return;
     }
   }
+}
+
+function flushLocalFrames() {
+  while (frameQueue.length >= LOCAL_PCM_BATCH_FRAMES) {
+    const batch = new Uint8Array(PCM_FRAME_BYTES * LOCAL_PCM_BATCH_FRAMES);
+    for (let index = 0; index < LOCAL_PCM_BATCH_FRAMES; index += 1) {
+      batch.set(frameQueue.shift(), index * PCM_FRAME_BYTES);
+    }
+    sendCaptureMessage({
+      type: "LOCAL_PCM_CHUNK",
+      sampleRate: 16_000,
+      channels: 1,
+      pcmBase64: bytesToBase64(batch)
+    }).catch(() => undefined);
+  }
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  const chunkSize = 8_192;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function resetLocalPcmTimeline() {
+  if (!stream) throw new Error("capture_not_running");
+  capturedAudioSamples = 0;
+  captureClockStartedAt = monotonicNow();
+  frameQueue = [];
+  pcmPending = new Uint8Array(0);
+  activeSentenceId = 0;
+  activeTiming = {};
 }
 
 async function resetSocket() {
