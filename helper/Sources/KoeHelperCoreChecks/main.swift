@@ -45,7 +45,6 @@ do {
         sampleRate: 16_000,
         channels: 1,
         bootstrapDurationMs: 4_000,
-        windowDurationMs: 8_000,
         overlapMs: 1_500,
         maximumBufferedDurationMs: 20_000
     )
@@ -60,12 +59,12 @@ do {
             && bootstrap?.emitAfterMs == 0,
           "local live emits an exact short bootstrap window")
 
-    try stream.append(Data(repeating: 2, count: 16_000 * 2 * 6 + 16_000))
+    try stream.append(Data(repeating: 2, count: 16_000 * 2 * 2 + 16_000))
     let steady = stream.takeWindow()
     check(steady?.startMs == 2_500
-            && steady?.endMs == 10_500
+            && steady?.endMs == 6_500
             && steady?.emitAfterMs == 3_250,
-          "steady local-live windows overlap while suppressing the old prefix")
+          "steady local-live windows stay short while suppressing the old prefix")
     check(stream.bufferedDurationMs <= 20_000,
           "local-live PCM buffering stays bounded")
 

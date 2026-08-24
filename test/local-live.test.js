@@ -158,7 +158,7 @@ function makeOffscreenContext() {
   await run(`receiveMediaContext({
     type: "MEDIA_CONTEXT", jobId: "offline-9", mediaEpoch: 2,
     currentSrc: "blob:https://youtube.com/video", resourceUrls: [],
-    currentTimeMs: 12_000, durationMs: 600_000, playbackRate: 1
+    currentTimeMs: 12_000, durationMs: 600_000, playbackRate: 2
   }, { tab: { id: 9 }, frameId: 0 })`);
   await settle();
 
@@ -173,10 +173,16 @@ function makeOffscreenContext() {
   check(background.contentMessages.some(({ message }) => message.type === "OFFLINE_STOP")
       && background.contentMessages.some(({ message }) => message.type === "LIVE_SESSION"),
     "the page switches cleanly from ahead-of-playback cues to live cues");
+  const initialLiveSession = background.contentMessages
+    .find(({ message }) => message.type === "LIVE_SESSION")?.message;
+  check(initialLiveSession?.mediaTimed === true && initialLiveSession.audioPositionMs === 12_000
+      && initialLiveSession.discontinuityId === 0
+      && run("tabStates.get(9).localPlaybackRate") === 2,
+    "local live keeps the player clock and playback rate as its media-time anchor");
 
   await run(`handle({
     type: "LOCAL_PCM_CHUNK", tabId: 9, jobId: "offline-9", mediaEpoch: 2,
-    pcmBase64: "AAAAAA==", audioPositionMs: 500
+    pcmBase64: "AAAAAA==", audioPositionMs: 4_000
   }, {})`);
   check(background.nativeMessages.some((message) => message.type === "streamAudio"
       && message.pcmBase64 === "AAAAAA=="),
@@ -193,6 +199,9 @@ function makeOffscreenContext() {
     "native stream cues reach the normal live subtitle UI");
   check(original?.seq > 0 && original.seq === translated?.seq,
     "original and translation keep the same subtitle sequence");
+  check(original?.mediaTimed === true && original.beginTimeMs === 12_000
+      && original.endTimeMs === 15_800 && original.audioPositionMs === 20_000,
+    "capture-relative cues and audio position map onto the two-times player clock");
 
   const discoveriesBefore = background.contentMessages
     .filter(({ message }) => message.type === "OFFLINE_DISCOVER").length;
@@ -212,6 +221,9 @@ function makeOffscreenContext() {
   check(background.runtimeMessages.some((message) => message.type === "CAPTURE_RESET"
       && message.engine === "local" && message.mediaEpoch === 3),
     "translation changes reset the browser PCM clock without opening a WebSocket");
+  check(run("tabStates.get(9).localMediaAnchorMs") === 20_000
+      && run("tabStates.get(9).localAudioAnchorMs") === 0,
+    "a reset without explicit media time advances the old anchor before zeroing audio");
 
   const audioCountBeforeStale = background.nativeMessages
     .filter((message) => message.type === "streamAudio").length;
@@ -227,9 +239,27 @@ function makeOffscreenContext() {
     type: "MEDIA_DISCONTINUITY", jobId: "offline-9", mediaEpoch: 3,
     discontinuityId: 1, reason: "seek", currentTime: 120
   }, { tab: { id: 9 }, frameId: 0 })`);
+  await settle();
   check(run("tabStates.get(9).mediaEpoch") === 4
       && background.nativeMessages.some((message) => message.type === "streamStart" && message.mediaEpoch === 4),
     "seeking resets local live recognition and keeps its audio timeline aligned");
+  const resetLiveSession = background.contentMessages
+    .filter(({ message }) => message.type === "LIVE_SESSION" && message.mediaEpoch === 4)
+    .at(-1)?.message;
+  check(resetLiveSession?.mediaTimed === true && resetLiveSession.discontinuityId === 1,
+    "local live sessions preserve the page discontinuity counter across reloads");
+
+  await run(`handleNativeMessage({
+    type: "streamCues", jobId: "offline-9", mediaEpoch: 4, revision: 1,
+    cues: [{ cueId: "cue-after-seek", startMs: 500, endMs: 1_900, text: "After seek." }]
+  })`);
+  await settle();
+  const afterSeek = background.runtimeMessages
+    .filter((message) => message.type === "LIVE_SUBTITLES" && message.mediaEpoch === 4)
+    .at(-1);
+  check(afterSeek?.mediaTimed === true && afterSeek.beginTimeMs === 121_000
+      && afterSeek.endTimeMs === 123_800,
+    "seeking re-anchors capture time zero to the new player position");
 
   await run("stopCapture(tabStates.get(9))");
   await settle();

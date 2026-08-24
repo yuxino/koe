@@ -12,6 +12,9 @@ actor SessionCoordinator {
     private var activeTask: Task<Void, Never>?
     private var activeStream: StreamSession?
     private var streamTask: Task<Void, Never>?
+    private var streamTranslationQueue: [StreamTranslationBatch] = []
+    private var streamTranslationTask: Task<Void, Never>?
+    private var streamTranslationRunID = 0
     private var nextRunID = 0
 
     init(writer: NativeMessageWriter) throws {
@@ -106,6 +109,7 @@ actor SessionCoordinator {
     func shutdown() {
         activeTask?.cancel()
         streamTask?.cancel()
+        cancelStreamTranslationTasks()
         activeKey = nil
         activeStream = nil
     }
@@ -119,6 +123,7 @@ actor SessionCoordinator {
         )
         activeTask?.cancel()
         streamTask?.cancel()
+        cancelStreamTranslationTasks()
         activeStream = nil
         activeKey = key
         let next = Task { [weak self] in
@@ -134,6 +139,7 @@ actor SessionCoordinator {
            activeStream.key.mediaEpoch == max(0, mediaEpoch ?? 0) {
             streamTask?.cancel()
             streamTask = nil
+            cancelStreamTranslationTasks()
             self.activeStream = nil
         }
         guard let activeKey,
@@ -155,6 +161,7 @@ actor SessionCoordinator {
         activeKey = nil
         streamTask?.cancel()
         streamTask = nil
+        cancelStreamTranslationTasks()
         activeStream = StreamSession(
             key: key,
             mediaKey: request.mediaKey.isEmpty
@@ -234,7 +241,7 @@ actor SessionCoordinator {
                 ))
                 if stream.translate {
                     let language = await transcriber.currentLanguage()
-                    await emitStreamTranslations(
+                    scheduleStreamTranslations(
                         for: additions,
                         key: key,
                         sourceLanguage: language
@@ -253,13 +260,15 @@ actor SessionCoordinator {
         } catch {
             guard activeStream?.key == key else { return }
             NativeMessageWriter.log("stream-failed \(safeLogCode(error))")
+            cancelStreamTranslationTasks()
+            activeStream = nil
+            streamTask = nil
             await writer.send(.failure(
                 jobId: key.jobId,
                 mediaEpoch: key.mediaEpoch,
                 issueCode: NativeIssueCode.classify(error).rawValue,
                 message: userFacing(error)
             ))
-            activeStream = nil
         }
         if activeStream?.key == key {
             streamTask = nil
@@ -278,11 +287,19 @@ actor SessionCoordinator {
         let translator = LocalTranslator.shared
         var updated: [SubtitleCue] = []
         for cue in cues {
-            guard activeStream?.key == key else { return }
+            guard !Task.isCancelled,
+                  activeStream?.key == key,
+                  streamTranslationQueue.isEmpty else { return }
             guard let translated = await translator.translate(
                 cue.text,
                 sourceLanguageHint: sourceLanguage
             ) else { continue }
+            // A newer audio window makes this batch obsolete. Finish at most the
+            // translation already in flight, then skip its remaining cues and
+            // move directly to the latest pending batch.
+            guard !Task.isCancelled,
+                  activeStream?.key == key,
+                  streamTranslationQueue.isEmpty else { return }
             updated.append(SubtitleCue(
                 cueId: cue.cueId,
                 startMs: cue.startMs,
@@ -300,6 +317,52 @@ actor SessionCoordinator {
             revision: stream.revision,
             cues: updated
         ))
+    }
+
+    private func scheduleStreamTranslations(
+        for cues: [SubtitleCue],
+        key: SessionKey,
+        sourceLanguage: String?
+    ) {
+        let batch = StreamTranslationBatch(
+            cues: cues,
+            key: key,
+            sourceLanguage: sourceLanguage
+        )
+        // Translation is allowed to trail recognition by one in-flight batch,
+        // but queued historical windows are no longer useful for the live UI.
+        // Keep only the newest pending batch so a slow translator cannot build
+        // an unbounded backlog behind the 2.5-second PCM step.
+        streamTranslationQueue = [batch]
+        guard streamTranslationTask == nil else { return }
+        streamTranslationRunID += 1
+        let runID = streamTranslationRunID
+        streamTranslationTask = Task { [weak self] in
+            guard let self else { return }
+            await self.runStreamTranslationQueue(runID: runID)
+        }
+    }
+
+    private func runStreamTranslationQueue(runID: Int) async {
+        while !Task.isCancelled,
+              streamTranslationRunID == runID,
+              !streamTranslationQueue.isEmpty {
+            let batch = streamTranslationQueue.removeFirst()
+            await emitStreamTranslations(
+                for: batch.cues,
+                key: batch.key,
+                sourceLanguage: batch.sourceLanguage
+            )
+        }
+        guard streamTranslationRunID == runID else { return }
+        streamTranslationTask = nil
+    }
+
+    private func cancelStreamTranslationTasks() {
+        streamTranslationRunID += 1
+        streamTranslationTask?.cancel()
+        streamTranslationTask = nil
+        streamTranslationQueue.removeAll()
     }
 
     private func ensureStreamActive(_ key: SessionKey) throws {
@@ -558,4 +621,10 @@ private struct StreamSession {
     var buffer: PCMStreamBuffer
     var accumulator = CueAccumulator()
     var revision = 0
+}
+
+private struct StreamTranslationBatch {
+    let cues: [SubtitleCue]
+    let key: SessionKey
+    let sourceLanguage: String?
 }

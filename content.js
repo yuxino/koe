@@ -65,6 +65,8 @@
   let inlineHlsScannedAt = 0;
   const CAPTION_SENTENCE_ENDINGS = new Set(["。", "！", "？", "!", "?", "；", ";", "\n"]);
   const CAPTION_PREFERRED_BREAKS = new Set(["，", "、", ",", "：", ":", "—", "–", "-", " "]);
+  const MEDIA_TIMED_LATE_GRACE_MS = 2_500;
+  const MEDIA_TIMED_EARLY_GRACE_MS = 1_200;
 
   try {
     chrome.runtime.onMessage.addListener((message) => {
@@ -179,14 +181,29 @@
       jobId: activeSession.jobId,
       mediaEpoch: activeSession.mediaEpoch,
       discontinuityId: mediaDiscontinuityId,
-      currentTime: Number(event.target.currentTime) || 0
+      currentTime: Number(event.target.currentTime) || 0,
+      playbackRate: normalizedPlaybackRate(event.target)
     });
   }, true);
 
   document.addEventListener("ratechange", (event) => {
     if (!isActiveVideoEvent(event)) return;
     positionOverlay();
-    if (activeSession?.mode === "offline") reportMediaContext();
+    if (activeSession?.mode === "offline") {
+      reportMediaContext();
+    } else if (activeSession?.mode === "live" && activeSession.mediaTimed && !event.target.paused) {
+      reanchorMediaTimedLive("ratechange", event.target);
+    }
+  }, true);
+
+  document.addEventListener("pause", (event) => {
+    if (!isActiveVideoEvent(event) || activeSession?.mode !== "live" || !activeSession.mediaTimed) return;
+    clearOverlayText({ resetTimeline: false });
+  }, true);
+
+  document.addEventListener("play", (event) => {
+    if (!isActiveVideoEvent(event) || activeSession?.mode !== "live" || !activeSession.mediaTimed) return;
+    reanchorMediaTimedLive("play", event.target);
   }, true);
 
   for (const eventName of ["play", "pause", "timeupdate", "loadedmetadata"]) {
@@ -295,16 +312,23 @@
         || previousSession.mediaEpoch !== nextEpoch;
       if (replacingTimeline) {
         clearOverlayText();
+        awaitingMediaReset = false;
       }
       activeSession = {
         jobId: nextJobId,
         mediaEpoch: nextEpoch,
         translate: message.translate !== false,
+        mediaTimed: message.mediaTimed === true,
         mode: "live"
       };
+      if (activeSession.mediaTimed) {
+        mediaDiscontinuityId = Math.max(
+          mediaDiscontinuityId,
+          Number(message.discontinuityId) || 0
+        );
+      }
       stopOfflineClock();
       resetOfflineCues();
-      awaitingMediaReset = false;
       ensureOverlay();
       applyOverlayPreferences();
       return;
@@ -353,7 +377,7 @@
         seq,
         original: String(line.text || "").trim(),
         translated: pendingUnitTranslations.get(seq) || ""
-      });
+      }, liveDisplayDuration(message));
       pendingUnitTranslations.delete(seq);
     } else if (message.type === "LIVE_TRANSLATED") {
       const value = String(line.translated || "").trim();
@@ -362,7 +386,7 @@
       if (message.unit) {
         if (seq === visibleUnitSeq) {
           finalTranslatedText = value;
-          if (!draftOriginal) showOverlay(5_200);
+          if (!draftOriginal && !activeSession.mediaTimed) showOverlay(5_200);
         } else if (seq >= visibleUnitSeq) pendingUnitTranslations.set(seq, value);
       } else {
         if (seq < lastDraftSeq) return;
@@ -373,14 +397,14 @@
     renderOverlay();
   }
 
-  function showUnit(item) {
+  function showUnit(item, duration = 5_200) {
     if (!item.original) return;
     visibleUnitSeq = Number(item.seq) || visibleUnitSeq;
     finalOriginal = String(item.original || "").trim();
     finalTranslatedText = String(item.translated || "").trim();
     draftOriginal = "";
     draftTranslatedText = "";
-    showOverlay(5_200);
+    showOverlay(duration);
     renderOverlay();
   }
 
@@ -397,9 +421,50 @@
     const end = Number(message.endTimeMs);
     const audio = Number(message.audioPositionMs);
     if (Number.isFinite(begin) && Number.isFinite(end) && end < begin) return false;
-    // 弱网恢复时宁可跳过已经过去很久的字幕，也不要让旧台词追着画面补播。
-    if (Number.isFinite(end) && Number.isFinite(audio) && audio - end > 8_000) return false;
+    if (activeSession.mediaTimed) {
+      const video = findVideo();
+      if (!video || video.paused) return false;
+      const currentMs = Math.max(0, Number(video.currentTime) || 0) * 1_000;
+      const playbackRate = normalizedPlaybackRate(video);
+      if (Number.isFinite(begin)
+          && begin - currentMs > MEDIA_TIMED_EARLY_GRACE_MS * playbackRate) return false;
+      if (Number.isFinite(end)
+          && currentMs - end > MEDIA_TIMED_LATE_GRACE_MS * playbackRate) return false;
+    } else {
+      // 弱网恢复时宁可跳过已经过去很久的字幕，也不要让旧台词追着画面补播。
+      if (Number.isFinite(end) && Number.isFinite(audio) && audio - end > 8_000) return false;
+    }
     return true;
+  }
+
+  function liveDisplayDuration(message) {
+    if (!activeSession?.mediaTimed) return 5_200;
+    const video = findVideo();
+    const endMs = Number(message?.endTimeMs);
+    if (!video || !Number.isFinite(endMs)) return 2_400;
+    const currentMs = Math.max(0, Number(video.currentTime) || 0) * 1_000;
+    const remainingWallTimeMs = (endMs - currentMs) / normalizedPlaybackRate(video);
+    return Math.max(900, Math.min(3_200, remainingWallTimeMs + 1_200));
+  }
+
+  function normalizedPlaybackRate(video) {
+    return Math.max(0.25, Math.min(4, Number(video?.playbackRate) || 1));
+  }
+
+  function reanchorMediaTimedLive(reason, video) {
+    if (!activeSession || activeSession.mode !== "live" || !activeSession.mediaTimed || awaitingMediaReset) return;
+    awaitingMediaReset = true;
+    clearOverlayText({ resetTimeline: false });
+    mediaDiscontinuityId += 1;
+    safeSend({
+      type: "MEDIA_DISCONTINUITY",
+      reason,
+      jobId: activeSession.jobId,
+      mediaEpoch: activeSession.mediaEpoch,
+      discontinuityId: mediaDiscontinuityId,
+      currentTime: Math.max(0, Number(video?.currentTime) || 0),
+      playbackRate: normalizedPlaybackRate(video)
+    });
   }
 
   function acceptOfflineMessage(message) {

@@ -609,7 +609,10 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
       await persistStates();
     } else if (state.captureStarted && sessionMode === "offline") {
       if (state.localFallbackActive) {
-        await resetLocalLiveSession(state, forceReset ? "manual" : "source");
+        await resetLocalLiveSession(state, forceReset ? "manual" : "source", {
+          currentTimeMs: source?.currentTimeMs,
+          playbackRate: source?.playbackRate
+        });
       } else {
         const previousEpoch = Number(state.mediaEpoch) || 0;
         try {
@@ -637,12 +640,23 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
   if (!state) return { ok: true };
   if (state.engine === "local") {
     if (state.localFallbackActive) {
+      // PAGE_READY/play/source maintenance gives us a fresh renderer clock.
+      // Re-anchor at the current captured-audio position so rate changes and
+      // pause/resume do not accumulate drift without restarting Whisper.
+      if (Number.isFinite(Number(source?.currentTimeMs))) {
+        setLocalMediaAnchor(state, {
+          currentTimeMs: Number(source.currentTimeMs),
+          playbackRate: source.playbackRate
+        }, Number(state.localAudioPositionMs) || 0);
+      }
       await sendToContent(state, {
         type: "LIVE_SESSION",
         jobId: state.jobId,
         mediaEpoch: Number(state.mediaEpoch) || 0,
         translate: state.translate,
-        audioPositionMs: Number(state.localAudioPositionMs) || 0
+        audioPositionMs: localMediaTimeAtAudio(state, Number(state.localAudioPositionMs) || 0),
+        mediaTimed: true,
+        discontinuityId: Number(state.lastDiscontinuityId) || 0
       });
       return { ok: true };
     }
@@ -842,6 +856,43 @@ function scheduleOfflineFallbackProbe(state) {
   }, delay);
 }
 
+function normalizeLocalPlaybackRate(value, fallback = 1) {
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) return Math.max(0.25, Math.min(4, numeric));
+  const fallbackNumeric = Number(fallback);
+  return Number.isFinite(fallbackNumeric)
+    ? Math.max(0.25, Math.min(4, fallbackNumeric))
+    : 1;
+}
+
+function localMediaTimeAtAudio(state, audioPositionMs) {
+  const audio = Math.max(0, Number(audioPositionMs) || 0);
+  const mediaAnchor = Number(state?.localMediaAnchorMs);
+  if (!Number.isFinite(mediaAnchor)) return audio;
+  const audioAnchor = Math.max(0, Number(state?.localAudioAnchorMs) || 0);
+  const playbackRate = normalizeLocalPlaybackRate(state?.localPlaybackRate);
+  return Math.max(0, mediaAnchor + (audio - audioAnchor) * playbackRate);
+}
+
+function setLocalMediaAnchor(state, context = {}, audioPositionMs = 0) {
+  if (!state) return;
+  const currentTimeMs = Number(context.currentTimeMs);
+  state.localMediaAnchorMs = Number.isFinite(currentTimeMs)
+    ? Math.max(0, currentTimeMs)
+    : localMediaTimeAtAudio(state, state.localAudioPositionMs);
+  state.localAudioAnchorMs = Math.max(0, Number(audioPositionMs) || 0);
+  state.localPlaybackRate = normalizeLocalPlaybackRate(
+    context.playbackRate,
+    state.localPlaybackRate
+  );
+  state.localMediaTimed = true;
+  state.offlineContext = {
+    ...(state.offlineContext || {}),
+    currentTimeMs: state.localMediaAnchorMs,
+    playbackRate: state.localPlaybackRate
+  };
+}
+
 async function startLocalLiveFallback(state, streamId = captureStreamIds.get(state?.tabId) || "") {
   if (!state?.captureStarted || state.engine !== "local" || state.userStopped) return false;
   if (state.localFallbackActive) return true;
@@ -892,7 +943,7 @@ async function runLocalLiveFallback(state, streamId) {
     }
     resetOfflineBatchState(state);
     state.offlineSourceUrl = "";
-    state.offlineContext = undefined;
+    setLocalMediaAnchor(state, state.offlineContext, 0);
     mediaCandidatesByTab.delete(state.tabId);
     state.localFallbackActive = true;
     if (!state.mediaIdentity) state.mediaIdentity = createMediaIdentity();
@@ -918,7 +969,9 @@ async function runLocalLiveFallback(state, streamId) {
       jobId: state.jobId,
       mediaEpoch: Number(state.mediaEpoch) || 0,
       translate: state.translate,
-      audioPositionMs: 0
+      audioPositionMs: localMediaTimeAtAudio(state, 0),
+      mediaTimed: true,
+      discontinuityId: Number(state.lastDiscontinuityId) || 0
     });
     postNativeMessage({
       type: "streamStart",
@@ -983,8 +1036,17 @@ async function runLocalLiveFallback(state, streamId) {
   }
 }
 
-async function resetLocalLiveSession(state, reason = "media") {
+async function resetLocalLiveSession(state, reason = "media", mediaContext = {}) {
   if (!state?.captureStarted || !state.localFallbackActive) return null;
+  const previousAudioPositionMs = Math.max(0, Number(state.localAudioPositionMs) || 0);
+  const currentTimeMs = Number(mediaContext.currentTimeMs);
+  const nextMediaTimeMs = Number.isFinite(currentTimeMs)
+    ? Math.max(0, currentTimeMs)
+    : localMediaTimeAtAudio(state, previousAudioPositionMs);
+  const nextPlaybackRate = normalizeLocalPlaybackRate(
+    mediaContext.playbackRate,
+    state.localPlaybackRate
+  );
   const previousEpoch = Number(state.mediaEpoch) || 0;
   try {
     postNativeMessage({ type: "cancel", jobId: state.jobId, mediaEpoch: previousEpoch });
@@ -994,6 +1056,10 @@ async function resetLocalLiveSession(state, reason = "media") {
   state.mediaEpoch = previousEpoch + 1;
   state.localLiveSeq = 0;
   state.localAudioPositionMs = 0;
+  setLocalMediaAnchor(state, {
+    currentTimeMs: nextMediaTimeMs,
+    playbackRate: nextPlaybackRate
+  }, 0);
   state.localCueSequences = Object.create(null);
   state.localCueOriginals = Object.create(null);
   state.localCueTranslations = Object.create(null);
@@ -1074,7 +1140,9 @@ async function resetLocalLiveSession(state, reason = "media") {
     jobId: state.jobId,
     mediaEpoch: state.mediaEpoch,
     translate: state.translate,
-    audioPositionMs: Number(response.audioPositionMs) || 0
+    audioPositionMs: localMediaTimeAtAudio(state, Number(response.audioPositionMs) || 0),
+    mediaTimed: true,
+    discontinuityId: Number(state.lastDiscontinuityId) || 0
   });
   await persistStates();
   return response;
@@ -1130,6 +1198,9 @@ async function receiveMediaContext(message, sender) {
   }
   const candidate = selectMediaCandidate(tabId, context);
   if (!candidate) {
+    // 非 HLS 页面随后会切到标签页音频。保留这次播放器快照，
+    // 让 capture-relative Whisper cue 能映射回真实视频时间。
+    state.offlineContext = context;
     if (!state.offlineMissingMediaSince) state.offlineMissingMediaSince = Date.now();
     const waitingMs = Date.now() - state.offlineMissingMediaSince;
     if (waitingMs >= LOCAL_LIVE_FALLBACK_DELAY_MS) {
@@ -1331,6 +1402,11 @@ async function forwardLocalStreamCues(state, message) {
   if (!state.localCueSequences) state.localCueSequences = Object.create(null);
   if (!state.localCueOriginals) state.localCueOriginals = Object.create(null);
   if (!state.localCueTranslations) state.localCueTranslations = Object.create(null);
+  const audioPositionMs = Math.max(
+    Number(state.localAudioPositionMs) || 0,
+    ...cues.map((cue) => cue.endMs)
+  );
+  const mediaPositionMs = localMediaTimeAtAudio(state, audioPositionMs);
   for (const cue of cues) {
     let seq = Number(state.localCueSequences[cue.cueId]) || 0;
     if (!seq) {
@@ -1344,9 +1420,10 @@ async function forwardLocalStreamCues(state, message) {
       mediaEpoch: Number(state.mediaEpoch) || 0,
       seq,
       unit: true,
-      beginTimeMs: cue.startMs,
-      endTimeMs: cue.endMs,
-      audioPositionMs: Math.max(Number(state.localAudioPositionMs) || 0, cue.endMs),
+      beginTimeMs: localMediaTimeAtAudio(state, cue.startMs),
+      endTimeMs: localMediaTimeAtAudio(state, cue.endMs),
+      audioPositionMs: mediaPositionMs,
+      mediaTimed: true,
       sentenceId: cue.cueId
     };
     if (!state.localCueOriginals[cue.cueId]) {
@@ -2207,6 +2284,7 @@ async function forwardCaptureLines(message, type) {
     beginTimeMs: message.beginTimeMs,
     endTimeMs: message.endTimeMs,
     audioPositionMs: message.audioPositionMs,
+    mediaTimed: message.mediaTimed === true,
     sentenceId: message.sentenceId
   };
   // 同一条字幕同时送给页面画面字幕与侧边栏记录。
@@ -2380,7 +2458,10 @@ async function mediaDiscontinuity(message, sender) {
   }
   state.lastDiscontinuityId = incomingDiscontinuityId;
   if (state.engine === "local" && state.localFallbackActive) {
-    await resetLocalLiveSession(state, String(message.reason || "media"));
+    await resetLocalLiveSession(state, String(message.reason || "media"), {
+      currentTimeMs: Math.max(0, Number(message.currentTime) || 0) * 1_000,
+      playbackRate: normalizeLocalPlaybackRate(message.playbackRate, state.localPlaybackRate)
+    });
     return { ok: true, mediaEpoch: state.mediaEpoch };
   }
   const previousEpoch = Number(state.mediaEpoch) || 0;
@@ -2774,6 +2855,8 @@ async function listVideos(tabId) {
         pageUrl: location.href,
         hasVideo: true,
         sourceUrl: video.currentSrc || video.src || video.querySelector("source")?.src || "",
+        currentTimeMs: Math.max(0, Number(video.currentTime) || 0) * 1_000,
+        playbackRate: Math.max(0.25, Math.min(4, Number(video.playbackRate) || 1)),
         durationMs: Number.isFinite(video.duration) ? Math.round(video.duration * 1_000) : null,
         width: Math.max(Number(video.videoWidth || 0), Number(rect.width || 0)),
         height: Math.max(Number(video.videoHeight || 0), Number(rect.height || 0)),

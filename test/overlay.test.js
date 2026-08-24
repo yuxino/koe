@@ -41,6 +41,7 @@ function makeElement(tag = "div") {
 (async () => {
   const messageListeners = [];
   const documentListeners = {};
+  const sentMessages = [];
   let now = 10_000;
   let nextTimerId = 1;
   const timers = new Map();
@@ -80,7 +81,12 @@ function makeElement(tag = "div") {
     fullscreenElement: null,
     querySelectorAll: (selector) => selector === "video" ? [video] : [],
     createElement: (tag) => makeElement(tag),
-    addEventListener: (type, listener) => { documentListeners[type] = listener; }
+    addEventListener: (type, listener) => {
+      const previous = documentListeners[type];
+      documentListeners[type] = previous
+        ? (event) => { previous(event); listener(event); }
+        : listener;
+    }
   };
   const ctx = {
     console, Date: FakeDate, JSON, String, Number, Boolean, Promise, Math, URL, Array,
@@ -101,7 +107,7 @@ function makeElement(tag = "div") {
       runtime: {
         getManifest: () => ({ version: "test" }),
         onMessage: { addListener: (listener) => messageListeners.push(listener) },
-        sendMessage: async () => ({ ok: true })
+        sendMessage: async (message) => { sentMessages.push(message); return { ok: true }; }
       },
       storage: {
         local: { get: async () => ({ koeOverlayEnabled: true, koeOverlaySize: "medium" }) },
@@ -143,6 +149,89 @@ function makeElement(tag = "div") {
   check(overlay.shadowRoot.querySelector(".translation").textContent === "", "stale epoch translation rejected");
   send({ type: "LIVE_TRANSLATED", jobId: "job-1", mediaEpoch: 3, seq: 1, unit: true, lines: [{ translated: "当前字幕" }] });
   check(overlay.shadowRoot.querySelector(".translation").textContent === "当前字幕", "current translation renders");
+
+  video.currentTime = 20;
+  send({
+    type: "LIVE_SESSION", jobId: "timed-live", mediaEpoch: 1, translate: true,
+    mediaTimed: true, discontinuityId: 7
+  });
+  send({
+    type: "LIVE_SUBTITLES", jobId: "timed-live", mediaEpoch: 1, seq: 1, unit: true, mediaTimed: true,
+    beginTimeMs: 12_000, endTimeMs: 13_900, audioPositionMs: 13_900,
+    lines: [{ text: "Too late for this scene" }]
+  });
+  check(overlay.shadowRoot.querySelector(".original").textContent === "",
+    "media-timed live cues that already missed the video are not shown");
+  video.currentTime = 13.2;
+  send({
+    type: "LIVE_SUBTITLES", jobId: "timed-live", mediaEpoch: 1, seq: 2, unit: true, mediaTimed: true,
+    beginTimeMs: 12_000, endTimeMs: 13_900, audioPositionMs: 13_900,
+    lines: [{ text: "Still close to the scene" }]
+  });
+  check(overlay.shadowRoot.querySelector(".original").textContent === "Still close to the scene",
+    "media-timed live cues still render while the video is close to their time range");
+  advance(3_200);
+  check(!overlay.shadowRoot.querySelector(".stage").classList.contains("visible"),
+    "media-timed live cues do not linger after their short display window");
+  send({
+    type: "LIVE_TRANSLATED", jobId: "timed-live", mediaEpoch: 1, seq: 2, unit: true, mediaTimed: true,
+    beginTimeMs: 12_000, endTimeMs: 13_900, audioPositionMs: 13_900,
+    lines: [{ translated: "迟到的翻译" }]
+  });
+  check(!overlay.shadowRoot.querySelector(".stage").classList.contains("visible"),
+    "a late media-timed translation cannot make an expired cue reappear");
+  send({
+    type: "LIVE_SUBTITLES", jobId: "timed-live", mediaEpoch: 1, seq: 3, unit: true, mediaTimed: true,
+    beginTimeMs: 18_000, endTimeMs: 20_000, audioPositionMs: 20_000,
+    lines: [{ text: "Too early for this scene" }]
+  });
+  check(overlay.shadowRoot.querySelector(".original").textContent === "Still close to the scene",
+    "media-timed live cues are not shown before the video reaches them");
+
+  video.currentTime = 30;
+  video.playbackRate = 1.5;
+  documentListeners.ratechange({ target: video });
+  const rateReset = sentMessages.filter((message) => message.type === "MEDIA_DISCONTINUITY").at(-1);
+  check(rateReset?.reason === "ratechange" && rateReset.currentTime === 30
+      && rateReset.playbackRate === 1.5 && rateReset.discontinuityId === 8,
+    "playback-rate changes reanchor local live subtitles to the video clock");
+  send({ type: "LIVE_SESSION", jobId: "timed-live", mediaEpoch: 1, translate: true, mediaTimed: true });
+  send({
+    type: "LIVE_SUBTITLES", jobId: "timed-live", mediaEpoch: 1, seq: 4, unit: true, mediaTimed: true,
+    beginTimeMs: 30_000, endTimeMs: 31_000, audioPositionMs: 31_000,
+    lines: [{ text: "Must wait for the new clock" }]
+  });
+  check(overlay.shadowRoot.querySelector(".original").textContent === "",
+    "same-epoch session maintenance cannot reopen captions during a clock reset");
+  send({ type: "LIVE_RESET", jobId: "timed-live", mediaEpoch: 2, reason: "ratechange" });
+  send({
+    type: "LIVE_SUBTITLES", jobId: "timed-live", mediaEpoch: 2, seq: 1, unit: true, mediaTimed: true,
+    beginTimeMs: 30_000, endTimeMs: 31_000, audioPositionMs: 31_000,
+    lines: [{ text: "New clock is ready" }]
+  });
+  check(overlay.shadowRoot.querySelector(".original").textContent === "New clock is ready",
+    "media-timed captions resume after the fresh epoch arrives");
+
+  video.currentTime = 20;
+  video.playbackRate = 2;
+  send({ type: "LIVE_SESSION", jobId: "timed-2x", mediaEpoch: 1, translate: true, mediaTimed: true });
+  send({
+    type: "LIVE_SUBTITLES", jobId: "timed-2x", mediaEpoch: 1, seq: 1, unit: true, mediaTimed: true,
+    beginTimeMs: 16_000, endTimeMs: 17_000, audioPositionMs: 20_000,
+    lines: [{ text: "Within two-times wall-clock grace" }]
+  });
+  check(overlay.shadowRoot.querySelector(".original").textContent === "Within two-times wall-clock grace",
+    "media-timed lateness is measured in wall time at two-times playback");
+  send({
+    type: "LIVE_SUBTITLES", jobId: "timed-2x", mediaEpoch: 1, seq: 2, unit: true, mediaTimed: true,
+    beginTimeMs: 20_000, endTimeMs: 22_000, audioPositionMs: 22_000,
+    lines: [{ text: "Two-times display duration" }]
+  });
+  advance(2_250);
+  check(!overlay.shadowRoot.querySelector(".stage").classList.contains("visible"),
+    "media-timed hide timers convert remaining media time at two-times playback");
+  video.currentTime = 0;
+  video.playbackRate = 1;
 
   send({ type: "LIVE_SESSION", jobId: "epoch-job", mediaEpoch: 10, translate: true });
   send({
