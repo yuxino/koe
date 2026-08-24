@@ -7,8 +7,11 @@ actor SessionCoordinator {
     private let transcriber: WhisperTranscriber
     private let preferenceStore: PreferenceStore
     private let scheduler = WindowScheduler()
+    private let streamRoot: URL
     private var activeKey: SessionKey?
     private var activeTask: Task<Void, Never>?
+    private var activeStream: StreamSession?
+    private var streamTask: Task<Void, Never>?
     private var nextRunID = 0
 
     init(writer: NativeMessageWriter) throws {
@@ -16,6 +19,10 @@ actor SessionCoordinator {
         self.resolver = try HLSResolver()
         self.transcriber = WhisperTranscriber()
         self.preferenceStore = try PreferenceStore()
+        let streamRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("koe-helper-stream", isDirectory: true)
+        try FileManager.default.createDirectory(at: streamRoot, withIntermediateDirectories: true)
+        self.streamRoot = streamRoot
     }
 
     func handle(_ request: HostRequest) async {
@@ -57,6 +64,28 @@ actor SessionCoordinator {
                     message: userFacing(error)
                 ))
             }
+        case "streamStart":
+            do {
+                try await startStream(request.validatedStreamStart())
+            } catch {
+                await writer.send(.failure(
+                    jobId: request.jobId,
+                    mediaEpoch: request.mediaEpoch,
+                    message: userFacing(error)
+                ))
+            }
+        case "streamAudio":
+            do {
+                try appendStreamAudio(request.validatedStreamAudio())
+            } catch {
+                await writer.send(.failure(
+                    jobId: request.jobId,
+                    mediaEpoch: request.mediaEpoch,
+                    message: userFacing(error)
+                ))
+            }
+        case "streamStop":
+            cancel(jobId: request.jobId, mediaEpoch: request.mediaEpoch)
         case "cancel":
             cancel(jobId: request.jobId, mediaEpoch: request.mediaEpoch)
         default:
@@ -70,7 +99,9 @@ actor SessionCoordinator {
 
     func shutdown() {
         activeTask?.cancel()
+        streamTask?.cancel()
         activeKey = nil
+        activeStream = nil
     }
 
     private func startSession(_ request: StartRequest) {
@@ -81,6 +112,8 @@ actor SessionCoordinator {
             runID: nextRunID
         )
         activeTask?.cancel()
+        streamTask?.cancel()
+        activeStream = nil
         activeKey = key
         let next = Task { [weak self] in
             guard let self else { return }
@@ -90,11 +123,181 @@ actor SessionCoordinator {
     }
 
     private func cancel(jobId: String?, mediaEpoch: Int?) {
+        if let activeStream,
+           activeStream.key.jobId == String(jobId ?? ""),
+           activeStream.key.mediaEpoch == max(0, mediaEpoch ?? 0) {
+            streamTask?.cancel()
+            streamTask = nil
+            self.activeStream = nil
+        }
         guard let activeKey,
               activeKey.jobId == String(jobId ?? ""),
               activeKey.mediaEpoch == max(0, mediaEpoch ?? 0) else { return }
         activeTask?.cancel()
         self.activeKey = nil
+    }
+
+    private func startStream(_ request: StreamStartRequest) async throws {
+        nextRunID += 1
+        let key = SessionKey(
+            jobId: request.jobId,
+            mediaEpoch: request.mediaEpoch,
+            runID: nextRunID
+        )
+        activeTask?.cancel()
+        activeTask = nil
+        activeKey = nil
+        streamTask?.cancel()
+        streamTask = nil
+        activeStream = StreamSession(
+            key: key,
+            mediaKey: request.mediaKey.isEmpty
+                ? "\(request.jobId)#\(request.mediaEpoch)"
+                : request.mediaKey,
+            translate: request.translate,
+            buffer: try PCMStreamBuffer(
+                sampleRate: request.sampleRate,
+                channels: request.channels
+            )
+        )
+        await writer.send(.status(
+            jobId: key.jobId,
+            mediaEpoch: key.mediaEpoch,
+            stage: "stream-listening",
+            detail: "正在本机听取这段视频，第一句马上出现…"
+        ))
+    }
+
+    private func appendStreamAudio(_ request: StreamAudioRequest) throws {
+        guard var stream = activeStream,
+              stream.key.jobId == request.jobId,
+              stream.key.mediaEpoch == request.mediaEpoch else { return }
+        try stream.buffer.append(request.pcm)
+        activeStream = stream
+        startNextStreamWindowIfNeeded()
+    }
+
+    private func startNextStreamWindowIfNeeded() {
+        guard streamTask == nil,
+              var stream = activeStream,
+              let window = stream.buffer.takeWindow() else { return }
+        activeStream = stream
+        let key = stream.key
+        streamTask = Task { [weak self] in
+            guard let self else { return }
+            await self.processStreamWindow(window, key: key)
+        }
+    }
+
+    private func processStreamWindow(_ window: PCMStreamWindow, key: SessionKey) async {
+        let audioURL = streamRoot.appendingPathComponent("\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: audioURL) }
+        do {
+            try ensureStreamActive(key)
+            let wav = try PCM16WAV.encode(pcm: window.pcm, sampleRate: 16_000, channels: 1)
+            try wav.write(to: audioURL, options: .atomic)
+            await writer.send(.status(
+                jobId: key.jobId,
+                mediaEpoch: key.mediaEpoch,
+                stage: "stream-model",
+                detail: "正在用本地高精度模型识别…"
+            ))
+            try await transcriber.prepare()
+            try ensureStreamActive(key)
+            guard let mediaKey = activeStream?.mediaKey else { throw CancellationError() }
+            let raw = try await transcriber.transcribe(audioURL: audioURL, mediaKey: mediaKey)
+            try ensureStreamActive(key)
+            guard var stream = activeStream else { throw CancellationError() }
+            let additions = stream.accumulator.merge(
+                rawCues: raw,
+                window: MediaWindow(
+                    startMs: window.startMs,
+                    endMs: window.endMs,
+                    emitAfterMs: window.emitAfterMs
+                ),
+                durationMs: window.endMs
+            )
+            let revision = stream.accumulator.revision
+            activeStream = stream
+            if !additions.isEmpty {
+                await writer.send(.streamCues(
+                    jobId: key.jobId,
+                    mediaEpoch: key.mediaEpoch,
+                    revision: revision,
+                    cues: additions
+                ))
+                if stream.translate {
+                    let language = await transcriber.currentLanguage()
+                    await emitStreamTranslations(
+                        for: additions,
+                        key: key,
+                        sourceLanguage: language
+                    )
+                }
+            }
+            try ensureStreamActive(key)
+            await writer.send(.status(
+                jobId: key.jobId,
+                mediaEpoch: key.mediaEpoch,
+                stage: "stream-live",
+                detail: "本地实时字幕运行中"
+            ))
+        } catch is CancellationError {
+            return
+        } catch {
+            guard activeStream?.key == key else { return }
+            NativeMessageWriter.log("stream-failed \(safeLogCode(error))")
+            await writer.send(.failure(
+                jobId: key.jobId,
+                mediaEpoch: key.mediaEpoch,
+                message: userFacing(error)
+            ))
+            activeStream = nil
+        }
+        if activeStream?.key == key {
+            streamTask = nil
+            startNextStreamWindowIfNeeded()
+        } else if streamTask?.isCancelled == true {
+            streamTask = nil
+        }
+    }
+
+    private func emitStreamTranslations(
+        for cues: [SubtitleCue],
+        key: SessionKey,
+        sourceLanguage: String?
+    ) async {
+        guard #available(macOS 26.0, *) else { return }
+        let translator = LocalTranslator.shared
+        var updated: [SubtitleCue] = []
+        for cue in cues {
+            guard activeStream?.key == key else { return }
+            guard let translated = await translator.translate(
+                cue.text,
+                sourceLanguageHint: sourceLanguage
+            ) else { continue }
+            updated.append(SubtitleCue(
+                cueId: cue.cueId,
+                startMs: cue.startMs,
+                endMs: cue.endMs,
+                text: cue.text,
+                translated: translated
+            ))
+        }
+        guard !updated.isEmpty, var stream = activeStream, stream.key == key else { return }
+        stream.revision = max(stream.revision, stream.accumulator.revision) + 1
+        activeStream = stream
+        await writer.send(.streamCues(
+            jobId: key.jobId,
+            mediaEpoch: key.mediaEpoch,
+            revision: stream.revision,
+            cues: updated
+        ))
+    }
+
+    private func ensureStreamActive(_ key: SessionKey) throws {
+        try Task.checkCancellation()
+        guard activeStream?.key == key else { throw CancellationError() }
     }
 
     private func run(_ request: StartRequest, key: SessionKey) async {
@@ -311,6 +514,11 @@ actor SessionCoordinator {
            !description.isEmpty {
             return description
         }
+        if let localized = error as? PCMStreamError,
+           let description = localized.errorDescription,
+           !description.isEmpty {
+            return description
+        }
         if let urlError = error as? URLError {
             return urlError.code == .timedOut
                 ? "视频服务器读取超时，请重试。"
@@ -333,4 +541,13 @@ private struct ExtractedAudio {
     let fileURL: URL
     let startMs: Double
     let endMs: Double
+}
+
+private struct StreamSession {
+    let key: SessionKey
+    let mediaKey: String
+    let translate: Bool
+    var buffer: PCMStreamBuffer
+    var accumulator = CueAccumulator()
+    var revision = 0
 }

@@ -41,6 +41,73 @@ check(sanitizedPreferences.koeCaptureSource == "tab"
       "retired or invalid native preference values fall back safely")
 
 do {
+    var stream = try PCMStreamBuffer(
+        sampleRate: 16_000,
+        channels: 1,
+        bootstrapDurationMs: 4_000,
+        windowDurationMs: 8_000,
+        overlapMs: 1_500,
+        maximumBufferedDurationMs: 20_000
+    )
+    try stream.append(Data(repeating: 0, count: 16_000 * 2 * 3))
+    check(stream.takeWindow() == nil,
+          "local live waits for the four-second bootstrap window")
+    try stream.append(Data(repeating: 1, count: 16_000 * 2))
+    let bootstrap = stream.takeWindow()
+    check(bootstrap?.pcm.count == 16_000 * 2 * 4
+            && bootstrap?.startMs == 0
+            && bootstrap?.endMs == 4_000
+            && bootstrap?.emitAfterMs == 0,
+          "local live emits an exact short bootstrap window")
+
+    try stream.append(Data(repeating: 2, count: 16_000 * 2 * 6 + 16_000))
+    let steady = stream.takeWindow()
+    check(steady?.startMs == 2_500
+            && steady?.endMs == 10_500
+            && steady?.emitAfterMs == 3_250,
+          "steady local-live windows overlap while suppressing the old prefix")
+    check(stream.bufferedDurationMs <= 20_000,
+          "local-live PCM buffering stays bounded")
+
+    do {
+        try stream.append(Data([0]))
+        check(false, "odd PCM byte counts are rejected")
+    } catch PCMStreamError.invalidChunk {
+        check(true, "odd PCM byte counts are rejected")
+    } catch {
+        check(false, "odd PCM byte counts return the expected error")
+    }
+
+    if let bootstrap {
+        let wav = try PCM16WAV.encode(pcm: bootstrap.pcm, sampleRate: 16_000, channels: 1)
+        check(String(data: wav.prefix(4), encoding: .ascii) == "RIFF"
+                && String(data: wav[8..<12], encoding: .ascii) == "WAVE",
+              "local-live PCM is wrapped in a valid WAV container")
+        check(wav.count == bootstrap.pcm.count + 44,
+              "WAV framing adds only the canonical 44-byte header")
+    }
+} catch {
+    check(false, "local-live PCM windows initialize: \(error)")
+}
+
+do {
+    let pcm = Data(repeating: 7, count: 3_200)
+    let request = HostRequest(
+        type: "streamAudio",
+        protocolVersion: koeNativeProtocolVersion,
+        jobId: "local-live-1",
+        mediaEpoch: 3,
+        sampleRate: 16_000,
+        channels: 1,
+        pcmBase64: pcm.base64EncodedString()
+    )
+    let audio = try request.validatedStreamAudio()
+    check(audio.pcm == pcm && audio.jobId == "local-live-1" && audio.mediaEpoch == 3,
+          "native stream audio validates and decodes bounded base64 PCM")
+} catch {
+    check(false, "valid native stream audio request: \(error)")
+}
+do {
     let request = HostRequest(
         type: "start",
         protocolVersion: koeNativeProtocolVersion,

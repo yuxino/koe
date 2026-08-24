@@ -73,6 +73,9 @@ public struct HostRequest: Decodable, Sendable {
     public let playbackRate: Double?
     public let translate: Bool?
     public let preferences: KoePreferences?
+    public let sampleRate: Int?
+    public let channels: Int?
+    public let pcmBase64: String?
 
     public init(
         type: String,
@@ -85,7 +88,10 @@ public struct HostRequest: Decodable, Sendable {
         durationMs: Double? = nil,
         playbackRate: Double? = nil,
         translate: Bool? = nil,
-        preferences: KoePreferences? = nil
+        preferences: KoePreferences? = nil,
+        sampleRate: Int? = nil,
+        channels: Int? = nil,
+        pcmBase64: String? = nil
     ) {
         self.type = type
         self.protocolVersion = protocolVersion
@@ -98,6 +104,9 @@ public struct HostRequest: Decodable, Sendable {
         self.playbackRate = playbackRate
         self.translate = translate
         self.preferences = preferences
+        self.sampleRate = sampleRate
+        self.channels = channels
+        self.pcmBase64 = pcmBase64
     }
 }
 
@@ -132,6 +141,43 @@ public struct StartRequest: Equatable, Sendable {
         self.durationMs = durationMs
         self.playbackRate = playbackRate
         self.translate = translate
+    }
+}
+
+public struct StreamStartRequest: Equatable, Sendable {
+    public let jobId: String
+    public let mediaEpoch: Int
+    public let mediaKey: String
+    public let sampleRate: Int
+    public let channels: Int
+    public let translate: Bool
+
+    public init(
+        jobId: String,
+        mediaEpoch: Int,
+        mediaKey: String,
+        sampleRate: Int,
+        channels: Int,
+        translate: Bool
+    ) {
+        self.jobId = jobId
+        self.mediaEpoch = mediaEpoch
+        self.mediaKey = mediaKey
+        self.sampleRate = sampleRate
+        self.channels = channels
+        self.translate = translate
+    }
+}
+
+public struct StreamAudioRequest: Equatable, Sendable {
+    public let jobId: String
+    public let mediaEpoch: Int
+    public let pcm: Data
+
+    public init(jobId: String, mediaEpoch: Int, pcm: Data) {
+        self.jobId = jobId
+        self.mediaEpoch = mediaEpoch
+        self.pcm = pcm
     }
 }
 
@@ -202,6 +248,50 @@ public extension HostRequest {
             playbackRate: min(4, max(0.25, playbackRate ?? 1)),
             translate: translate ?? false
         )
+    }
+
+    func validatedStreamStart() throws -> StreamStartRequest {
+        guard protocolVersion == koeNativeProtocolVersion else {
+            throw RequestValidationError.unsupportedProtocol
+        }
+        let job = try validatedJobID()
+        guard sampleRate == 16_000, channels == 1 else { throw PCMStreamError.invalidFormat }
+        return StreamStartRequest(
+            jobId: job,
+            mediaEpoch: max(0, mediaEpoch ?? 0),
+            mediaKey: String(mediaKey ?? "").prefix(1_024).description,
+            sampleRate: 16_000,
+            channels: 1,
+            translate: translate ?? false
+        )
+    }
+
+    func validatedStreamAudio() throws -> StreamAudioRequest {
+        guard protocolVersion == koeNativeProtocolVersion else {
+            throw RequestValidationError.unsupportedProtocol
+        }
+        let job = try validatedJobID()
+        let encoded = String(pcmBase64 ?? "")
+        guard !encoded.isEmpty, encoded.utf8.count <= 700 * 1_024,
+              let pcm = Data(base64Encoded: encoded),
+              !pcm.isEmpty,
+              pcm.count <= 512 * 1_024,
+              pcm.count.isMultiple(of: MemoryLayout<Int16>.size) else {
+            throw PCMStreamError.invalidChunk
+        }
+        return StreamAudioRequest(
+            jobId: job,
+            mediaEpoch: max(0, mediaEpoch ?? 0),
+            pcm: pcm
+        )
+    }
+
+    private func validatedJobID() throws -> String {
+        let job = String(jobId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !job.isEmpty, job.count <= 200 else {
+            throw RequestValidationError.missingField("jobId")
+        }
+        return job
     }
 
 }
@@ -403,6 +493,10 @@ public struct HostResponse: Encodable, Sendable {
 
     public static func cues(jobId: String, mediaEpoch: Int, revision: Int, cues: [SubtitleCue]) -> HostResponse {
         HostResponse(type: "cues", jobId: jobId, mediaEpoch: mediaEpoch, revision: revision, cues: cues)
+    }
+
+    public static func streamCues(jobId: String, mediaEpoch: Int, revision: Int, cues: [SubtitleCue]) -> HostResponse {
+        HostResponse(type: "streamCues", jobId: jobId, mediaEpoch: mediaEpoch, revision: revision, cues: cues)
     }
 
     public static func failure(jobId: String?, mediaEpoch: Int?, message: String) -> HostResponse {
