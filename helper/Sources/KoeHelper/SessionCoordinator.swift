@@ -15,6 +15,8 @@ actor SessionCoordinator {
     private var streamTranslationQueue: [StreamTranslationBatch] = []
     private var streamTranslationTask: Task<Void, Never>?
     private var streamTranslationRunID = 0
+    private var modelPreparationTask: Task<Void, Never>?
+    private var modelPreparationGeneration = 0
     private var nextRunID = 0
 
     init(writer: NativeMessageWriter) throws {
@@ -109,6 +111,9 @@ actor SessionCoordinator {
     func shutdown() {
         activeTask?.cancel()
         streamTask?.cancel()
+        modelPreparationGeneration += 1
+        modelPreparationTask?.cancel()
+        modelPreparationTask = nil
         cancelStreamTranslationTasks()
         activeKey = nil
         activeStream = nil
@@ -168,17 +173,46 @@ actor SessionCoordinator {
                 ? "\(request.jobId)#\(request.mediaEpoch)"
                 : request.mediaKey,
             translate: request.translate,
+            skipSameLanguage: request.skipSameLanguage,
+            preferredLanguage: request.preferredLanguage,
             buffer: try PCMStreamBuffer(
                 sampleRate: request.sampleRate,
                 channels: request.channels
             )
         )
+        prepareModelInBackgroundIfNeeded()
         await writer.send(.status(
             jobId: key.jobId,
             mediaEpoch: key.mediaEpoch,
             stage: "stream-listening",
             detail: "正在本机听取这段视频，第一句马上出现…"
         ))
+    }
+
+    /// Model loading is shared by all local sessions. Start it as soon as the
+    /// audio stream is authorized, but never await it from the Native Messaging
+    /// request path so PCM can continue arriving while Core ML is prepared.
+    private func prepareModelInBackgroundIfNeeded() {
+        guard modelPreparationTask == nil else { return }
+        modelPreparationGeneration += 1
+        let generation = modelPreparationGeneration
+        modelPreparationTask = Task { [weak self] in
+            await self?.runModelPreparation(generation: generation)
+        }
+    }
+
+    private func runModelPreparation(generation: Int) async {
+        do {
+            try await transcriber.prepare()
+        } catch is CancellationError {
+            // Helper shutdown intentionally cancels in-flight preparation.
+        } catch {
+            // The first real window remains the user-visible retry/error barrier.
+            NativeMessageWriter.log("model-preparation-failed \(safeLogCode(error))")
+        }
+        if modelPreparationGeneration == generation {
+            modelPreparationTask = nil
+        }
     }
 
     private func appendStreamAudio(_ request: StreamAudioRequest) throws {
@@ -218,7 +252,11 @@ actor SessionCoordinator {
             try await transcriber.prepare()
             try ensureStreamActive(key)
             guard let mediaKey = activeStream?.mediaKey else { throw CancellationError() }
-            let raw = try await transcriber.transcribe(audioURL: audioURL, mediaKey: mediaKey)
+            let raw = try await transcriber.transcribe(
+                audioURL: audioURL,
+                mediaKey: mediaKey,
+                profile: .live
+            )
             try ensureStreamActive(key)
             guard var stream = activeStream else { throw CancellationError() }
             let additions = stream.accumulator.merge(
@@ -244,7 +282,9 @@ actor SessionCoordinator {
                     scheduleStreamTranslations(
                         for: additions,
                         key: key,
-                        sourceLanguage: language
+                        sourceLanguage: language,
+                        skipSameLanguage: stream.skipSameLanguage,
+                        preferredLanguage: stream.preferredLanguage
                     )
                 }
             }
@@ -281,7 +321,9 @@ actor SessionCoordinator {
     private func emitStreamTranslations(
         for cues: [SubtitleCue],
         key: SessionKey,
-        sourceLanguage: String?
+        sourceLanguage: String?,
+        skipSameLanguage: Bool,
+        preferredLanguage: String?
     ) async {
         guard #available(macOS 26.0, *) else { return }
         let translator = LocalTranslator.shared
@@ -292,7 +334,9 @@ actor SessionCoordinator {
                   streamTranslationQueue.isEmpty else { return }
             guard let translated = await translator.translate(
                 cue.text,
-                sourceLanguageHint: sourceLanguage
+                sourceLanguageHint: sourceLanguage,
+                skipSameLanguage: skipSameLanguage,
+                preferredLanguage: preferredLanguage
             ) else { continue }
             // A newer audio window makes this batch obsolete. Finish at most the
             // translation already in flight, then skip its remaining cues and
@@ -322,12 +366,16 @@ actor SessionCoordinator {
     private func scheduleStreamTranslations(
         for cues: [SubtitleCue],
         key: SessionKey,
-        sourceLanguage: String?
+        sourceLanguage: String?,
+        skipSameLanguage: Bool,
+        preferredLanguage: String?
     ) {
         let batch = StreamTranslationBatch(
             cues: cues,
             key: key,
-            sourceLanguage: sourceLanguage
+            sourceLanguage: sourceLanguage,
+            skipSameLanguage: skipSameLanguage,
+            preferredLanguage: preferredLanguage
         )
         // Translation is allowed to trail recognition by one in-flight batch,
         // but queued historical windows are no longer useful for the live UI.
@@ -351,7 +399,9 @@ actor SessionCoordinator {
             await emitStreamTranslations(
                 for: batch.cues,
                 key: batch.key,
-                sourceLanguage: batch.sourceLanguage
+                sourceLanguage: batch.sourceLanguage,
+                skipSameLanguage: batch.skipSameLanguage,
+                preferredLanguage: batch.preferredLanguage
             )
         }
         guard streamTranslationRunID == runID else { return }
@@ -470,6 +520,8 @@ actor SessionCoordinator {
                             for: additions,
                             key: key,
                             sourceLanguage: sourceLanguage,
+                            skipSameLanguage: request.skipSameLanguage,
+                            preferredLanguage: request.preferredLanguage,
                             revision: &cueRevision
                         )
                     }
@@ -526,6 +578,8 @@ actor SessionCoordinator {
         for cues: [SubtitleCue],
         key: SessionKey,
         sourceLanguage: String?,
+        skipSameLanguage: Bool,
+        preferredLanguage: String?,
         revision: inout Int
     ) async {
         guard #available(macOS 26.0, *) else { return }
@@ -534,7 +588,9 @@ actor SessionCoordinator {
         for cue in cues {
             guard let translated = await translator.translate(
                 cue.text,
-                sourceLanguageHint: sourceLanguage
+                sourceLanguageHint: sourceLanguage,
+                skipSameLanguage: skipSameLanguage,
+                preferredLanguage: preferredLanguage
             ) else { continue }
             updated.append(SubtitleCue(
                 cueId: cue.cueId,
@@ -618,6 +674,8 @@ private struct StreamSession {
     let key: SessionKey
     let mediaKey: String
     let translate: Bool
+    let skipSameLanguage: Bool
+    let preferredLanguage: String?
     var buffer: PCMStreamBuffer
     var accumulator = CueAccumulator()
     var revision = 0
@@ -627,4 +685,6 @@ private struct StreamTranslationBatch {
     let cues: [SubtitleCue]
     let key: SessionKey
     let sourceLanguage: String?
+    let skipSameLanguage: Bool
+    let preferredLanguage: String?
 }

@@ -6,11 +6,12 @@ const vm = require("vm");
 const path = require("path");
 let fail = 0;
 const check = (cond, label) => { if (!cond) { console.error(`FAIL: ${label}`); fail += 1; } };
+const sidepanelHtml = fs.readFileSync(path.join(__dirname, "..", "sidepanel.html"), "utf8");
 
 function makeElement(tag) {
   const el = {
     tag, textContent: "", className: "", dataset: {}, hidden: false,
-    isConnected: true, offsetWidth: 0, scrollHeight: 0, scrollTop: 0, clientHeight: 0,
+    isConnected: true, parentElement: null, offsetWidth: 0, scrollHeight: 0, scrollTop: 0, clientHeight: 0,
     listeners: {}, children: [],
     classList: {
       classes: new Set(),
@@ -20,8 +21,15 @@ function makeElement(tag) {
       contains: (c) => el.classList.classes.has(c)
     },
     addEventListener: (ev, fn) => { el.listeners[ev] = fn; },
-    appendChild: (child) => { el.children.push(child); return child; },
-    remove: () => { el.isConnected = false; },
+    appendChild: (child) => { child.parentElement = el; el.children.push(child); return child; },
+    remove: () => {
+      el.isConnected = false;
+      if (el.parentElement) {
+        const index = el.parentElement.children.indexOf(el);
+        if (index >= 0) el.parentElement.children.splice(index, 1);
+        el.parentElement = null;
+      }
+    },
     querySelector: (sel) => {
       const name = sel.replace(/^\./, "");
       let found = el.children.find((c) => c.className === name || c.tag === sel);
@@ -92,10 +100,215 @@ function draftText(feed) {
   return textEl ? textEl.textContent : "";
 }
 
+function captionRows(feed, seq, mediaEpoch) {
+  return feed.children.filter((row) => String(row.dataset.seq || "") === String(seq)
+    && (mediaEpoch === undefined || String(row.dataset.mediaEpoch || "") === String(mediaEpoch)));
+}
+
+function captionText(row) {
+  return row?.children.find((child) => child.className === "text")?.textContent || "";
+}
+
 // raw 草稿防抖 300ms + correcting 过渡 320ms，等足再断言
 const WAIT = 380;
 
 (async () => {
+  {
+    check(sidepanelHtml.includes('class="toggle-row setting-toggle"')
+      && sidepanelHtml.includes('id="skip-same-language-toggle"'),
+    "相同语言策略位于折叠设置区");
+    check(sidepanelHtml.includes("字幕语言与我的语言相同时只显示原文"),
+      "相同语言策略文案正确");
+    check(sidepanelHtml.includes("有译文时隐藏原文"),
+      "隐藏原文文案说明只在有译文时生效");
+    console.log("T0 侧栏翻译策略文案与结构 PASS");
+  }
+  {
+    const h = makeCtx();
+    h.ctx.chrome.storage.local.get = async () => ({
+      koeTranslate: true,
+      koeSkipSameLanguage: false,
+      koeCaptureSource: "tab",
+      koeAsrEngine: "local"
+    });
+    await vm.runInContext("initPrefs()", h.ctx);
+    check(h.els["#skip-same-language-toggle"].checked === false,
+      "初始化回填相同语言策略偏好");
+
+    const writes = [];
+    const sent = [];
+    h.ctx.chrome.storage.local.set = async (values) => { writes.push(values); };
+    h.ctx.chrome.runtime.sendMessage = async (message) => { sent.push(message); return { ok: true }; };
+    vm.runInContext('currentState = { status: "live", captureActive: true, tabId: 9 };', h.ctx);
+    h.els["#skip-same-language-toggle"].checked = true;
+    const change = h.els["#skip-same-language-toggle"].listeners.change;
+    check(typeof change === "function", "相同语言策略绑定 change 处理器");
+    if (change) await change();
+    check(writes.some((values) => values.koeSkipSameLanguage === true),
+      "相同语言策略保存到浏览器偏好");
+    check(sent.some((message) => message.type === "SET_SKIP_SAME_LANGUAGE"
+        && message.tabId === 9 && message.skipSameLanguage === true),
+      "相同语言策略同步给活动会话");
+    check(h.els["#hint"].textContent.includes("只显示原文"),
+      "开启相同语言策略后提示直接显示原文");
+    console.log("T0.1 相同语言策略读取、保存与会话同步 PASS");
+  }
+  {
+    const h = makeCtx();
+    h.els["#skip-same-language-toggle"].checked = true;
+    vm.runInContext("translatePreference = false; applyTranslationPrivacy();", h.ctx);
+    check(h.els["#skip-same-language-toggle"].disabled === true,
+      "总翻译关闭时禁用相同语言从属项");
+    check(h.els["#skip-same-language-toggle"].checked === true,
+      "禁用从属项时保留相同语言偏好值");
+
+    vm.runInContext('translatePreference = true; currentState = { nativeTranslation: false }; applyTranslationPrivacy();', h.ctx);
+    check(h.els["#skip-same-language-toggle"].disabled === true,
+      "本地翻译不可用时禁用相同语言从属项");
+    check(h.els["#skip-same-language-toggle"].checked === true,
+      "本地翻译不可用时仍保留相同语言偏好值");
+    console.log("T0.2 相同语言策略从属状态 PASS");
+  }
+  {
+    // 隐藏原文只允许真译文接管；等待、失败、同文 passthrough、离线和历史都必须回退原文。
+    const h = makeCtx();
+    h.els["#translate-toggle"].checked = true;
+    h.els["#hide-original-toggle"].checked = true;
+    vm.runInContext("hideOriginalPreference = true", h.ctx);
+
+    sendMessage(h, {
+      type: "LIVE_SUBTITLES", jobId: "truthful-translation", mediaEpoch: 1,
+      seq: 1, unit: true, lines: [{ text: "Waiting original." }]
+    });
+    check(captionRows(h.feed, 1, 1).length === 1
+        && captionText(captionRows(h.feed, 1, 1)[0]) === "Waiting original.",
+      "等待译文时立即显示一份原文");
+
+    sendMessage(h, {
+      type: "LIVE_TRANSLATED", jobId: "truthful-translation", mediaEpoch: 1,
+      seq: 1, unit: true, lines: [{ text: "Waiting original.", translated: "" }]
+    });
+    check(captionRows(h.feed, 1, 1).length === 1
+        && captionText(captionRows(h.feed, 1, 1)[0]) === "Waiting original.",
+      "翻译失败时保留一份原文");
+
+    sendMessage(h, {
+      type: "LIVE_SUBTITLES", jobId: "truthful-translation", mediaEpoch: 1,
+      seq: 2, unit: true, lines: [{ text: "Passthrough original." }]
+    });
+    sendMessage(h, {
+      type: "LIVE_TRANSLATED", jobId: "truthful-translation", mediaEpoch: 1,
+      seq: 2, unit: true,
+      lines: [{ text: "Passthrough original.", translated: "  Passthrough   original. " }]
+    });
+    check(captionRows(h.feed, 2, 1).length === 1
+        && captionText(captionRows(h.feed, 2, 1)[0]) === "Passthrough original.",
+      "passthrough 译文与原文相同时仍显示一份原文");
+
+    sendMessage(h, {
+      type: "LIVE_SUBTITLES", jobId: "truthful-translation", mediaEpoch: 1,
+      seq: 3, unit: true, lines: [{ text: "Real translation." }]
+    });
+    sendMessage(h, {
+      type: "LIVE_TRANSLATED", jobId: "truthful-translation", mediaEpoch: 1,
+      seq: 3, unit: true, lines: [{ text: "Real translation.", translated: "真正的译文。" }]
+    });
+    check(captionRows(h.feed, 3, 1).length === 1
+        && captionText(captionRows(h.feed, 3, 1)[0]) === "真正的译文。",
+      "仅非空且不同于原文的真译文替换原文");
+
+    sendMessage(h, {
+      type: "OFFLINE_VISIBLE", jobId: "truthful-translation", mediaEpoch: 1,
+      seq: 4, lines: [{ text: "Offline original.", translated: "" }]
+    });
+    check(captionRows(h.feed, 4, 1).length === 1
+        && captionText(captionRows(h.feed, 4, 1)[0]) === "Offline original.",
+      "离线字幕无真译文时显示原文");
+    check(vm.runInContext('displayValue({ text: "History original.", translated: "History original." })', h.ctx)
+        === "History original.",
+      "历史字幕 passthrough 时显示原文");
+    console.log("T0.3 真译文判定与原文回退 PASS");
+  }
+  {
+    // 同一 job 的所有字幕类型共用 epoch 门控；新 epoch 必须清掉旧草稿/门控并接受 seq=1。
+    const h = makeCtx();
+    h.els["#translate-toggle"].checked = true;
+    sendMessage(h, {
+      type: "LIVE_PARTIAL", jobId: "epoch-job", mediaEpoch: 3,
+      seq: 6, lines: [{ text: "epoch three draft" }]
+    });
+    await new Promise((r) => setTimeout(r, WAIT));
+    sendMessage(h, {
+      type: "LIVE_SUBTITLES", jobId: "epoch-job", mediaEpoch: 3,
+      seq: 7, unit: true, lines: [{ text: "epoch three stable" }]
+    });
+    check(vm.runInContext("activeMediaEpoch", h.ctx) === 3, "首个字幕消息接管 epoch 3");
+
+    sendMessage(h, {
+      type: "LIVE_SUBTITLES", jobId: "epoch-job", mediaEpoch: 4,
+      seq: 1, unit: true, lines: [{ text: "epoch four seq one" }]
+    });
+    const epochState = vm.runInContext(`({
+      activeMediaEpoch,
+      stateEpoch: currentState.mediaEpoch,
+      lastUnitSeq,
+      lastDraftSeq,
+      pending: pendingOriginalUnits.size,
+      hasDraft: Boolean(draftEl)
+    })`, h.ctx);
+    check(epochState.activeMediaEpoch === 4 && epochState.stateEpoch === 4,
+      "新 epoch 同步更新活动 epoch 与 currentState");
+    check(epochState.lastUnitSeq === 1 && epochState.lastDraftSeq === 0
+        && epochState.pending === 1 && epochState.hasDraft === false,
+      "新 epoch 重置旧 seq、草稿和 pending 后接收 seq=1");
+    check(captionRows(h.feed, 1, 4).length === 1
+        && captionText(captionRows(h.feed, 1, 4)[0]) === "epoch four seq one",
+      "同 job 新 epoch 的 seq=1 可见");
+
+    sendMessage(h, {
+      type: "LIVE_TRANSLATED", jobId: "epoch-job", mediaEpoch: 3,
+      seq: 7, unit: true, lines: [{ text: "epoch three stable", translated: "旧 epoch 译文" }]
+    });
+    sendMessage(h, {
+      type: "OFFLINE_VISIBLE", jobId: "epoch-job", mediaEpoch: 3,
+      seq: 8, lines: [{ text: "stale offline" }]
+    });
+    sendMessage(h, {
+      type: "LIVE_PARTIAL", jobId: "epoch-job", mediaEpoch: 3,
+      seq: 9, lines: [{ text: "stale draft" }]
+    });
+    await new Promise((r) => setTimeout(r, WAIT));
+    const visibleTexts = h.feed.children.map(captionText).join("\n");
+    check(!visibleTexts.includes("旧 epoch 译文")
+        && !visibleTexts.includes("stale offline")
+        && !visibleTexts.includes("stale draft"),
+      "LIVE/OFFLINE 的旧 epoch 字幕统一丢弃");
+    console.log("T0.4 LIVE/OFFLINE 统一 epoch 门控 PASS");
+  }
+  {
+    // 离线同 seq 的迟到译文是修订，不是重复字幕；即使后续 seq 已出现也应原位 upsert。
+    const h = makeCtx();
+    h.els["#translate-toggle"].checked = true;
+    sendMessage(h, {
+      type: "OFFLINE_VISIBLE", jobId: "offline-revision", mediaEpoch: 2,
+      seq: 5, lines: [{ text: "Offline five.", translated: "" }]
+    });
+    sendMessage(h, {
+      type: "OFFLINE_VISIBLE", jobId: "offline-revision", mediaEpoch: 2,
+      seq: 6, lines: [{ text: "Offline six.", translated: "" }]
+    });
+    sendMessage(h, {
+      type: "OFFLINE_VISIBLE", jobId: "offline-revision", mediaEpoch: 2,
+      seq: 5, lines: [{ text: "Offline five.", translated: "离线第五句。" }]
+    });
+    check(captionRows(h.feed, 5, 2).length === 1
+        && captionText(captionRows(h.feed, 5, 2)[0]) === "离线第五句。",
+      "离线迟到译文按 epoch+seq 替换原文且不重复");
+    check(captionRows(h.feed, 6, 2).length === 1
+        && captionText(captionRows(h.feed, 6, 2)[0]) === "Offline six.",
+      "离线旧 seq 修订不影响后续字幕");
+    console.log("T0.5 离线同 seq 译文修订 upsert PASS");
+  }
   {
     // 场景：翻译模式 —— 原文草稿先显示（防抖后），译文到达立即替换，译文展示期原文不打扰
     const h = makeCtx();

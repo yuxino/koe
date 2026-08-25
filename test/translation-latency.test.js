@@ -57,7 +57,7 @@ function sseResponse(contents) {
   };
 }
 
-function makeCtx(fetchImpl = async () => jsonResponse("译文")) {
+function makeCtx(fetchImpl = async () => jsonResponse("译文"), { detectLanguage } = {}) {
   const sent = [];
   const requestedDelays = [];
   const requests = [];
@@ -81,6 +81,15 @@ function makeCtx(fetchImpl = async () => jsonResponse("译文")) {
     Audio: function () {},
     AudioContext: function () {},
     chrome: {
+      i18n: {
+        detectLanguage: (text, callback) => {
+          const pending = Promise.resolve(detectLanguage
+            ? detectLanguage(text)
+            : { isReliable: false, languages: [] });
+          pending.then((result) => callback?.(result));
+          return pending;
+        }
+      },
       runtime: {
         onMessage: { addListener: () => undefined },
         sendMessage: (message) => {
@@ -125,6 +134,101 @@ function makeCtx(fetchImpl = async () => jsonResponse("译文")) {
     check(updates[0] === "你", `首个中文块在完成前可见（实际 ${JSON.stringify(updates)}）`);
     check(updates.at(-1) === "你好" && translated === "你好", "流式块正确累积为最终译文");
     console.log("T2 flash 流式首译 PASS");
+  }
+
+  {
+    const detections = [];
+    const h = makeCtx(async () => jsonResponse("不应请求的译文"), {
+      detectLanguage: async (text) => {
+        detections.push(text);
+        return {
+          isReliable: true,
+          languages: [{ language: "en", percentage: 96 }]
+        };
+      }
+    });
+    h.run(`captureSkipSameLanguage = true; capturePreferredLanguage = "en-US";`);
+    h.run(`scheduleUnitTranslation("Same language caption.", 9, { sentenceId: 9 })`);
+    await settle();
+    const final = h.sent.find((message) => message.type === "CAPTURE_TRANSLATED"
+      && message.seq === 9 && message.streaming === false);
+    check(detections.length === 1, "同语言策略使用浏览器语言检测");
+    check(h.requests.length === 0, "可靠且置信度足够的同语言字幕不发翻译请求");
+    check(final?.lines?.[0]?.translated === "Same language caption.",
+      "同语言字幕以原文 passthrough 完成稳定译文消息");
+    console.log("T2b 同语言自动跳过 PASS");
+  }
+
+  {
+    const h = makeCtx(async () => jsonResponse("不确定时继续翻译"), {
+      detectLanguage: async () => ({
+        isReliable: false,
+        languages: [{ language: "en", percentage: 99 }]
+      })
+    });
+    h.run(`captureSkipSameLanguage = true; capturePreferredLanguage = "en-US";`);
+    const translated = await h.run(`translateText("Uncertain language caption.")`);
+    check(h.requests.length === 1, "不可靠的语言检测不会误跳过翻译");
+    check(translated === "不确定时继续翻译", "不确定时保持原翻译路径");
+    console.log("T2c 不确定语言保守翻译 PASS");
+  }
+
+  {
+    const h = makeCtx(async () => jsonResponse("检测超时后继续翻译"), {
+      detectLanguage: () => new Promise(() => undefined)
+    });
+    h.run(`captureSkipSameLanguage = true; capturePreferredLanguage = "en-US";`);
+    const translated = await h.run(`translateText("Language detection must not stall captions.")`);
+    check(h.requests.length === 1 && translated === "检测超时后继续翻译",
+      "语言检测无响应时超时回退到正常翻译");
+    console.log("T2d 语言检测超时回退 PASS");
+  }
+
+  {
+    let releaseOldDetection = () => undefined;
+    const h = makeCtx(async () => jsonResponse("新代译文"), {
+      detectLanguage: (text) => {
+        if (text === "Old generation caption.") {
+          return new Promise((resolve) => {
+            releaseOldDetection = () => resolve({
+              isReliable: true,
+              languages: [{ language: "en", percentage: 99 }]
+            });
+          });
+        }
+        return Promise.resolve({ isReliable: false, languages: [] });
+      }
+    });
+    h.run(`
+      captureSkipSameLanguage = true;
+      capturePreferredLanguage = "en-US";
+      stream = { getTracks: () => [] };
+      stopping = false;
+      connectRealtime = async () => undefined;
+      scheduleUnitTranslation("Old generation caption.", 31, { sentenceId: 31 });
+    `);
+    await settle();
+    check(h.requests.length === 0, "old translation worker is paused inside language detection");
+
+    const reset = h.run(`resetSocket()`);
+    h.run(`scheduleUnitTranslation("New generation caption.", 32, { sentenceId: 32 })`);
+    releaseOldDetection();
+    await reset;
+    await settle(16);
+
+    const oldFinal = h.sent.find((message) => message.type === "CAPTURE_TRANSLATED"
+      && message.seq === 31 && message.streaming === false);
+    const newFinal = h.sent.find((message) => message.type === "CAPTURE_TRANSLATED"
+      && message.seq === 32 && message.streaming === false);
+    check(!oldFinal, "reset prevents the detected result from the old generation from being emitted");
+    check(h.requests.length === 1
+        && h.requests[0]?.body?.input?.messages?.[0]?.content === "New generation caption.",
+      "old worker completion does not delete the new generation translation queue");
+    check(newFinal?.lines?.[0]?.translated === "新代译文",
+      "new generation translation resumes immediately after the old detector returns");
+    check(h.run(`translationQueue.length === 0 && translatorRunning === false`) === true,
+      "translation worker settles cleanly after crossing a reset generation");
+    console.log("T2e reset during language detection PASS");
   }
 
   {

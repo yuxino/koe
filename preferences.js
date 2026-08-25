@@ -5,6 +5,7 @@
   const DEFAULTS = Object.freeze({
     koePreferencesVersion: VERSION,
     koeTranslate: true,
+    koeSkipSameLanguage: true,
     koeHideOriginal: false,
     koeCaptureSource: "tab",
     koeAsrEngine: "local",
@@ -30,6 +31,9 @@
 
     if (own(input, "koeTranslate") || defaults) {
       result.koeTranslate = bool(input.koeTranslate, fallback.koeTranslate);
+    }
+    if (own(input, "koeSkipSameLanguage") || defaults) {
+      result.koeSkipSameLanguage = bool(input.koeSkipSameLanguage, fallback.koeSkipSameLanguage);
     }
     if (own(input, "koeHideOriginal") || defaults) {
       result.koeHideOriginal = bool(input.koeHideOriginal, fallback.koeHideOriginal);

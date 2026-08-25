@@ -41,6 +41,7 @@ function createPreferenceFallback() {
   const defaults = Object.freeze({
     koePreferencesVersion: 1,
     koeTranslate: true,
+    koeSkipSameLanguage: true,
     koeHideOriginal: false,
     koeCaptureSource: "tab",
     koeAsrEngine: "local",
@@ -55,6 +56,11 @@ function createPreferenceFallback() {
     if (own(input, "koePreferencesVersion") || withDefaults) value.koePreferencesVersion = 1;
     if (own(input, "koeTranslate") || withDefaults) {
       value.koeTranslate = typeof input.koeTranslate === "boolean" ? input.koeTranslate : fallback.koeTranslate;
+    }
+    if (own(input, "koeSkipSameLanguage") || withDefaults) {
+      value.koeSkipSameLanguage = typeof input.koeSkipSameLanguage === "boolean"
+        ? input.koeSkipSameLanguage
+        : fallback.koeSkipSameLanguage;
     }
     if (own(input, "koeHideOriginal") || withDefaults) {
       value.koeHideOriginal = typeof input.koeHideOriginal === "boolean" ? input.koeHideOriginal : fallback.koeHideOriginal;
@@ -87,6 +93,22 @@ function createPreferenceFallback() {
       ? normalize(browser, { defaults: true })
       : normalize({ ...defaults, ...normalize(native) }, { defaults: true })
   });
+}
+
+function currentPreferredLanguage() {
+  try {
+    const value = String(chrome.i18n?.getUILanguage?.() || "").trim().replaceAll("_", "-");
+    return /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(value) ? value.slice(0, 64) : "";
+  } catch {
+    return "";
+  }
+}
+
+function translationPolicyFields(state) {
+  return {
+    skipSameLanguage: state?.skipSameLanguage !== false,
+    preferredLanguage: String(state?.preferredLanguage || currentPreferredLanguage()).slice(0, 64)
+  };
 }
 
 function resetOfflineBatchState(state, { preserveRevision = false } = {}) {
@@ -446,6 +468,9 @@ async function handle(message, sender) {
     jobId: String(message.jobId || "")
   });
   if (message.type === "SET_TRANSLATE") return setTranslate(tabId, Boolean(message.translate));
+  if (message.type === "SET_SKIP_SAME_LANGUAGE") {
+    return setSkipSameLanguage(tabId, Boolean(message.skipSameLanguage));
+  }
   if (message.type === "SET_CAPTURE") return setCaptureConfig(tabId);
   return { ok: true };
 }
@@ -479,16 +504,22 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
   if (!forceReset && (!state?.captureStarted || state.userStopped)) {
     return { ok: true, skipped: true };
   }
-  let captureSource = "tab";
-  let captureEngine = "dashscope";
-  if (translate === undefined) {
-    try {
-      ({ koeTranslate: translate, koeCaptureSource: captureSource, koeAsrEngine: captureEngine } = await chrome.storage.local.get([
-        "koeTranslate", "koeCaptureSource", "koeAsrEngine"
-      ]));
-    } catch {
-      translate = undefined;
-    }
+  let captureSource = state?.source || preferenceTools.defaults?.koeCaptureSource || "tab";
+  let captureEngine = state?.engine || preferenceTools.defaults?.koeAsrEngine || "local";
+  let skipSameLanguage = state
+    ? state.skipSameLanguage !== false
+    : preferenceTools.defaults?.koeSkipSameLanguage !== false;
+  const preferredLanguage = currentPreferredLanguage();
+  try {
+    const stored = await chrome.storage.local.get([
+      "koeTranslate", "koeSkipSameLanguage", "koeCaptureSource", "koeAsrEngine"
+    ]);
+    if (translate === undefined) translate = stored.koeTranslate;
+    captureSource = stored.koeCaptureSource;
+    captureEngine = stored.koeAsrEngine;
+    skipSameLanguage = stored.koeSkipSameLanguage !== false;
+  } catch {
+    // 偏好读取失败时沿用当前会话；新会话使用上面的安全默认值。
   }
   const sourceMode = captureSource === "mic" ? "mic" : "tab";
   const engineMode = ["local", "webspeech"].includes(captureEngine) ? captureEngine : "dashscope";
@@ -513,6 +544,10 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
   const nextPageKey = normalizePageKey(pageUrl || source?.pageUrl || "");
   const previousPageKey = normalizePageKey(state?.pageUrl || "");
   const pageChanged = Boolean(state && nextPageKey && previousPageKey && nextPageKey !== previousPageKey);
+  const languagePolicyChanged = Boolean(state) && (
+    state.skipSameLanguage !== skipSameLanguage
+      || String(state.preferredLanguage || "") !== preferredLanguage
+  );
   const activeState = captureTabId === null ? null : tabStates.get(captureTabId);
 
   // 全局只允许一个会话。用户可用弹窗、侧边栏或右键菜单明确切换目标；
@@ -554,6 +589,8 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
       status: "starting",
       jobId: `${sessionMode}-${tabId}-${Date.now()}`,
       translate: translate !== undefined ? Boolean(translate) : true,
+      skipSameLanguage,
+      preferredLanguage,
       source: sourceMode,
       engine: engineMode,
       sourceUrl: source.sourceUrl || "",
@@ -570,7 +607,7 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
     await persistStates();
   } else if (forceReset || pageChanged || mediaChanged
       || (sourceKey && sourceKey !== normalizeSourceKey(state.sourceUrl || ""))
-      || state.source !== sourceMode || state.engine !== engineMode) {
+      || state.source !== sourceMode || state.engine !== engineMode || languagePolicyChanged) {
     const previousSourceKey = normalizeSourceKey(state.sourceUrl || "");
     const mediaIdentityChanged = pageChanged || mediaChanged
       || Boolean(sourceKey && sourceKey !== previousSourceKey)
@@ -584,6 +621,8 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
     state.engine = engineMode;
     state.sessionMode = sessionMode;
     state.translate = translate !== undefined ? Boolean(translate) : state.translate;
+    state.skipSameLanguage = skipSameLanguage;
+    state.preferredLanguage = preferredLanguage;
     if (sessionMode === "offline" && mediaIdentityChanged) {
       // 只传给 Helper 一个不含 URL 的媒体代号：换视频重新检测语言，seek 保留。
       state.mediaIdentity = createMediaIdentity();
@@ -592,18 +631,22 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
     // 再重连识别；这样旧 WebSocket 或翻译请求即使晚到，也会被后台拒绝。
     if (state.captureStarted && sessionMode === "live") {
       state.mediaEpoch = (Number(state.mediaEpoch) || 0) + 1;
+      const resetIdentity = sessionIdentity(state);
+      const resetTranslate = state.translate;
       await sendToContent(state, {
         type: "LIVE_RESET",
         jobId: state.jobId,
         mediaEpoch: state.mediaEpoch,
         reason: forceReset ? "manual" : "source"
       });
+      if (!isCurrentSession(state, resetIdentity, true)) return { ok: true, skipped: true };
       const response = await resetCaptureSession(state);
+      if (!isCurrentSession(state, resetIdentity, true)) return { ok: true, skipped: true };
       await sendToContent(state, {
         type: "LIVE_SESSION",
-        jobId: state.jobId,
-        mediaEpoch: state.mediaEpoch,
-        translate: state.translate,
+        jobId: resetIdentity.jobId,
+        mediaEpoch: resetIdentity.mediaEpoch,
+        translate: resetTranslate,
         audioPositionMs: Number(response?.audioPositionMs) || 0
       });
       await persistStates();
@@ -638,6 +681,8 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
 
   state = tabStates.get(tabId);
   if (!state) return { ok: true };
+  state.skipSameLanguage = state.skipSameLanguage !== false;
+  state.preferredLanguage = String(state.preferredLanguage || preferredLanguage);
   if (state.engine === "local") {
     if (state.localFallbackActive) {
       // PAGE_READY/play/source maintenance gives us a fresh renderer clock.
@@ -981,13 +1026,15 @@ async function runLocalLiveFallback(state, streamId) {
       mediaKey: state.mediaIdentity,
       sampleRate: 16_000,
       channels: 1,
-      translate: Boolean(state.translate)
+      translate: Boolean(state.translate),
+      ...translationPolicyFields(state)
     });
     const response = await chrome.runtime.sendMessage({
       type: "CAPTURE_START",
       streamId,
       apiKey: "",
       translate: state.translate,
+      ...translationPolicyFields(state),
       source: "tab",
       engine: "local",
       tabId: state.tabId,
@@ -1066,32 +1113,39 @@ async function resetLocalLiveSession(state, reason = "media", mediaContext = {})
   state.status = "starting";
   state.stageDetail = "正在重新对齐本地字幕…";
   const resetIdentity = sessionIdentity(state);
+  const resetTranslate = state.translate;
+  const resetPolicy = translationPolicyFields(state);
+  const resetMediaKey = state.mediaIdentity || createMediaIdentity();
+  const resetDiscontinuityId = Number(state.lastDiscontinuityId) || 0;
   await sendToContent(state, {
     type: "LIVE_RESET",
-    jobId: state.jobId,
-    mediaEpoch: state.mediaEpoch,
+    jobId: resetIdentity.jobId,
+    mediaEpoch: resetIdentity.mediaEpoch,
     reason
   });
+  if (!isCurrentSession(state, resetIdentity, true)) return null;
   postNativeMessage({
     type: "streamStart",
     protocolVersion: NATIVE_PROTOCOL_VERSION,
-    jobId: state.jobId,
-    mediaEpoch: state.mediaEpoch,
-    mediaKey: state.mediaIdentity || createMediaIdentity(),
+    jobId: resetIdentity.jobId,
+    mediaEpoch: resetIdentity.mediaEpoch,
+    mediaKey: resetMediaKey,
     sampleRate: 16_000,
     channels: 1,
-    translate: Boolean(state.translate)
+    translate: Boolean(resetTranslate),
+    ...resetPolicy
   });
   let response;
   try {
     response = await chrome.runtime.sendMessage({
       type: "CAPTURE_RESET",
-      translate: state.translate,
+      translate: resetTranslate,
+      ...resetPolicy,
       source: "tab",
       engine: "local",
-      tabId: state.tabId,
-      jobId: state.jobId,
-      mediaEpoch: state.mediaEpoch
+      tabId: resetIdentity.tabId,
+      jobId: resetIdentity.jobId,
+      mediaEpoch: resetIdentity.mediaEpoch
     });
   } catch {
     response = null;
@@ -1137,12 +1191,12 @@ async function resetLocalLiveSession(state, reason = "media", mediaContext = {})
   }
   await sendToContent(state, {
     type: "LIVE_SESSION",
-    jobId: state.jobId,
-    mediaEpoch: state.mediaEpoch,
-    translate: state.translate,
+    jobId: resetIdentity.jobId,
+    mediaEpoch: resetIdentity.mediaEpoch,
+    translate: resetTranslate,
     audioPositionMs: localMediaTimeAtAudio(state, Number(response.audioPositionMs) || 0),
     mediaTimed: true,
-    discontinuityId: Number(state.lastDiscontinuityId) || 0
+    discontinuityId: resetDiscontinuityId
   });
   await persistStates();
   return response;
@@ -1201,6 +1255,14 @@ async function receiveMediaContext(message, sender) {
     // 非 HLS 页面随后会切到标签页音频。保留这次播放器快照，
     // 让 capture-relative Whisper cue 能映射回真实视频时间。
     state.offlineContext = context;
+    const authorizedStreamId = String(captureStreamIds.get(tabId) || "");
+    if (authorizedStreamId) {
+      if (state.offlineFallbackTimer) clearTimeout(state.offlineFallbackTimer);
+      state.offlineFallbackTimer = 0;
+      state.offlineMissingMediaSince = 0;
+      const started = await startLocalLiveFallback(state, authorizedStreamId);
+      return { ok: true, pending: !started, fallback: started };
+    }
     if (!state.offlineMissingMediaSince) state.offlineMissingMediaSince = Date.now();
     const waitingMs = Date.now() - state.offlineMissingMediaSince;
     if (waitingMs >= LOCAL_LIVE_FALLBACK_DELAY_MS) {
@@ -1294,7 +1356,8 @@ async function beginOfflineEpoch(state) {
       currentTimeMs: Math.max(0, Number(context.currentTimeMs) || 0),
       durationMs: Math.max(0, Number(context.durationMs) || 0),
       playbackRate: Math.max(0.25, Math.min(4, Number(context.playbackRate) || 1)),
-      translate: Boolean(state.translate)
+      translate: Boolean(state.translate),
+      ...translationPolicyFields(state)
     });
   } catch (error) {
     if (state.offlineStartToken === startToken) state.offlineRunActive = false;
@@ -1468,8 +1531,11 @@ async function handleNativeMessage(message) {
   if ((Number(message.mediaEpoch) || 0) !== (Number(state.mediaEpoch) || 0)) return;
   if (message.type === "status") {
     if (state.localFallbackActive) {
-      state.status = message.stage === "stream-live" ? "live" : "starting";
-      state.stageDetail = String(message.detail || "本地实时字幕处理中…");
+      const alreadyLive = state.status === "live" || Number(state.localLiveSeq) > 0;
+      state.status = message.stage === "stream-live" || alreadyLive ? "live" : "starting";
+      state.stageDetail = alreadyLive
+        ? "本地实时字幕运行中"
+        : String(message.detail || "本地实时字幕处理中…");
       await clearMediaIssue(state);
       await persistStates();
       return;
@@ -1734,6 +1800,7 @@ async function startCapture(state, streamId) {
       streamId: streamId || "",
       apiKey,
       translate: state.translate,
+      ...translationPolicyFields(state),
       source: state.source || "tab",
       engine: state.engine || "dashscope",
       tabId: state.tabId,
@@ -1848,6 +1915,7 @@ async function resetCaptureSession(state) {
     const response = await chrome.runtime.sendMessage({
       type: "CAPTURE_RESET",
       translate: state.translate,
+      ...translationPolicyFields(state),
       source: state.source,
       engine: state.engine,
       tabId: state.tabId,
@@ -1855,6 +1923,7 @@ async function resetCaptureSession(state) {
       mediaEpoch: Number(state.mediaEpoch) || 0
     });
     if (!response?.ok || response.ignored) throw new Error(response?.error || "capture_reset_ignored");
+    if (!isCurrentSession(state, identity, true)) return null;
     return response;
   } catch {
     // 离屏页丢失：用现有流 ID 完整重启采集
@@ -2364,21 +2433,101 @@ async function setTranslate(tabId, translate) {
   // 也让页面立即按新模式渲染，旧译文晚到不会污染当前字幕。
   if (state.captureStarted) {
     state.mediaEpoch = (Number(state.mediaEpoch) || 0) + 1;
+    const resetIdentity = sessionIdentity(state);
+    const resetTranslate = state.translate;
     await sendToContent(state, {
       type: "LIVE_RESET",
       jobId: state.jobId,
       mediaEpoch: state.mediaEpoch,
       reason: "translate"
     });
+    if (!isCurrentSession(state, resetIdentity, true)) {
+      return { ok: true, state: publicState(state), superseded: true };
+    }
     const response = await resetCaptureSession(state);
+    if (!isCurrentSession(state, resetIdentity, true)) {
+      return { ok: true, state: publicState(state), superseded: true };
+    }
     await sendToContent(state, {
       type: "LIVE_SESSION",
-      jobId: state.jobId,
-      mediaEpoch: state.mediaEpoch,
-      translate: state.translate,
+      jobId: resetIdentity.jobId,
+      mediaEpoch: resetIdentity.mediaEpoch,
+      translate: resetTranslate,
       audioPositionMs: Number(response?.audioPositionMs) || 0
     });
   }
+  await persistStates();
+  return { ok: true, state: publicState(state) };
+}
+
+async function setSkipSameLanguage(tabId, skipSameLanguage) {
+  const state = tabStates.get(tabId);
+  if (!state) return { ok: true, ignored: true };
+  const nextSkip = Boolean(skipSameLanguage);
+  const nextPreferredLanguage = currentPreferredLanguage();
+  const changed = state.skipSameLanguage !== nextSkip
+    || String(state.preferredLanguage || "") !== nextPreferredLanguage;
+  state.skipSameLanguage = nextSkip;
+  state.preferredLanguage = nextPreferredLanguage;
+
+  // 翻译关闭、会话未运行或值没有变化时，只需保存偏好快照。以后启动时
+  // start/CAPTURE_START 会携带最新策略，不应为了一个无效变化打断播放。
+  if (!changed || !state.captureStarted || !state.translate) {
+    await persistStates();
+    return { ok: true, state: publicState(state) };
+  }
+
+  if (state.engine === "local") {
+    if (state.localFallbackActive) {
+      await resetLocalLiveSession(state, "language-policy");
+      return { ok: true, state: publicState(state) };
+    }
+    // Helper 在一批任务开始时冻结语言策略。作废旧 epoch 后重开，避免旧翻译
+    // 晚到并覆盖“同语言只显示原文”的新结果。
+    const previousEpoch = Number(state.mediaEpoch) || 0;
+    try {
+      postNativeMessage({ type: "cancel", jobId: state.jobId, mediaEpoch: previousEpoch });
+    } catch {
+      // Helper 断开时仍可完成页面状态切换，后续错误由原通道统一呈现。
+    }
+    state.mediaEpoch = previousEpoch + 1;
+    resetOfflineBatchState(state, { preserveRevision: true });
+    await sendToContent(state, {
+      type: "OFFLINE_RESET",
+      jobId: state.jobId,
+      mediaEpoch: state.mediaEpoch,
+      reason: "language-policy"
+    });
+    await persistStates();
+    await beginOfflineEpoch(state);
+    return { ok: true, state: publicState(state) };
+  }
+
+  // 云端识别/翻译同样存在飞行中的请求；使用新 epoch 重连，保证新旧策略
+  // 的结果不会交叉写入同一条字幕时间线。
+  state.mediaEpoch = (Number(state.mediaEpoch) || 0) + 1;
+  const resetIdentity = sessionIdentity(state);
+  const resetTranslate = state.translate;
+  await sendToContent(state, {
+    type: "LIVE_RESET",
+    jobId: state.jobId,
+    mediaEpoch: state.mediaEpoch,
+    reason: "language-policy"
+  });
+  if (!isCurrentSession(state, resetIdentity, true)) {
+    return { ok: true, state: publicState(state), superseded: true };
+  }
+  const response = await resetCaptureSession(state);
+  if (!isCurrentSession(state, resetIdentity, true)) {
+    return { ok: true, state: publicState(state), superseded: true };
+  }
+  await sendToContent(state, {
+    type: "LIVE_SESSION",
+    jobId: resetIdentity.jobId,
+    mediaEpoch: resetIdentity.mediaEpoch,
+    translate: resetTranslate,
+    audioPositionMs: Number(response?.audioPositionMs) || 0
+  });
   await persistStates();
   return { ok: true, state: publicState(state) };
 }
@@ -2487,19 +2636,27 @@ async function mediaDiscontinuity(message, sender) {
     await requestOfflineMediaContext(state);
     return { ok: true, mediaEpoch: state.mediaEpoch };
   }
+  const resetIdentity = sessionIdentity(state);
+  const resetTranslate = state.translate;
   await sendToContent(state, {
     type: "LIVE_RESET",
     jobId: state.jobId,
     mediaEpoch: state.mediaEpoch,
     reason: String(message.reason || "media")
   });
+  if (!isCurrentSession(state, resetIdentity, true)) {
+    return { ok: true, ignored: true, mediaEpoch: Number(state.mediaEpoch) || 0 };
+  }
   const response = await resetCaptureSession(state);
+  if (!isCurrentSession(state, resetIdentity, true)) {
+    return { ok: true, ignored: true, mediaEpoch: Number(state.mediaEpoch) || 0 };
+  }
   await persistStates();
   await sendToContent(state, {
     type: "LIVE_SESSION",
-    jobId: state.jobId,
-    mediaEpoch: state.mediaEpoch,
-    translate: state.translate,
+    jobId: resetIdentity.jobId,
+    mediaEpoch: resetIdentity.mediaEpoch,
+    translate: resetTranslate,
     audioPositionMs: Number(response?.audioPositionMs) || 0
   });
   return { ok: true, mediaEpoch: state.mediaEpoch };
@@ -2722,6 +2879,8 @@ function persistStates() {
         pageUrl: state.pageUrl,
         sourceUrl: normalizeSourceKey(state.sourceUrl || ""),
         translate: state.translate,
+        skipSameLanguage: state.skipSameLanguage !== false,
+        preferredLanguage: String(state.preferredLanguage || currentPreferredLanguage()),
         source: state.source,
         engine: state.engine,
         sessionMode: state.sessionMode || (state.engine === "local" ? "offline" : "live"),
@@ -2775,6 +2934,8 @@ async function restoreStates() {
       jobId: jobId || `${local ? "offline" : "live"}-${tabId}-${Date.now()}`,
       status: local && wasActive ? "starting" : (wasActive ? "live" : (entry.status || "starting")),
       translate: entry.translate !== false,
+      skipSameLanguage: entry.skipSameLanguage !== false,
+      preferredLanguage: String(entry.preferredLanguage || currentPreferredLanguage()),
       source: entry.source === "mic" ? "mic" : "tab",
       engine: local ? "local" : (entry.engine === "webspeech" ? "webspeech" : "dashscope"),
       sessionMode: local ? "offline" : "live",
@@ -3023,6 +3184,8 @@ function publicState(state) {
     status: state.status,
     jobId: state.jobId,
     translate: state.translate,
+    skipSameLanguage: state.skipSameLanguage !== false,
+    preferredLanguage: String(state.preferredLanguage || currentPreferredLanguage()),
     engine: state.engine,
     sessionMode: state.sessionMode || (state.engine === "local" ? "offline" : "live"),
     captureActive: Boolean(state.captureStarted),

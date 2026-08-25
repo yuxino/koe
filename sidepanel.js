@@ -22,6 +22,13 @@ let lastTranslateSyncAt = 0;
 let lastStatusHint = "";
 const pendingOriginalUnits = new Map();
 const MAX_ROWS = 120;
+const SUBTITLE_MESSAGE_TYPES = new Set([
+  "OFFLINE_VISIBLE",
+  "LIVE_REVOKE",
+  "LIVE_PARTIAL",
+  "LIVE_SUBTITLES",
+  "LIVE_TRANSLATED"
+]);
 
 // 字幕模式：只保留本地精准（可本地翻译）与 DashScope 两种，去掉麦克风/Chrome 内置。
 const CAPTURE_MODES = {
@@ -39,6 +46,7 @@ const elements = {
   mediaStatusDetail: document.querySelector("#media-status-detail"),
   translateLabel: document.querySelector("#translate-label"),
   translateToggle: document.querySelector("#translate-toggle"),
+  skipSameLanguageToggle: document.querySelector("#skip-same-language-toggle"),
   hideOriginalToggle: document.querySelector("#hide-original-toggle"),
   dashscopeOnly: document.querySelector("#dashscope-only"),
   captureMode: document.querySelector("#capture-mode"),
@@ -85,11 +93,28 @@ elements.translateToggle.addEventListener("change", async () => {
   applyTranslationPrivacy();
   elements.hint.textContent = translate ? "中文翻译已开启 · 正在重连识别…" : "中文翻译已关闭 · 只显示原文";
 });
+elements.skipSameLanguageToggle.addEventListener("change", async () => {
+  const skipSameLanguage = elements.skipSameLanguageToggle.checked;
+  await chrome.storage.local.set({ koeSkipSameLanguage: skipSameLanguage });
+  const targetTabId = currentState.tabId || activeTab?.id;
+  if (currentState.captureActive && targetTabId) {
+    await chrome.runtime.sendMessage({
+      type: "SET_SKIP_SAME_LANGUAGE",
+      tabId: targetTabId,
+      skipSameLanguage
+    }).catch(() => undefined);
+  }
+  elements.hint.textContent = skipSameLanguage
+    ? "已开启 · 相同语言的字幕只显示原文"
+    : "已关闭 · 相同语言的字幕也会翻译";
+});
 elements.hideOriginalToggle.addEventListener("change", async () => {
   const hide = elements.hideOriginalToggle.checked;
   hideOriginalPreference = hide;
   await chrome.storage.local.set({ koeHideOriginal: hide });
-  elements.hint.textContent = hide ? "已隐藏原文 · 只显示中文" : "已恢复显示原文与中文";
+  elements.hint.textContent = hide
+    ? "有译文时已隐藏原文 · 无译文时仍显示原文"
+    : "已恢复显示原文";
 });
 elements.captureMode.addEventListener("change", () => void saveCaptureMode());
 elements.overlayEnabled.addEventListener("change", async () => {
@@ -152,24 +177,25 @@ chrome.runtime.onMessage.addListener((message) => {
   // 消息里的 jobId 一定是当前会话的），不依赖 GET_STATE 轮询的时机
   if (!activeJobId && !captureEnded && message.jobId) {
     activeJobId = String(message.jobId);
+    activeMediaEpoch = 0;
+    currentState = { ...currentState, jobId: activeJobId, mediaEpoch: 0 };
     resetFeed();
   }
   if (!belongsToSession(message)) return false;
+  if (SUBTITLE_MESSAGE_TYPES.has(message.type) && !acceptSubtitleEpoch(message)) return false;
   try {
     if (message.type === "OFFLINE_VISIBLE") {
-      const epoch = Number(message.mediaEpoch) || 0;
-      if (epoch !== activeMediaEpoch) {
-        activeMediaEpoch = epoch;
-        lastUnitSeq = 0;
-      }
-      if (!acceptUnitSeq(message.seq)) return false;
       const line = lastLine(message.lines);
       const text = displayValue(line);
-      if (text) appendRow(text, "", message.seq);
+      if (!text || !acceptUnitSeq(message.seq, {
+        allowExisting: true,
+        mediaEpoch: activeMediaEpoch
+      })) return false;
+      upsertCaptionRow(text, message.seq, activeMediaEpoch);
       return false;
     }
     if (message.type === "LIVE_REVOKE") {
-      revokeRow(message.fromSeq, message.toSeq);
+      revokeRow(message.fromSeq, message.toSeq, activeMediaEpoch);
       return false;
     }
     if (message.type === "LIVE_PARTIAL") {
@@ -179,7 +205,7 @@ chrome.runtime.onMessage.addListener((message) => {
         // 翻译模式：先显示弱化的原文草稿做即时反馈，译文到达后替换。
         // 原文不占 seq 门控（译文同 seq 由 LIVE_TRANSLATED 负责），
         // 译文展示期间原文不打扰（5 秒内不覆盖），避免原文/译文来回闪。
-        if (hideOriginalOn()) return false; // 隐藏原文时不显示西文草稿，等译文
+        if (!acceptDraftSeq(message.seq, { allowEqual: true })) return false;
         if (draftKind === "translated" && Date.now() - draftTranslatedAt < 5_000) return false;
         setDraft(text, "raw");
       } else {
@@ -188,33 +214,45 @@ chrome.runtime.onMessage.addListener((message) => {
       }
     } else if (message.type === "LIVE_SUBTITLES") {
       const text = lastLine(message.lines)?.text;
-      if (translateOn()) {
-        if (text) pendingOriginalUnits.set(Number(message.seq) || 0, text);
-        return false;
-      }
-      if (!acceptUnitSeq(message.seq)) return false;
-      if (text) promoteDraftOrAppend(text, message.seq);
+      if (!text || !acceptUnitSeq(message.seq, {
+        allowExisting: true,
+        mediaEpoch: activeMediaEpoch
+      })) return false;
+      if (translateOn()) pendingOriginalUnits.set(Number(message.seq) || 0, text);
+      const existing = captionRowsFor(message.seq, activeMediaEpoch);
+      if (existing.length > 0) upsertCaptionRow(text, message.seq, activeMediaEpoch);
+      else promoteDraftOrAppend(text, message.seq, activeMediaEpoch);
     } else if (message.type === "LIVE_TRANSLATED") {
       if (!translateOn()) return false;
       if (message.unit && message.streaming) {
-        const text = lastLine(message.lines)?.translated;
-        if (!text) return false;
-        if (!acceptDraftSeq(message.seq, { allowEqual: true })) return false;
-        setDraft(text, "translated");
+        const seq = Number(message.seq) || 0;
+        const line = lastLine(message.lines);
+        const original = String(pendingOriginalUnits.get(seq) || line?.text || "").trim();
+        const text = displayValue({ text: original, translated: line?.translated });
+        if (!text || !acceptUnitSeq(message.seq, {
+          allowExisting: true,
+          mediaEpoch: activeMediaEpoch
+        })) return false;
+        upsertCaptionRow(text, message.seq, activeMediaEpoch);
       } else if (message.unit) {
         const seq = Number(message.seq) || 0;
         const line = lastLine(message.lines);
-        // 翻译偶发失败时稳定行退回原文，而不是整句消失。
-        const text = String(line?.translated || (hideOriginalOn() ? "" : (pendingOriginalUnits.get(seq) || line?.text)) || "").trim();
+        const original = String(pendingOriginalUnits.get(seq) || line?.text || "").trim();
+        // 只有非空且确实不同于原文的译文才接管；失败与同文 passthrough 均保留原文。
+        const text = displayValue({ text: original, translated: line?.translated });
         pendingOriginalUnits.delete(seq);
-        if (!text) return false;
-        if (!acceptUnitSeq(message.seq)) return false;
-        promoteDraftOrAppend(text, message.seq);
+        if (!text || !acceptUnitSeq(message.seq, {
+          allowExisting: true,
+          mediaEpoch: activeMediaEpoch
+        })) return false;
+        upsertCaptionRow(text, message.seq, activeMediaEpoch);
       } else {
-        const text = lastLine(message.lines)?.translated;
+        const line = lastLine(message.lines);
+        const text = displayValue(line);
         if (!text) return false;
-        if (!acceptDraftSeq(message.seq, { allowEqual: Boolean(message.streaming) })) return false;
-        setDraft(text, "translated");
+        // 译文与对应原文草稿共用 seq；完整译文也必须允许原地替换同 seq 草稿。
+        if (!acceptDraftSeq(message.seq, { allowEqual: true })) return false;
+        setDraft(text, genuineTranslation(line) ? "translated" : "raw");
       }
     }
   } catch {
@@ -232,11 +270,12 @@ async function init() {
 }
 
 async function initPrefs() {
-  const { koeTranslate, koeHideOriginal, koeApiKey, koeCaptureSource, koeAsrEngine, koeOverlayEnabled, koeOverlaySize } = await chrome.storage.local.get([
-    "koeTranslate", "koeHideOriginal", "koeApiKey", "koeCaptureSource", "koeAsrEngine", "koeOverlayEnabled", "koeOverlaySize"
+  const { koeTranslate, koeSkipSameLanguage, koeHideOriginal, koeApiKey, koeCaptureSource, koeAsrEngine, koeOverlayEnabled, koeOverlaySize } = await chrome.storage.local.get([
+    "koeTranslate", "koeSkipSameLanguage", "koeHideOriginal", "koeApiKey", "koeCaptureSource", "koeAsrEngine", "koeOverlayEnabled", "koeOverlaySize"
   ]);
   const defaults = globalThis.KoePreferences?.defaults || {
     koeTranslate: true,
+    koeSkipSameLanguage: true,
     koeHideOriginal: false,
     koeAsrEngine: "local",
     koeOverlayEnabled: true,
@@ -244,6 +283,9 @@ async function initPrefs() {
   };
   translatePreference = koeTranslate !== undefined ? Boolean(koeTranslate) : defaults.koeTranslate;
   elements.translateToggle.checked = translatePreference;
+  elements.skipSameLanguageToggle.checked = koeSkipSameLanguage !== undefined
+    ? Boolean(koeSkipSameLanguage)
+    : defaults.koeSkipSameLanguage;
   hideOriginalPreference = koeHideOriginal !== undefined ? Boolean(koeHideOriginal) : defaults.koeHideOriginal;
   elements.hideOriginalToggle.checked = hideOriginalPreference;
   const sourceValue = koeCaptureSource === "mic" ? "mic" : "tab";
@@ -306,6 +348,9 @@ function applyTranslationPrivacy() {
   // 隐藏原文只在开了翻译时才有意义；本地无法翻译时一并禁用。
   if (elements.hideOriginalToggle) {
     elements.hideOriginalToggle.disabled = localOriginalOnly || !elements.translateToggle.checked;
+  }
+  if (elements.skipSameLanguageToggle) {
+    elements.skipSameLanguageToggle.disabled = localOriginalOnly || !elements.translateToggle.checked;
   }
   // API Key 只对 DashScope 模式需要；本地模式隐藏，精简页面。
   const isDashScope = currentMode().engine === "dashscope";
@@ -696,16 +741,23 @@ function translateOn() {
   return Boolean(elements.translateToggle.checked);
 }
 
-// 「隐藏原文」：仅当开着翻译时才隐藏原文（否则没有可显示的译文）。
-function hideOriginalOn() {
-  return Boolean(hideOriginalPreference) && translateOn();
+function normalizedCaptionText(value) {
+  return String(value || "").trim().replace(/\s+/g, " ");
 }
 
-// 一条字幕该显示什么：翻译优先（隐藏原文时绝不回落原文），否则原文。
-function displayValue(line) {
+// 空译文或与原文仅空白不同的 passthrough 都不算真译文。
+function genuineTranslation(line) {
+  const original = String(line?.text || "").trim();
   const translated = String(line?.translated || "").trim();
-  if (translateOn()) return translated || (hideOriginalOn() ? "" : String(line?.text || "").trim());
-  return String(line?.text || "").trim();
+  if (!translated) return "";
+  if (original && normalizedCaptionText(translated) === normalizedCaptionText(original)) return "";
+  return translated;
+}
+
+// 侧栏每条记录只显示一份内容：真译文优先，否则始终回退原文。
+function displayValue(line) {
+  const original = String(line?.text || "").trim();
+  return translateOn() ? (genuineTranslation(line) || original) : original;
 }
 
 function belongsToSession(message) {
@@ -716,16 +768,41 @@ function belongsToSession(message) {
   return jobId === activeJobId;
 }
 
+function acceptSubtitleEpoch(message) {
+  if (message.mediaEpoch === undefined) return true;
+  const epoch = Math.max(0, Number(message.mediaEpoch) || 0);
+  if (epoch < activeMediaEpoch) return false;
+  if (epoch === activeMediaEpoch) return true;
+  activeMediaEpoch = epoch;
+  currentState = { ...currentState, mediaEpoch: epoch };
+  lastUnitSeq = 0;
+  lastDraftSeq = 0;
+  pendingOriginalUnits.clear();
+  clearDraft();
+  return true;
+}
+
 function lastLine(lines) {
   return Array.isArray(lines) ? lines[lines.length - 1] : null;
 }
 
-function acceptUnitSeq(seq) {
+function captionRowsFor(seq, mediaEpoch = activeMediaEpoch) {
+  const seqKey = String(Number(seq) || 0);
+  const epochKey = String(Math.max(0, Number(mediaEpoch) || 0));
+  return [...elements.feed.children].filter((row) => (
+    String(row.dataset?.seq || "") === seqKey
+    && String(row.dataset?.mediaEpoch || "") === epochKey
+  ));
+}
+
+function acceptUnitSeq(seq, { allowExisting = false, mediaEpoch = activeMediaEpoch } = {}) {
   const value = Number(seq);
   if (!Number.isFinite(value)) return true;
-  if (value <= lastUnitSeq) return false;
-  lastUnitSeq = value;
-  return true;
+  if (value > lastUnitSeq) {
+    lastUnitSeq = value;
+    return true;
+  }
+  return allowExisting && captionRowsFor(seq, mediaEpoch).length > 0;
 }
 
 function acceptDraftSeq(seq, { allowEqual = false } = {}) {
@@ -756,9 +833,12 @@ async function restoreTranscript() {
     for (const row of rows) {
       const display = displayValue(row);
       if (!display) continue;
-      appendRow(display, "", row.seq);
+      const rowEpoch = row.mediaEpoch === undefined
+        ? activeMediaEpoch
+        : Math.max(0, Number(row.mediaEpoch) || 0);
+      upsertCaptionRow(display, row.seq, rowEpoch);
       const seq = Number(row.seq) || 0;
-      if (seq > maxSeq) maxSeq = seq;
+      if (rowEpoch === activeMediaEpoch && seq > maxSeq) maxSeq = seq;
     }
     // 恢复的历史已消耗这些 seq：门控前移，避免新字幕被 seq 门控误拒
     if (maxSeq > lastUnitSeq) lastUnitSeq = maxSeq;
@@ -768,7 +848,7 @@ async function restoreTranscript() {
   }
 }
 
-function appendRow(text, className = "", seq = "") {
+function appendRow(text, className = "", seq = "", mediaEpoch = activeMediaEpoch) {
   elements.feed.querySelectorAll(".placeholder").forEach((node) => node.remove());
   const time = formatTime(new Date());
   const parts = segments(String(text), subtitleMaxChars(String(text)));
@@ -777,7 +857,10 @@ function appendRow(text, className = "", seq = "") {
     row.className = `row ${className}`.trim();
     row.dataset.ts = time;
     row.dataset.text = part;
-    if (seq) row.dataset.seq = String(seq);
+    if (seq) {
+      row.dataset.seq = String(seq);
+      row.dataset.mediaEpoch = String(Math.max(0, Number(mediaEpoch) || 0));
+    }
     const timeEl = document.createElement("span");
     timeEl.className = "time";
     timeEl.textContent = time;
@@ -794,9 +877,43 @@ function appendRow(text, className = "", seq = "") {
   smoothScrollToBottom();
 }
 
+function upsertCaptionRow(text, seq, mediaEpoch = activeMediaEpoch) {
+  const value = String(text || "").trim();
+  if (!value) return;
+  const existing = captionRowsFor(seq, mediaEpoch);
+  const parts = segments(value, subtitleMaxChars(value));
+  if (existing.length === parts.length && existing.length > 0) {
+    for (let index = 0; index < existing.length; index += 1) {
+      const row = existing[index];
+      const part = parts[index];
+      row.className = "row";
+      row.dataset.text = part;
+      row.dataset.seq = String(seq);
+      row.dataset.mediaEpoch = String(Math.max(0, Number(mediaEpoch) || 0));
+      const textElement = row.querySelector(".text");
+      if (textElement) textElement.textContent = part;
+      if (draftEl === row) {
+        draftEl = null;
+        draftKind = "";
+        draftTranslatedAt = 0;
+      }
+    }
+    smoothScrollToBottom();
+    return;
+  }
+  const replacedDraft = existing.includes(draftEl);
+  for (const row of existing) row.remove();
+  if (replacedDraft) {
+    draftEl = null;
+    draftKind = "";
+    draftTranslatedAt = 0;
+  }
+  appendRow(value, "", seq, mediaEpoch);
+}
+
 // 识别修正撤回：删除 seq 落在 [fromSeq, toSeq] 的字幕行（原文行和它的译文行
 // 同 seq，一起删），让修正后的正确文本重新累积，不再残留错行。
-function revokeRow(fromSeq, toSeq) {
+function revokeRow(fromSeq, toSeq, mediaEpoch = activeMediaEpoch) {
   clearDraft();
   const from = Number(fromSeq) || 0;
   const to = Number(toSeq) || from;
@@ -806,7 +923,8 @@ function revokeRow(fromSeq, toSeq) {
   let removed = 0;
   for (const row of rows) {
     const seq = Number(row.dataset.seq || 0);
-    if (seq && seq >= from && seq <= to) {
+    const epoch = Math.max(0, Number(row.dataset.mediaEpoch) || 0);
+    if (epoch === mediaEpoch && seq && seq >= from && seq <= to) {
       row.remove();
       removed += 1;
     }
@@ -897,12 +1015,15 @@ function clearDraft() {
 
 // 字幕块提交时把草稿行原地“转正”：同一句话在记录里只出现一次，
 // 不会出现“草稿一行 + 正式一行”的重复观感。
-function promoteDraftOrAppend(text, seq = "") {
+function promoteDraftOrAppend(text, seq = "", mediaEpoch = activeMediaEpoch) {
   const value = String(text);
   if (draftEl && draftEl.isConnected && segments(value, subtitleMaxChars(value)).length <= 1) {
     draftEl.className = "row";
     draftEl.dataset.text = value;
-    if (seq) draftEl.dataset.seq = String(seq);
+    if (seq) {
+      draftEl.dataset.seq = String(seq);
+      draftEl.dataset.mediaEpoch = String(Math.max(0, Number(mediaEpoch) || 0));
+    }
     const textEl = draftEl.querySelector(".text");
     if (textEl) textEl.textContent = value;
     draftEl = null;
@@ -912,7 +1033,7 @@ function promoteDraftOrAppend(text, seq = "") {
     return;
   }
   clearDraft();
-  appendRow(value, "", seq);
+  appendRow(value, "", seq, mediaEpoch);
 }
 
 function formatTime(date) {

@@ -14,6 +14,8 @@ private func check(_ condition: @autoclosure () -> Bool, _ label: String) {
 let preferenceDefaults = KoePreferences.normalized(KoePreferences())
 check(preferenceDefaults.koeTranslate == true,
       "native preference defaults enable translation")
+check(preferenceDefaults.koeSkipSameLanguage == true,
+      "native preference defaults skip translation for the preferred language")
 check(preferenceDefaults.koeAsrEngine == "local"
         && preferenceDefaults.koeCaptureSource == "tab",
       "native preference defaults select local-first tab capture")
@@ -24,6 +26,7 @@ check(preferenceDefaults.koeOverlayEnabled == true
 let sanitizedPreferences = KoePreferences.normalized(KoePreferences(
     koePreferencesVersion: 99,
     koeTranslate: false,
+    koeSkipSameLanguage: false,
     koeHideOriginal: true,
     koeCaptureSource: "mic",
     koeAsrEngine: "webspeech",
@@ -33,8 +36,25 @@ let sanitizedPreferences = KoePreferences.normalized(KoePreferences(
 check(sanitizedPreferences.koePreferencesVersion == 1,
       "native preferences clamp their schema version")
 check(sanitizedPreferences.koeTranslate == false
+        && sanitizedPreferences.koeSkipSameLanguage == false
         && sanitizedPreferences.koeHideOriginal == true,
       "valid native boolean preferences survive normalization")
+
+check(LanguageIdentity.normalizedIdentifier(" en_US ") == "en-us",
+      "language identifiers trim, lowercase, and normalize separators")
+check(LanguageIdentity.normalizedIdentifier("iw_IL") == "he-il"
+        && LanguageIdentity.normalizedIdentifier("in-ID") == "id-id"
+        && LanguageIdentity.normalizedIdentifier("ji") == "yi",
+      "legacy BCP-47 language aliases normalize consistently")
+check(LanguageIdentity.sameLanguage("zh-Hans-CN", "zh_Hant_TW"),
+      "Simplified and Traditional Chinese share one spoken-language identity")
+check(LanguageIdentity.sameLanguage("iw-IL", "he")
+        && LanguageIdentity.sameLanguage("in_ID", "id"),
+      "legacy and current language codes compare as the same language")
+check(!LanguageIdentity.sameLanguage("en-US", "ja-JP")
+        && !LanguageIdentity.sameLanguage(nil, "en")
+        && !LanguageIdentity.sameLanguage("", "en"),
+      "different or missing language identifiers never compare equal")
 check(sanitizedPreferences.koeCaptureSource == "tab"
         && sanitizedPreferences.koeAsrEngine == "local"
         && sanitizedPreferences.koeOverlaySize == "medium",
@@ -43,30 +63,36 @@ check(sanitizedPreferences.koeCaptureSource == "tab"
 do {
     var stream = try PCMStreamBuffer(
         sampleRate: 16_000,
-        channels: 1,
-        bootstrapDurationMs: 4_000,
-        overlapMs: 1_500,
-        maximumBufferedDurationMs: 20_000
+        channels: 1
     )
-    try stream.append(Data(repeating: 0, count: 16_000 * 2 * 3))
+    try stream.append(Data(repeating: 0, count: 16_000 * 2))
     check(stream.takeWindow() == nil,
-          "local live waits for the four-second bootstrap window")
+          "local live waits until the two-second bootstrap window is complete")
     try stream.append(Data(repeating: 1, count: 16_000 * 2))
     let bootstrap = stream.takeWindow()
-    check(bootstrap?.pcm.count == 16_000 * 2 * 4
+    check(bootstrap?.pcm.count == 16_000 * 2 * 2
             && bootstrap?.startMs == 0
-            && bootstrap?.endMs == 4_000
+            && bootstrap?.endMs == 2_000
             && bootstrap?.emitAfterMs == 0,
-          "local live emits an exact short bootstrap window")
+          "local live emits an exact two-second bootstrap window")
 
     try stream.append(Data(repeating: 2, count: 16_000 * 2 * 2 + 16_000))
     let steady = stream.takeWindow()
-    check(steady?.startMs == 2_500
-            && steady?.endMs == 6_500
-            && steady?.emitAfterMs == 3_250,
-          "steady local-live windows stay short while suppressing the old prefix")
-    check(stream.bufferedDurationMs <= 20_000,
-          "local-live PCM buffering stays bounded")
+    check(steady?.startMs == 500
+            && steady?.endMs == 4_500
+            && steady?.emitAfterMs == 1_250,
+          "steady local-live windows retain four seconds of context and suppress the old prefix")
+
+    var backpressured = try PCMStreamBuffer(sampleRate: 16_000, channels: 1)
+    try backpressured.append(Data(repeating: 3, count: 16_000 * 2 * 2))
+    _ = backpressured.takeWindow()
+    try backpressured.append(Data(repeating: 4, count: 16_000 * 2 * 10))
+    check(backpressured.bufferedDurationMs == 6_000,
+          "slow local-live inference keeps exactly the newest six seconds of PCM")
+    let freshWindow = backpressured.takeWindow()
+    check(freshWindow?.startMs == 6_000 && freshWindow?.endMs == 10_000
+            && freshWindow?.emitAfterMs == 6_000,
+          "slow local-live inference skips stale audio and resumes from a recent complete window")
 
     do {
         try stream.append(Data([0]))
@@ -124,7 +150,10 @@ do {
         ),
         currentTimeMs: 170_000,
         durationMs: 900_000,
-        playbackRate: 1
+        playbackRate: 1,
+        translate: true,
+        skipSameLanguage: false,
+        preferredLanguage: " iw_IL "
     )
     let start = try request.validatedStart()
     check(start.headers == [
@@ -132,8 +161,50 @@ do {
         "Origin": "https://example.com"
     ], "only Referer and Origin cross the native boundary")
     check(start.sourceURL.absoluteString.contains("token=secret"), "signed URL remains usable in memory")
+    check(start.translate && !start.skipSameLanguage && start.preferredLanguage == "he-il",
+          "offline requests preserve normalized same-language translation policy")
 } catch {
     check(false, "valid start request: \(error)")
+}
+
+do {
+    let request = try JSONDecoder().decode(HostRequest.self, from: Data(#"""
+    {
+        "type":"streamStart",
+        "protocolVersion":1,
+        "jobId":"local-live-policy",
+        "mediaEpoch":5,
+        "mediaKey":"media-live",
+        "translate":true,
+        "preferredLanguage":"zh_Hant_TW",
+        "sampleRate":16000,
+        "channels":1
+    }
+    """#.utf8))
+    let start = try request.validatedStreamStart()
+    check(start.translate && start.skipSameLanguage && start.preferredLanguage == "zh-hant-tw",
+          "stream requests default to same-language skipping and normalize the preferred language")
+} catch {
+    check(false, "valid stream policy request: \(error)")
+}
+
+do {
+    let request = HostRequest(
+        type: "streamStart",
+        protocolVersion: koeNativeProtocolVersion,
+        jobId: "local-live-long-language",
+        mediaEpoch: 6,
+        translate: true,
+        skipSameLanguage: true,
+        preferredLanguage: String(repeating: "x", count: 129),
+        sampleRate: 16_000,
+        channels: 1
+    )
+    let start = try request.validatedStreamStart()
+    check(start.preferredLanguage == nil,
+          "overlong preferred-language metadata is discarded at the native boundary")
+} catch {
+    check(false, "bounded preferred-language request: \(error)")
 }
 
 do {
@@ -244,6 +315,19 @@ check(languageState.begin(mediaKey: "media-b") == nil,
 languageState.remember("ja", for: "media-b")
 check(languageState.begin(mediaKey: "media-b") == "ja",
       "the new media caches its own detected language")
+
+check(TranscriptionProfile.live.temperatureFallbackCount == 1
+        && TranscriptionProfile.accurate.temperatureFallbackCount == 5,
+      "live decoding limits expensive fallback while accurate decoding keeps the full recovery budget")
+check(!TranscriptionProfile.live.persistsLanguageHint
+        && TranscriptionProfile.accurate.persistsLanguageHint,
+      "live windows redetect language while accurate media reuses a stable language hint")
+var liveLanguageState = MediaLanguageHintState()
+check(liveLanguageState.begin(mediaKey: "music", persistHint: false) == nil,
+      "the first live music window starts without a language lock")
+liveLanguageState.remember("pt", for: "music", persistHint: false)
+check(liveLanguageState.begin(mediaKey: "music", persistHint: false) == nil,
+      "an instrumental live-window hallucination cannot lock later lyrics to the wrong language")
 
 do {
     let request = HostRequest(

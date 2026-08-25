@@ -39,9 +39,15 @@ actor LocalTranslator {
 
     /// Translate one finalized subtitle line to Simplified Chinese. Returns nil
     /// (caller keeps the original) when the source language is unknown, the
-    /// source is already Chinese, the pair is unsupported, or the model is not
-    /// installed / translation failed.
-    func translate(_ text: String, sourceLanguageHint: String?) async -> String? {
+    /// source is already Chinese, the source matches the user's preferred
+    /// language and that policy is enabled, the pair is unsupported, or the
+    /// model is not installed / translation failed.
+    func translate(
+        _ text: String,
+        sourceLanguageHint: String?,
+        skipSameLanguage: Bool = true,
+        preferredLanguage: String? = nil
+    ) async -> String? {
         let cleaned = text
             .replacingOccurrences(of: #"<\|[^|]*\|>"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
@@ -56,6 +62,12 @@ actor LocalTranslator {
             source = detected
         } else {
             return nil
+        }
+        // Passthrough keeps the existing subtitle delivery contract: callers
+        // still receive a stable value while no Translation session is created.
+        if skipSameLanguage,
+           LanguageIdentity.sameLanguage(source.minimalIdentifier, preferredLanguage) {
+            return cleaned
         }
         // Already Chinese: show the original as-is rather than re-translating.
         if source.minimalIdentifier.hasPrefix("zh") { return cleaned }
@@ -94,7 +106,12 @@ actor LocalTranslator {
 actor LocalTranslator {
     static let shared = LocalTranslator()
 
-    func translate(_ text: String, sourceLanguageHint: String?) async -> String? {
+    func translate(
+        _ text: String,
+        sourceLanguageHint: String?,
+        skipSameLanguage: Bool = true,
+        preferredLanguage: String? = nil
+    ) async -> String? {
         nil
     }
 }

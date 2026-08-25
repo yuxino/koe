@@ -26,23 +26,29 @@ check(defaults.koeCaptureSource === "tab", "fresh installs capture the tab");
 check(defaults.koeOverlayEnabled === true, "fresh installs show in-video captions");
 check(defaults.koeOverlaySize === "medium", "fresh installs use the standard caption size");
 check(defaults.koeHideOriginal === false, "fresh installs keep original text visible");
+check(defaults.koeSkipSameLanguage === true,
+  "fresh installs skip translation when subtitle and user languages match");
 
 const native = prefs.normalize({
   koeTranslate: false,
   koeHideOriginal: true,
+  koeSkipSameLanguage: false,
   koeAsrEngine: "local",
   koeCaptureSource: "tab",
   koeOverlayEnabled: false,
   koeOverlaySize: "large"
 }, { defaults: true });
 const restored = prefs.resolveInitial({}, native);
-check(restored.koeTranslate === false && restored.koeOverlaySize === "large",
+check(restored.koeTranslate === false
+    && restored.koeSkipSameLanguage === false
+    && restored.koeOverlaySize === "large",
   "fresh browser storage restores native preferences");
 
 const browser = {
   koePreferencesVersion: 1,
   koeTranslate: true,
   koeHideOriginal: false,
+  koeSkipSameLanguage: true,
   koeAsrEngine: "dashscope",
   koeCaptureSource: "tab",
   koeOverlayEnabled: true,
@@ -55,6 +61,8 @@ check(resolved.koeAsrEngine === "dashscope" && resolved.koeOverlaySize === "smal
 check(!Object.prototype.hasOwnProperty.call(resolved, "koeApiKey"),
   "API Key is never included in normalized preferences");
 check(!prefs.keys.includes("koeApiKey"), "API Key is excluded from the preference allow-list");
+check(prefs.keys.includes("koeSkipSameLanguage"),
+  "same-language translation policy is included in the preference allow-list");
 
 const legacyBrowser = prefs.resolveInitial({
   koeTranslate: false,
@@ -68,11 +76,14 @@ check(legacyBrowser.koeTranslate === false
 
 const invalid = prefs.normalize({
   koeTranslate: "false",
+  koeSkipSameLanguage: "false",
   koeAsrEngine: "webspeech",
   koeCaptureSource: "mic",
   koeOverlaySize: "huge"
 }, { defaults: true });
 check(invalid.koeTranslate === true, "invalid boolean falls back safely");
+check(invalid.koeSkipSameLanguage === true,
+  "invalid same-language policy falls back safely");
 check(invalid.koeAsrEngine === "local", "retired engine falls back to local-first");
 check(invalid.koeCaptureSource === "tab", "retired microphone source falls back to tab");
 check(invalid.koeOverlaySize === "medium", "invalid overlay size falls back safely");

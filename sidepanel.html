@@ -29,7 +29,7 @@
         <input type="checkbox" id="translate-toggle" checked>
       </label>
       <label class="toggle-row" for="hide-original-toggle">
-        <span>隐藏原文（只显示中文）</span>
+        <span>有译文时隐藏原文</span>
         <input type="checkbox" id="hide-original-toggle">
       </label>
       <label class="toggle-row" for="overlay-enabled">
@@ -54,6 +54,10 @@
               <option value="medium" selected>标准</option>
               <option value="large">大</option>
             </select>
+          </label>
+          <label class="toggle-row setting-toggle" for="skip-same-language-toggle">
+            <span>字幕语言与我的语言相同时只显示原文</span>
+            <input type="checkbox" id="skip-same-language-toggle" checked>
           </label>
           <div class="dashscope-only" id="dashscope-only" hidden>
             <label class="field-row" for="api-key">

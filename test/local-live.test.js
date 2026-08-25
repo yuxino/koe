@@ -22,7 +22,8 @@ function makeBackgroundContext() {
     koePreferencesVersion: 1,
     koeCaptureSource: "tab",
     koeAsrEngine: "local",
-    koeTranslate: true
+    koeTranslate: true,
+    koeSkipSameLanguage: true
   };
   const port = {
     postMessage(message) { nativeMessages.push(JSON.parse(JSON.stringify(message))); },
@@ -58,6 +59,7 @@ function makeBackgroundContext() {
           return { ok: true };
         }
       },
+      i18n: { getUILanguage: () => "zh-CN" },
       webRequest: { onBeforeRequest: { addListener() {} } },
       alarms: { create: async () => undefined, onAlarm: { addListener() {} } },
       tabs: {
@@ -152,7 +154,7 @@ function makeOffscreenContext() {
     tabId: 9, frameId: 0, jobId: "offline-9", mediaEpoch: 2,
     captureStarted: true, status: "starting", engine: "local", sessionMode: "offline",
     source: "tab", sourceUrl: "blob:https://youtube.com/video", pageUrl: "https://youtube.com/watch?v=x",
-    translate: true, mediaIdentity: "identity-9", offlineMissingMediaSince: Date.now() - 3_000
+    translate: true, mediaIdentity: "identity-9", offlineMissingMediaSince: Date.now()
   }); captureTabId = 9; captureStreamIds.set(9, "stream-9");`);
 
   await run(`receiveMediaContext({
@@ -163,12 +165,14 @@ function makeOffscreenContext() {
   await settle();
 
   check(run("tabStates.get(9).localFallbackActive") === true,
-    "a non-HLS local session switches to local live capture");
+    "an already-authorized non-HLS session switches to local live capture without the probe delay");
   check(background.nativeMessages.some((message) => message.type === "streamStart"
-      && message.sampleRate === 16_000 && message.channels === 1 && message.translate === true),
+      && message.sampleRate === 16_000 && message.channels === 1 && message.translate === true
+      && message.skipSameLanguage === true && message.preferredLanguage === "zh-CN"),
     "fallback starts the native local PCM stream");
   const captureStart = background.runtimeMessages.find((message) => message.type === "CAPTURE_START");
-  check(captureStart?.engine === "local" && captureStart?.streamId === "stream-9" && !captureStart?.apiKey,
+  check(captureStart?.engine === "local" && captureStart?.streamId === "stream-9" && !captureStart?.apiKey
+      && captureStart?.skipSameLanguage === true && captureStart?.preferredLanguage === "zh-CN",
     "local capture starts without exposing or requiring an API Key");
   check(background.contentMessages.some(({ message }) => message.type === "OFFLINE_STOP")
       && background.contentMessages.some(({ message }) => message.type === "LIVE_SESSION"),
@@ -203,6 +207,14 @@ function makeOffscreenContext() {
       && original.endTimeMs === 15_800 && original.audioPositionMs === 20_000,
     "capture-relative cues and audio position map onto the two-times player clock");
 
+  await run(`handleNativeMessage({
+    type: "status", jobId: "offline-9", mediaEpoch: 2,
+    stage: "stream-model", detail: "正在用本地高精度模型识别…"
+  })`);
+  check(run("tabStates.get(9).status") === "live"
+      && run("tabStates.get(9).stageDetail") === "本地实时字幕运行中",
+    "later inference windows do not regress an already-visible local session to preparing");
+
   const discoveriesBefore = background.contentMessages
     .filter(({ message }) => message.type === "OFFLINE_DISCOVER").length;
   await run("requestOfflineMediaContext(tabStates.get(9))");
@@ -210,16 +222,31 @@ function makeOffscreenContext() {
       === discoveriesBefore,
     "periodic page activity cannot switch a running local-live fallback back to offline discovery");
 
+  const nativeBeforeLanguagePolicy = background.nativeMessages.length;
+  await run("setSkipSameLanguage(9, false)");
+  await settle();
+  check(run("tabStates.get(9).mediaEpoch") === 3
+      && run("tabStates.get(9).skipSameLanguage") === false
+      && background.nativeMessages.slice(nativeBeforeLanguagePolicy).some((message) => (
+        message.type === "streamStart" && message.mediaEpoch === 3
+          && message.skipSameLanguage === false && message.preferredLanguage === "zh-CN"
+      )),
+  "changing the same-language policy restarts local translation on a fresh timeline");
+  check(background.runtimeMessages.some((message) => message.type === "CAPTURE_RESET"
+      && message.mediaEpoch === 3 && message.skipSameLanguage === false
+      && message.preferredLanguage === "zh-CN"),
+    "the browser capture reset receives the updated language policy");
+
   const nativeBeforeTranslate = background.nativeMessages.length;
   await run("setTranslate(9, false)");
   await settle();
-  check(run("tabStates.get(9).mediaEpoch") === 3
+  check(run("tabStates.get(9).mediaEpoch") === 4
       && background.nativeMessages.slice(nativeBeforeTranslate).some((message) => (
-        message.type === "streamStart" && message.mediaEpoch === 3 && message.translate === false
+        message.type === "streamStart" && message.mediaEpoch === 4 && message.translate === false
       )),
   "changing translation restarts only the native stream on a fresh timeline");
   check(background.runtimeMessages.some((message) => message.type === "CAPTURE_RESET"
-      && message.engine === "local" && message.mediaEpoch === 3),
+      && message.engine === "local" && message.mediaEpoch === 4),
     "translation changes reset the browser PCM clock without opening a WebSocket");
   check(run("tabStates.get(9).localMediaAnchorMs") === 20_000
       && run("tabStates.get(9).localAudioAnchorMs") === 0,
@@ -236,26 +263,26 @@ function makeOffscreenContext() {
     "PCM from the previous local-live epoch is ignored");
 
   await run(`mediaDiscontinuity({
-    type: "MEDIA_DISCONTINUITY", jobId: "offline-9", mediaEpoch: 3,
+    type: "MEDIA_DISCONTINUITY", jobId: "offline-9", mediaEpoch: 4,
     discontinuityId: 1, reason: "seek", currentTime: 120
   }, { tab: { id: 9 }, frameId: 0 })`);
   await settle();
-  check(run("tabStates.get(9).mediaEpoch") === 4
-      && background.nativeMessages.some((message) => message.type === "streamStart" && message.mediaEpoch === 4),
+  check(run("tabStates.get(9).mediaEpoch") === 5
+      && background.nativeMessages.some((message) => message.type === "streamStart" && message.mediaEpoch === 5),
     "seeking resets local live recognition and keeps its audio timeline aligned");
   const resetLiveSession = background.contentMessages
-    .filter(({ message }) => message.type === "LIVE_SESSION" && message.mediaEpoch === 4)
+    .filter(({ message }) => message.type === "LIVE_SESSION" && message.mediaEpoch === 5)
     .at(-1)?.message;
   check(resetLiveSession?.mediaTimed === true && resetLiveSession.discontinuityId === 1,
     "local live sessions preserve the page discontinuity counter across reloads");
 
   await run(`handleNativeMessage({
-    type: "streamCues", jobId: "offline-9", mediaEpoch: 4, revision: 1,
+    type: "streamCues", jobId: "offline-9", mediaEpoch: 5, revision: 1,
     cues: [{ cueId: "cue-after-seek", startMs: 500, endMs: 1_900, text: "After seek." }]
   })`);
   await settle();
   const afterSeek = background.runtimeMessages
-    .filter((message) => message.type === "LIVE_SUBTITLES" && message.mediaEpoch === 4)
+    .filter((message) => message.type === "LIVE_SUBTITLES" && message.mediaEpoch === 5)
     .at(-1);
   check(afterSeek?.mediaTimed === true && afterSeek.beginTimeMs === 121_000
       && afterSeek.endTimeMs === 123_800,
@@ -263,7 +290,7 @@ function makeOffscreenContext() {
 
   await run("stopCapture(tabStates.get(9))");
   await settle();
-  check(background.nativeMessages.some((message) => message.type === "streamStop" && message.mediaEpoch === 4)
+  check(background.nativeMessages.some((message) => message.type === "streamStop" && message.mediaEpoch === 5)
       && background.runtimeMessages.some((message) => message.type === "CAPTURE_STOP")
       && background.contentMessages.some(({ message }) => message.type === "LIVE_STOP"),
     "stopping local live capture releases both Helper and tab audio");

@@ -65,8 +65,9 @@
   let inlineHlsScannedAt = 0;
   const CAPTION_SENTENCE_ENDINGS = new Set(["。", "！", "？", "!", "?", "；", ";", "\n"]);
   const CAPTION_PREFERRED_BREAKS = new Set(["，", "、", ",", "：", ":", "—", "–", "-", " "]);
-  const MEDIA_TIMED_LATE_GRACE_MS = 2_500;
   const MEDIA_TIMED_EARLY_GRACE_MS = 1_200;
+  const MEDIA_TIMED_MAX_LATE_WALL_MS = 12_000;
+  const MEDIA_TIMED_LATE_DISPLAY_MS = 3_200;
 
   try {
     chrome.runtime.onMessage.addListener((message) => {
@@ -429,7 +430,7 @@
       if (Number.isFinite(begin)
           && begin - currentMs > MEDIA_TIMED_EARLY_GRACE_MS * playbackRate) return false;
       if (Number.isFinite(end)
-          && currentMs - end > MEDIA_TIMED_LATE_GRACE_MS * playbackRate) return false;
+          && currentMs - end > MEDIA_TIMED_MAX_LATE_WALL_MS * playbackRate) return false;
     } else {
       // 弱网恢复时宁可跳过已经过去很久的字幕，也不要让旧台词追着画面补播。
       if (Number.isFinite(end) && Number.isFinite(audio) && audio - end > 8_000) return false;
@@ -444,6 +445,9 @@
     if (!video || !Number.isFinite(endMs)) return 2_400;
     const currentMs = Math.max(0, Number(video.currentTime) || 0) * 1_000;
     const remainingWallTimeMs = (endMs - currentMs) / normalizedPlaybackRate(video);
+    // Local Whisper emits finalized text after the matching audio. That delay
+    // is expected and must not collapse a valid caption to a brief flash.
+    if (remainingWallTimeMs <= 0) return MEDIA_TIMED_LATE_DISPLAY_MS;
     return Math.max(900, Math.min(3_200, remainingWallTimeMs + 1_200));
   }
 
@@ -798,7 +802,7 @@
     else if (activeSession?.mode === "offline") {
       visibleOfflineCueId = "";
       renderOfflineCue();
-    }
+    } else renderOverlay();
   }
 
   function positionOverlay() {
@@ -834,12 +838,25 @@
     // 永远裁出开头两行，讲话越久，用户越看不到当前正在说什么。
     const original = draftOriginal ? captionViewport(draftOriginal) : finalOriginal;
     const translation = draftOriginal ? captionViewport(draftTranslatedText) : finalTranslatedText;
-    const hideOriginalActive = hideOriginal && Boolean(activeSession?.translate);
+    const passthrough = Boolean(original && translation)
+      && normalizedCaptionText(original) === normalizedCaptionText(translation);
+    const visibleTranslation = passthrough ? "" : translation;
+    const hideOriginalActive = hideOriginal
+      && Boolean(activeSession?.translate)
+      && Boolean(visibleTranslation)
+      && !passthrough;
     overlayOriginal.textContent = hideOriginalActive ? "" : original;
-    overlayTranslation.textContent = activeSession?.translate ? translation : "";
+    overlayTranslation.textContent = activeSession?.translate ? visibleTranslation : "";
     overlayOriginal.classList.toggle("solo", !overlayTranslation.textContent);
     overlayOriginal.style.display = hideOriginalActive ? "none" : "";
     positionOverlay();
+  }
+
+  function normalizedCaptionText(text) {
+    const value = String(text || "").trim();
+    if (!value) return "";
+    const normalized = typeof value.normalize === "function" ? value.normalize("NFKC") : value;
+    return normalized.replace(/\s+/gu, " ");
   }
 
   function captionViewport(text) {

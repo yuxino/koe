@@ -561,6 +561,50 @@ function makeCtx({ captureStarted = false } = {}) {
       `B has no late LIVE_SESSION after STOP (${bMessages.map((message) => message.type).join(" -> ")})`);
     console.log("T13 finalized old tab cannot be revived PASS");
   }
+  {
+    // 两个设置快速切换会并发等待 CAPTURE_RESET。先发出的旧 reset 即使最后
+    // 才返回，也不能借用 state 的新 epoch 再发布一条伪装成最新的 LIVE_SESSION。
+    const h = makeCtx({ captureStarted: false });
+    const resetResolvers = [];
+    h.ctx.chrome.runtime.sendMessage = (message) => {
+      h.sent.push(JSON.parse(JSON.stringify(message)));
+      if (message.type === "CAPTURE_RESET") {
+        return new Promise((resolve) => resetResolvers.push({ message, resolve }));
+      }
+      return Promise.resolve({ ok: true });
+    };
+    vm.runInContext(`
+      persistStates = async () => undefined;
+      globalThis.__contentMessages = [];
+      sendToContent = async (state, message) => {
+        globalThis.__contentMessages.push(JSON.parse(JSON.stringify(message)));
+      };
+      tabStates.set(1, {
+        tabId: 1, frameId: 0, jobId: "job-rapid-policy", mediaEpoch: 4,
+        captureStarted: true, userStopped: false, status: "live",
+        engine: "dashscope", source: "tab", translate: false,
+        skipSameLanguage: true, preferredLanguage: ""
+      });
+      captureTabId = 1;
+    `, h.ctx);
+    const older = vm.runInContext(`setTranslate(1, true)`, h.ctx);
+    await flush();
+    const newer = vm.runInContext(`setSkipSameLanguage(1, false)`, h.ctx);
+    await flush();
+    check(resetResolvers.length === 2
+        && resetResolvers[0].message.mediaEpoch === 5
+        && resetResolvers[1].message.mediaEpoch === 6,
+      "rapid policy changes submit distinct reset identities");
+    resetResolvers[1].resolve({ ok: true, audioPositionMs: 600 });
+    await newer;
+    resetResolvers[0].resolve({ ok: true, audioPositionMs: 500 });
+    await older;
+    const sessions = vm.runInContext(`globalThis.__contentMessages.filter((message) => message.type === "LIVE_SESSION")`, h.ctx);
+    check(sessions.length === 1 && sessions[0].mediaEpoch === 6
+        && sessions[0].audioPositionMs === 600,
+      `only the newest reset can announce a live session (${JSON.stringify(sessions)})`);
+    console.log("T14 rapid reset cannot publish stale session PASS");
+  }
   console.log(fail === 0 ? "stop-always 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);
 })().catch((err) => { console.error(err); process.exit(1); });

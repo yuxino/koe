@@ -378,6 +378,87 @@ captureSource = "tab"; captureEngine = "dashscope"; currentStreamSource = ""; st
     await h.dispatch({ type: "CAPTURE_STOP", force: true });
     console.log("T9 stop-start cleanup barrier PASS");
   }
+  {
+    // 两次策略 RESET 都卡在重连等待窗口时，旧 RESET 不能稍后再打开一条
+    // 已无人管理的 WebSocket；最终只能有最新 epoch / 策略对应的连接。
+    const h = makeOffCtx({ tabGetUserMedia: async () => fakeTabStream() });
+    const run = (code) => vm.runInContext(code, h.ctx);
+    const resetSleeps = [];
+    const sockets = [];
+    h.ctx.setTimeout = (fn, delay) => {
+      if (Number(delay) === 250) resetSleeps.push(fn);
+      return resetSleeps.length + 100;
+    };
+    h.ctx.clearTimeout = () => undefined;
+    h.ctx.WebSocket = function () {
+      this.readyState = 0;
+      this.binaryType = "";
+      this.onopen = null; this.onmessage = null; this.onerror = null; this.onclose = null;
+      this.send = (payload) => {
+        const parsed = JSON.parse(payload);
+        if (parsed.header?.action === "run-task") {
+          this.onmessage?.({
+            data: JSON.stringify({
+              header: { event: "task-started", task_id: parsed.header.task_id }, payload: {}
+            })
+          });
+        }
+      };
+      this.close = () => { this.readyState = 3; };
+      sockets.push(this);
+    };
+    h.ctx.WebSocket.OPEN = 1;
+    run(`
+      stream = { getTracks: () => [{ stop() {} }] };
+      stopping = false;
+      captureTabId = 77;
+      captureJobId = "policy-job";
+      captureMediaEpoch = 1;
+      captureEngine = "dashscope";
+    `);
+
+    const first = h.dispatch({
+      type: "CAPTURE_RESET", tabId: 77, jobId: "policy-job", mediaEpoch: 2,
+      translate: true, skipSameLanguage: false, preferredLanguage: "en-US",
+      source: "tab", engine: "dashscope"
+    });
+    const second = h.dispatch({
+      type: "CAPTURE_RESET", tabId: 77, jobId: "policy-job", mediaEpoch: 3,
+      translate: true, skipSameLanguage: true, preferredLanguage: "ja-JP",
+      source: "tab", engine: "dashscope"
+    });
+    check(resetSleeps.length === 2, "rapid policy resets enter independently controlled reconnect waits");
+
+    resetSleeps[0]?.();
+    await flush();
+    if (sockets[0]) {
+      sockets[0].readyState = 1;
+      sockets[0].onopen?.();
+      await flush();
+    }
+    resetSleeps[1]?.();
+    await flush();
+    const latestSocket = sockets.at(-1);
+    if (latestSocket && latestSocket.readyState !== 3) {
+      latestSocket.readyState = 1;
+      latestSocket.onopen?.();
+    }
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    await flush();
+
+    const openSockets = sockets.filter((entry) => entry.readyState !== 3);
+    h.ctx.__latestResetSocket = latestSocket;
+    check(firstResult?.ok === true && secondResult?.ok === true,
+      "rapid policy resets are both acknowledged without surfacing cancellation noise");
+    check(sockets.length === 1 && openSockets.length === 1,
+      `only the latest reset creates one live WebSocket (created=${sockets.length}, open=${openSockets.length})`);
+    check(run(`socket === __latestResetSocket
+      && captureMediaEpoch === 3
+      && captureSkipSameLanguage === true
+      && capturePreferredLanguage === "ja-JP"`) === true,
+      "the surviving socket belongs to the latest epoch and same-language policy");
+    console.log("T10 rapid policy reset latest-wins PASS");
+  }
   console.log(fail === 0 ? "ALL stream-reuse suites PASS" : `FAILURES: ${fail}`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

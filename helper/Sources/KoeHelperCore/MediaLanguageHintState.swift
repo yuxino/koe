@@ -11,16 +11,21 @@ public struct MediaLanguageHintState: Sendable {
 
     public init() {}
 
-    public mutating func begin(mediaKey: String) -> String? {
+    public mutating func begin(mediaKey: String, persistHint: Bool = true) -> String? {
         guard self.mediaKey == mediaKey else {
             self.mediaKey = mediaKey
             languageHint = nil
             return nil
         }
-        return languageHint
+        return persistHint ? languageHint : nil
     }
 
-    public mutating func remember(_ language: String?, for mediaKey: String) {
+    public mutating func remember(
+        _ language: String?,
+        for mediaKey: String,
+        persistHint: Bool = true
+    ) {
+        guard persistHint else { return }
         guard self.mediaKey == mediaKey, languageHint == nil else { return }
         let normalized = String(language ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)

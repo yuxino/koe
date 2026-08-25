@@ -12,6 +12,7 @@ Koe generates manually controlled, media-synced subtitles with optional Simplifi
 - **Off by default** — while Koe is off, playback, page changes, settings, and opening Koe do not turn it on. Only an explicit Start action from Koe's controls or context menu starts a session; once started, it follows media changes until you stop it. **Alt+K** only opens the controller.
 - **Local accurate (default)** — Koe Helper runs Whisper `large-v3` on the Mac. Compatible public HLS uses the media timeline directly; when no usable HLS source is available, Koe can fall back to local tab-audio recognition.
 - **DashScope** — captures tab audio for cloud recognition and optional Chinese translation. This mode requires your own DashScope API Key.
+- **Language-aware translation** — by default, captions that reliably match your browser language stay as one original line instead of being translated again. The side-panel setting can disable this behavior; uncertain language detection continues through the normal translation path.
 - **Video-safe UI** — captions follow seeking, video changes, and fullscreen. Status and errors never cover the video.
 - **One active session** — the toolbar shows global status, the side panel keeps recent confirmed lines from the current session plus diagnostics, and Stop releases tab capture.
 

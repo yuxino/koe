@@ -42,6 +42,7 @@ function makeElement(tag = "div") {
   const messageListeners = [];
   const documentListeners = {};
   const sentMessages = [];
+  let storageChangeListener = null;
   let now = 10_000;
   let nextTimerId = 1;
   const timers = new Map();
@@ -111,7 +112,7 @@ function makeElement(tag = "div") {
       },
       storage: {
         local: { get: async () => ({ koeOverlayEnabled: true, koeOverlaySize: "medium" }) },
-        onChanged: { addListener() {} }
+        onChanged: { addListener(listener) { storageChangeListener = listener; } }
       }
     }
   };
@@ -150,6 +151,31 @@ function makeElement(tag = "div") {
   send({ type: "LIVE_TRANSLATED", jobId: "job-1", mediaEpoch: 3, seq: 1, unit: true, lines: [{ translated: "当前字幕" }] });
   check(overlay.shadowRoot.querySelector(".translation").textContent === "当前字幕", "current translation renders");
 
+  send({ type: "LIVE_SUBTITLES", jobId: "job-1", mediaEpoch: 3, seq: 2, unit: true,
+    lines: [{ text: "Same language caption" }] });
+  send({ type: "LIVE_TRANSLATED", jobId: "job-1", mediaEpoch: 3, seq: 2, unit: true,
+    lines: [{ translated: "  Same   language caption  " }] });
+  check(overlay.shadowRoot.querySelector(".original").textContent === "Same language caption"
+      && overlay.shadowRoot.querySelector(".translation").textContent === "",
+    "same-language passthrough collapses to one original overlay line");
+  storageChangeListener?.({ koeHideOriginal: { newValue: true } }, "local");
+  check(overlay.shadowRoot.querySelector(".original").textContent === "Same language caption"
+      && overlay.shadowRoot.querySelector(".original").style.display !== "none"
+      && overlay.shadowRoot.querySelector(".translation").textContent === "",
+    "hide-original cannot hide the only same-language caption line");
+  send({ type: "LIVE_SUBTITLES", jobId: "job-1", mediaEpoch: 3, seq: 3, unit: true,
+    lines: [{ text: "Original stays while translation is pending" }] });
+  check(overlay.shadowRoot.querySelector(".original").textContent === "Original stays while translation is pending"
+      && overlay.shadowRoot.querySelector(".original").style.display !== "none"
+      && overlay.shadowRoot.querySelector(".translation").textContent === "",
+    "hide-original keeps a usable original line until a real translation exists");
+  send({ type: "LIVE_TRANSLATED", jobId: "job-1", mediaEpoch: 3, seq: 3, unit: true,
+    lines: [{ translated: "译文到达后再隐藏原文" }] });
+  check(overlay.shadowRoot.querySelector(".original").style.display === "none"
+      && overlay.shadowRoot.querySelector(".translation").textContent === "译文到达后再隐藏原文",
+    "hide-original switches to the real translation once it arrives");
+  storageChangeListener?.({ koeHideOriginal: { newValue: false } }, "local");
+
   video.currentTime = 20;
   send({
     type: "LIVE_SESSION", jobId: "timed-live", mediaEpoch: 1, translate: true,
@@ -158,13 +184,27 @@ function makeElement(tag = "div") {
   send({
     type: "LIVE_SUBTITLES", jobId: "timed-live", mediaEpoch: 1, seq: 1, unit: true, mediaTimed: true,
     beginTimeMs: 12_000, endTimeMs: 13_900, audioPositionMs: 13_900,
-    lines: [{ text: "Too late for this scene" }]
+    lines: [{ text: "Late local caption remains readable" }]
   });
-  check(overlay.shadowRoot.querySelector(".original").textContent === "",
-    "media-timed live cues that already missed the video are not shown");
-  video.currentTime = 13.2;
+  check(overlay.shadowRoot.querySelector(".original").textContent === "Late local caption remains readable",
+    "local captions are not discarded when recognition finishes behind the player clock");
+  advance(3_100);
+  check(overlay.shadowRoot.querySelector(".stage").classList.contains("visible"),
+    "late local captions retain a readable display window");
+  advance(100);
+  check(!overlay.shadowRoot.querySelector(".stage").classList.contains("visible"),
+    "late local captions still expire instead of lingering over a new scene");
+  video.currentTime = 120;
   send({
     type: "LIVE_SUBTITLES", jobId: "timed-live", mediaEpoch: 1, seq: 2, unit: true, mediaTimed: true,
+    beginTimeMs: 12_000, endTimeMs: 13_900, audioPositionMs: 120_000,
+    lines: [{ text: "Extremely stale caption" }]
+  });
+  check(overlay.shadowRoot.querySelector(".original").textContent === "Late local caption remains readable",
+    "media-timed live cues beyond the maximum wall-clock delay are discarded");
+  video.currentTime = 13.2;
+  send({
+    type: "LIVE_SUBTITLES", jobId: "timed-live", mediaEpoch: 1, seq: 3, unit: true, mediaTimed: true,
     beginTimeMs: 12_000, endTimeMs: 13_900, audioPositionMs: 13_900,
     lines: [{ text: "Still close to the scene" }]
   });
@@ -174,14 +214,14 @@ function makeElement(tag = "div") {
   check(!overlay.shadowRoot.querySelector(".stage").classList.contains("visible"),
     "media-timed live cues do not linger after their short display window");
   send({
-    type: "LIVE_TRANSLATED", jobId: "timed-live", mediaEpoch: 1, seq: 2, unit: true, mediaTimed: true,
+    type: "LIVE_TRANSLATED", jobId: "timed-live", mediaEpoch: 1, seq: 3, unit: true, mediaTimed: true,
     beginTimeMs: 12_000, endTimeMs: 13_900, audioPositionMs: 13_900,
     lines: [{ translated: "迟到的翻译" }]
   });
   check(!overlay.shadowRoot.querySelector(".stage").classList.contains("visible"),
     "a late media-timed translation cannot make an expired cue reappear");
   send({
-    type: "LIVE_SUBTITLES", jobId: "timed-live", mediaEpoch: 1, seq: 3, unit: true, mediaTimed: true,
+    type: "LIVE_SUBTITLES", jobId: "timed-live", mediaEpoch: 1, seq: 4, unit: true, mediaTimed: true,
     beginTimeMs: 18_000, endTimeMs: 20_000, audioPositionMs: 20_000,
     lines: [{ text: "Too early for this scene" }]
   });
@@ -197,7 +237,7 @@ function makeElement(tag = "div") {
     "playback-rate changes reanchor local live subtitles to the video clock");
   send({ type: "LIVE_SESSION", jobId: "timed-live", mediaEpoch: 1, translate: true, mediaTimed: true });
   send({
-    type: "LIVE_SUBTITLES", jobId: "timed-live", mediaEpoch: 1, seq: 4, unit: true, mediaTimed: true,
+    type: "LIVE_SUBTITLES", jobId: "timed-live", mediaEpoch: 1, seq: 5, unit: true, mediaTimed: true,
     beginTimeMs: 30_000, endTimeMs: 31_000, audioPositionMs: 31_000,
     lines: [{ text: "Must wait for the new clock" }]
   });

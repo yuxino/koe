@@ -43,6 +43,8 @@ let pendingSocketStartCancel = null;
 let taskId = "";
 let taskReady = false;
 let captureTranslate = false;
+let captureSkipSameLanguage = false;
+let capturePreferredLanguage = "";
 let captureApiKey = "";
 let captureSource = "tab"; // "tab" | "mic"
 let captureEngine = "dashscope"; // "dashscope" | "webspeech" | "local"
@@ -55,6 +57,7 @@ let emitSeq = 0;
 let stopping = false;
 let captureGeneration = 0;
 let captureOperationId = 0;
+let socketResetOperationId = 0;
 let captureJobId = "";
 let captureTabId = 0;
 let captureMediaEpoch = 0;
@@ -217,7 +220,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: true, ignored: true, audioPositionMs: audioPositionMs() });
       return false;
     }
+    const resetOperationId = ++socketResetOperationId;
     captureTranslate = Boolean(message.translate);
+    if (Object.prototype.hasOwnProperty.call(message, "skipSameLanguage")) {
+      captureSkipSameLanguage = Boolean(message.skipSameLanguage);
+    }
+    if (Object.prototype.hasOwnProperty.call(message, "preferredLanguage")) {
+      capturePreferredLanguage = String(message.preferredLanguage || "").trim().slice(0, 64);
+    }
     if (Number.isFinite(Number(message.mediaEpoch))) captureMediaEpoch = Number(message.mediaEpoch);
     if (message.source) captureSource = message.source === "mic" ? "mic" : "tab";
     if (message.engine) {
@@ -226,11 +236,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         : "dashscope";
     }
     // 内置识别不需要重连 WebSocket：重启识别会话即可
+    if (captureEngine !== "dashscope") {
+      cancelPendingSocketStart();
+      clearRetryTimer();
+      closeSocket(false);
+    }
     const restart = captureEngine === "webspeech"
       ? restartWebSpeech()
       : captureEngine === "local"
         ? resetLocalPcmTimeline()
-        : resetSocket();
+        : resetSocket(resetOperationId);
     restart.then(() => sendResponse({ ok: true, audioPositionMs: audioPositionMs() })).catch((error) => {
       sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
     });
@@ -252,6 +267,9 @@ function sameCaptureStartRequest(left, right) {
     && (["webspeech", "local"].includes(left.message.engine) ? left.message.engine : "dashscope")
       === (["webspeech", "local"].includes(right.message.engine) ? right.message.engine : "dashscope")
     && Boolean(left.message.translate) === Boolean(right.message.translate)
+    && Boolean(left.message.skipSameLanguage) === Boolean(right.message.skipSameLanguage)
+    && String(left.message.preferredLanguage || "").trim()
+      === String(right.message.preferredLanguage || "").trim()
     && String(left.message.apiKey || "").trim() === String(right.message.apiKey || "").trim();
 }
 
@@ -287,6 +305,8 @@ function startCapture(message) {
   captureStartRequestId = request.requestId;
   // 让正在等待 getUserMedia / WebSocket 的旧启动在下一检查点退出。
   captureOperationId += 1;
+  socketResetOperationId += 1;
+  cancelPendingSocketStart();
   const previous = captureStartQueue;
   request.promise = previous.catch(() => undefined).then(() => {
     if (request.requestId !== captureStartRequestId) throw captureCancelledError();
@@ -302,7 +322,18 @@ function startCapture(message) {
   }
 }
 
-async function runStartCapture({ streamId, translate, apiKey, source, engine, jobId, tabId, mediaEpoch }) {
+async function runStartCapture({
+  streamId,
+  translate,
+  skipSameLanguage,
+  preferredLanguage,
+  apiKey,
+  source,
+  engine,
+  jobId,
+  tabId,
+  mediaEpoch
+}) {
   const operationId = ++captureOperationId;
   const nextJobId = String(jobId || "");
   const nextMediaEpoch = Number(mediaEpoch) || 0;
@@ -322,6 +353,8 @@ async function runStartCapture({ streamId, translate, apiKey, source, engine, jo
   captureEngine = ["webspeech", "local"].includes(engine) ? engine : "dashscope";
   captureApiKey = String(apiKey || "").trim();
   captureTranslate = Boolean(translate);
+  captureSkipSameLanguage = Boolean(skipSameLanguage);
+  capturePreferredLanguage = String(preferredLanguage || "").trim().slice(0, 64);
   captureJobId = nextJobId;
   captureTabId = Number(tabId) || 0;
   captureMediaEpoch = nextMediaEpoch;
@@ -332,7 +365,7 @@ async function runStartCapture({ streamId, translate, apiKey, source, engine, jo
   captureClockStartedAt = monotonicNow();
   activeSentenceId = 0;
   activeTiming = {};
-  logEvent("start", `source=${captureSource} engine=${captureEngine} translate=${captureTranslate}`);
+  logEvent("start", `source=${captureSource} engine=${captureEngine} translate=${captureTranslate} skipSame=${captureSkipSameLanguage}`);
 
   try {
     if (captureEngine === "webspeech") {
@@ -514,7 +547,7 @@ async function connectRealtime() {
   socket = nextSocket;
   nextSocket.binaryType = "arraybuffer";
 
-  await new Promise((resolve, reject) => {
+  const connected = await new Promise((resolve, reject) => {
     let settled = false;
     let timer = null;
     const clearPending = () => {
@@ -581,7 +614,7 @@ async function connectRealtime() {
         retryCount = 0;
         clearRetryTimer();
         logEvent("ws-task-started", `task=${nextTaskId}`);
-        finishResolve();
+        finishResolve(true);
         return;
       }
       if (type === "task-failed") {
@@ -621,6 +654,7 @@ async function connectRealtime() {
       }
     };
   });
+  return connected ? nextSocket : null;
 }
 
 function cancelPendingSocketStart() {
@@ -1161,13 +1195,41 @@ function emitUnit(text, timing = activeTiming) {
 // 队列里的草稿始终只保留最新一条；稳定字幕块会中止正在执行的旧草稿并
 // 插到所有草稿前面。正常路径不做固定等待、不批量，避免人为增加首字延迟。
 const TRANSLATE_COOLDOWN_MS = 20_000;
-const translationQueue = []; // { kind: "unit" | "draft", text, seq }
+const translationQueue = []; // { kind: "unit" | "draft", text, seq, generation }
 let translatorRunning = false;
 let throttleCooldownUntil = 0;
 let inFlightItem = null;
 let inFlightController = null;
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+function translationAbortError() {
+  const error = new Error("translation_aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function throwIfTranslationAborted(signal) {
+  if (signal?.aborted) throw translationAbortError();
+}
+
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(translationAbortError());
+      return;
+    }
+    let timer = null;
+    const onAbort = () => {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener?.("abort", onAbort);
+      reject(translationAbortError());
+    };
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+    timer = setTimeout(() => {
+      signal?.removeEventListener?.("abort", onAbort);
+      resolve();
+    }, ms);
+  });
+}
 
 function translationContent(payload) {
   return String(
@@ -1228,10 +1290,17 @@ async function translateText(text, {
   signal,
   onUpdate
 } = {}) {
+  throwIfTranslationAborted(signal);
   if (isAlreadyChinese(text)) {
     if (typeof onUpdate === "function") onUpdate(text);
     return text;
   }
+  if (await shouldPassthroughSameLanguage(text, signal)) {
+    throwIfTranslationAborted(signal);
+    if (typeof onUpdate === "function") onUpdate(text);
+    return text;
+  }
+  throwIfTranslationAborted(signal);
   const apiKey = captureApiKey;
   if (!apiKey) return "";
   const incremental = model === TRANSLATE_MODEL;
@@ -1278,8 +1347,10 @@ async function translateText(text, {
 function scheduleUnitTranslation(text, seq, timing = activeTiming) {
   // 稳定句是当前最可信文本：中止旧草稿，把稳定句插到所有草稿前。
   dropQueuedDrafts({ abortInFlight: true });
-  const item = { kind: "unit", text, seq, timing: { ...timing } };
-  const firstDraft = translationQueue.findIndex((entry) => entry.kind === "draft");
+  const item = { kind: "unit", text, seq, timing: { ...timing }, generation: captureGeneration };
+  const firstDraft = translationQueue.findIndex((entry) =>
+    entry.generation === captureGeneration && entry.kind === "draft"
+  );
   if (firstDraft < 0) translationQueue.push(item);
   else translationQueue.splice(firstDraft, 0, item);
   void runTranslationWorker();
@@ -1288,7 +1359,9 @@ function scheduleUnitTranslation(text, seq, timing = activeTiming) {
 function scheduleDraftTranslation(text, seq, timing = activeTiming) {
   // 不为每次 ASR 微调中止网络请求；旧结果立即失效，请求结束后只处理最新草稿。
   dropQueuedDrafts({ abortInFlight: false });
-  translationQueue.push({ kind: "draft", text, seq, timing: { ...timing } });
+  translationQueue.push({
+    kind: "draft", text, seq, timing: { ...timing }, generation: captureGeneration
+  });
   void runTranslationWorker();
 }
 
@@ -1298,7 +1371,10 @@ function dropQueuedDrafts({ abortInFlight = true } = {}) {
     if (abortInFlight && inFlightController) inFlightController.abort();
   }
   for (let index = translationQueue.length - 1; index >= 0; index -= 1) {
-    if (translationQueue[index].kind === "draft") translationQueue.splice(index, 1);
+    const item = translationQueue[index];
+    if (item.generation !== captureGeneration || item.kind === "draft") {
+      translationQueue.splice(index, 1);
+    }
   }
 }
 
@@ -1336,10 +1412,16 @@ async function runTranslationWorker() {
   translatorRunning = true;
   while (translationQueue.length > 0) {
     const item = translationQueue.shift();
+    const generation = item.generation;
+    // RESET 可以在旧 worker 等待语言检测或重试时开启新一代。
+    // 旧 item 只作废自己，绝不清空可能已装入新代 item 的共享队列。
+    if (generation !== captureGeneration) {
+      item.superseded = true;
+      continue;
+    }
     inFlightItem = item;
     inFlightController = createTranslationController();
     const controller = inFlightController;
-    const generation = captureGeneration;
 
     if (item.kind === "draft" && Date.now() < throttleCooldownUntil) {
       logEvent("translation-skip", "cooldown draft");
@@ -1386,8 +1468,8 @@ async function runTranslationWorker() {
     inFlightItem = null;
     inFlightController = null;
     if (generation !== captureGeneration) {
-      translationQueue.length = 0;
-      break;
+      item.superseded = true;
+      continue;
     }
     if (item.kind === "draft" && item.superseded) continue;
 
@@ -1395,7 +1477,7 @@ async function runTranslationWorker() {
     logEvent("translation-complete", `kind=${item.kind} seq=${item.seq} ms=${Math.round(finishedAt - startedAt)} ok=${Boolean(translated)}`);
     if (translated) logEvent("translation-ok", `kind=${item.kind} seq=${item.seq} chars=${Array.from(translated).length}`);
     if (item.kind === "unit") {
-      if (translated) rememberTranslation(item.text, translated);
+      if (translated && translated !== item.text) rememberTranslation(item.text, translated);
       // 完成时再发一次冻结值；失败则空译文让显示端稳定回退原文。
       sendCaptureMessage({
         type: "CAPTURE_TRANSLATED",
@@ -1409,25 +1491,31 @@ async function runTranslationWorker() {
     }
   }
   translatorRunning = false;
+  // 若队列在 worker 收尾边界又加入了工作，立即接续，不等下一条 ASR 触发。
+  if (translationQueue.length > 0) void runTranslationWorker();
 }
 
 async function translateWithRetry(text, options = {}) {
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    throwIfTranslationAborted(options.signal);
     try {
       return await translateText(text, options);
     } catch (error) {
+      if (error?.name === "AbortError" || options.signal?.aborted) {
+        throw error?.name === "AbortError" ? error : translationAbortError();
+      }
       lastError = error;
       const message = String(error?.message || error || "");
       if (/429|throttl|rate.?limit|quota/i.test(message)) {
         // 触发限流：进入冷却期，退避后重试一次
         throttleCooldownUntil = Date.now() + TRANSLATE_COOLDOWN_MS;
         logEvent("translation-429", `cool=${TRANSLATE_COOLDOWN_MS}ms attempt=${attempt}`);
-        await sleep(1_200 + attempt * 1_500);
+        await sleep(1_200 + attempt * 1_500, options.signal);
         continue;
       }
       if (attempt === 0 && /5\d\d|timeout|network|fetch/i.test(message)) {
-        await sleep(700);
+        await sleep(700, options.signal);
         continue;
       }
       // flash 未开通时回退到 turbo，避免翻译全挂；turbo 走非增量 JSON。
@@ -1563,8 +1651,17 @@ async function resetLocalPcmTimeline() {
   activeTiming = {};
 }
 
-async function resetSocket() {
+function currentSocketReset(operationId) {
+  return operationId === socketResetOperationId
+    && !stopping
+    && Boolean(stream)
+    && captureEngine === "dashscope";
+}
+
+async function resetSocket(operationId = ++socketResetOperationId) {
   if (!stream) throw new Error("capture_not_running");
+  // 已排队的旧 RESET 对 UI 仍是成功的幂等操作，但不得重连。
+  if (!currentSocketReset(operationId)) return;
   logEvent("ws-reconnect", `retry=${retryCount}`);
   captureGeneration += 1;
   cancelTranslationWork();
@@ -1579,7 +1676,11 @@ async function resetSocket() {
   activeTiming = {};
   resetDraftCommitter();
   await new Promise((resolve) => setTimeout(resolve, 250));
-  await connectRealtime();
+  if (!currentSocketReset(operationId)) return;
+  const connectedSocket = await connectRealtime();
+  if (!currentSocketReset(operationId)) {
+    closeSocketInstance(connectedSocket, "superseded-reset");
+  }
 }
 
 function scheduleAutoReconnect() {
@@ -1654,11 +1755,25 @@ function closeSocket(finish = true) {
   socket = null;
 }
 
+function closeSocketInstance(target, reason = "superseded") {
+  if (!target) return;
+  target.onopen = null;
+  target.onmessage = null;
+  target.onerror = null;
+  target.onclose = null;
+  if (socket === target) {
+    taskReady = false;
+    socket = null;
+  }
+  try { target.close(1000, reason); } catch { /* ignore */ }
+}
+
 // 只停识别、保留音频流与监听器：再次开启时直接复用流，
 // 避免“Cannot capture a tab with an active stream”冲突。
 // 注意：标签页来源的监听器必须继续播放（tabCapture 会静音标签页自身）。
 async function stopRecognitionOnly() {
   stopping = true;
+  socketResetOperationId += 1;
   captureGeneration += 1;
   cancelPendingSocketStart();
   clearRetryTimer();
@@ -1689,6 +1804,7 @@ async function stopCapture({ cancelPendingStarts = true } = {}) {
   if (cancelPendingStarts) invalidatePendingCaptureStarts();
   captureOperationId += 1;
   stopping = true;
+  socketResetOperationId += 1;
   captureGeneration += 1;
   cancelPendingSocketStart();
   clearRetryTimer();
@@ -1721,6 +1837,67 @@ function parseJson(value) {
 
 function randomTaskId() {
   return crypto.randomUUID().replace(/-/g, "").slice(0, 32);
+}
+
+function primaryLanguageSubtag(value) {
+  const normalized = String(value || "").trim().toLowerCase().replace(/_/g, "-");
+  const primary = normalized.match(/^([a-z]{2,8})(?:-|$)/)?.[1] || "";
+  if (primary === "und") return "";
+  return ({ iw: "he", in: "id", ji: "yi" })[primary] || primary;
+}
+
+function detectionMatchesPreferredLanguage(result, preferredLanguage) {
+  if (result?.isReliable !== true) return false;
+  const preferred = primaryLanguageSubtag(preferredLanguage);
+  const candidate = Array.isArray(result.languages) ? result.languages[0] : null;
+  const percentage = Number(candidate?.percentage);
+  return Boolean(preferred)
+    && Number.isFinite(percentage)
+    && percentage >= 70
+    && primaryLanguageSubtag(candidate?.language) === preferred;
+}
+
+function detectCaptionLanguage(text, signal) {
+  const detectLanguage = chrome?.i18n?.detectLanguage;
+  if (typeof detectLanguage !== "function") return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let settled = false;
+    let timeout = null;
+    const onAbort = () => finish(null);
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      timeout = null;
+      signal?.removeEventListener?.("abort", onAbort);
+      resolve(result || null);
+    };
+    if (signal?.aborted) {
+      finish(null);
+      return;
+    }
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+    timeout = setTimeout(() => finish(null), 750);
+    try {
+      const pending = detectLanguage.call(chrome.i18n, String(text || ""), finish);
+      if (pending && typeof pending.then === "function") pending.then(finish, () => finish(null));
+    } catch {
+      finish(null);
+    }
+  });
+}
+
+async function shouldPassthroughSameLanguage(text, signal) {
+  throwIfTranslationAborted(signal);
+  if (!captureSkipSameLanguage) return false;
+  const preferred = primaryLanguageSubtag(capturePreferredLanguage);
+  if (!preferred) return false;
+  // Chrome's generic detector is weak on short Han-script captions. The existing
+  // Japanese-aware Chinese check is stricter and avoids an asynchronous lookup.
+  if (preferred === "zh" && isAlreadyChinese(text)) return true;
+  const result = await detectCaptionLanguage(text, signal);
+  throwIfTranslationAborted(signal);
+  return detectionMatchesPreferredLanguage(result, preferred);
 }
 
 function isAlreadyChinese(value) {

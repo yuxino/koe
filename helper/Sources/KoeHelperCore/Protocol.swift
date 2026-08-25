@@ -10,6 +10,7 @@ public let koeNativeProtocolVersion = 1
 public struct KoePreferences: Codable, Equatable, Sendable {
     public let koePreferencesVersion: Int?
     public let koeTranslate: Bool?
+    public let koeSkipSameLanguage: Bool?
     public let koeHideOriginal: Bool?
     public let koeCaptureSource: String?
     public let koeAsrEngine: String?
@@ -19,6 +20,7 @@ public struct KoePreferences: Codable, Equatable, Sendable {
     public init(
         koePreferencesVersion: Int? = nil,
         koeTranslate: Bool? = nil,
+        koeSkipSameLanguage: Bool? = nil,
         koeHideOriginal: Bool? = nil,
         koeCaptureSource: String? = nil,
         koeAsrEngine: String? = nil,
@@ -27,6 +29,7 @@ public struct KoePreferences: Codable, Equatable, Sendable {
     ) {
         self.koePreferencesVersion = koePreferencesVersion
         self.koeTranslate = koeTranslate
+        self.koeSkipSameLanguage = koeSkipSameLanguage
         self.koeHideOriginal = koeHideOriginal
         self.koeCaptureSource = koeCaptureSource
         self.koeAsrEngine = koeAsrEngine
@@ -38,6 +41,7 @@ public struct KoePreferences: Codable, Equatable, Sendable {
         KoePreferences(
             koePreferencesVersion: 1,
             koeTranslate: input.koeTranslate ?? true,
+            koeSkipSameLanguage: input.koeSkipSameLanguage ?? true,
             koeHideOriginal: input.koeHideOriginal ?? false,
             koeCaptureSource: "tab",
             koeAsrEngine: ["local", "dashscope"].contains(input.koeAsrEngine ?? "")
@@ -72,6 +76,8 @@ public struct HostRequest: Decodable, Sendable {
     public let durationMs: Double?
     public let playbackRate: Double?
     public let translate: Bool?
+    public let skipSameLanguage: Bool?
+    public let preferredLanguage: String?
     public let preferences: KoePreferences?
     public let sampleRate: Int?
     public let channels: Int?
@@ -88,6 +94,8 @@ public struct HostRequest: Decodable, Sendable {
         durationMs: Double? = nil,
         playbackRate: Double? = nil,
         translate: Bool? = nil,
+        skipSameLanguage: Bool? = nil,
+        preferredLanguage: String? = nil,
         preferences: KoePreferences? = nil,
         sampleRate: Int? = nil,
         channels: Int? = nil,
@@ -103,6 +111,8 @@ public struct HostRequest: Decodable, Sendable {
         self.durationMs = durationMs
         self.playbackRate = playbackRate
         self.translate = translate
+        self.skipSameLanguage = skipSameLanguage
+        self.preferredLanguage = preferredLanguage
         self.preferences = preferences
         self.sampleRate = sampleRate
         self.channels = channels
@@ -120,6 +130,8 @@ public struct StartRequest: Equatable, Sendable {
     public let durationMs: Double
     public let playbackRate: Double
     public let translate: Bool
+    public let skipSameLanguage: Bool
+    public let preferredLanguage: String?
 
     public init(
         jobId: String,
@@ -130,7 +142,9 @@ public struct StartRequest: Equatable, Sendable {
         currentTimeMs: Double,
         durationMs: Double,
         playbackRate: Double,
-        translate: Bool = false
+        translate: Bool = false,
+        skipSameLanguage: Bool = true,
+        preferredLanguage: String? = nil
     ) {
         self.jobId = jobId
         self.mediaEpoch = mediaEpoch
@@ -141,6 +155,8 @@ public struct StartRequest: Equatable, Sendable {
         self.durationMs = durationMs
         self.playbackRate = playbackRate
         self.translate = translate
+        self.skipSameLanguage = skipSameLanguage
+        self.preferredLanguage = preferredLanguage
     }
 }
 
@@ -151,6 +167,8 @@ public struct StreamStartRequest: Equatable, Sendable {
     public let sampleRate: Int
     public let channels: Int
     public let translate: Bool
+    public let skipSameLanguage: Bool
+    public let preferredLanguage: String?
 
     public init(
         jobId: String,
@@ -158,7 +176,9 @@ public struct StreamStartRequest: Equatable, Sendable {
         mediaKey: String,
         sampleRate: Int,
         channels: Int,
-        translate: Bool
+        translate: Bool,
+        skipSameLanguage: Bool = true,
+        preferredLanguage: String? = nil
     ) {
         self.jobId = jobId
         self.mediaEpoch = mediaEpoch
@@ -166,6 +186,8 @@ public struct StreamStartRequest: Equatable, Sendable {
         self.sampleRate = sampleRate
         self.channels = channels
         self.translate = translate
+        self.skipSameLanguage = skipSameLanguage
+        self.preferredLanguage = preferredLanguage
     }
 }
 
@@ -294,7 +316,9 @@ public extension HostRequest {
             currentTimeMs: max(0, currentTimeMs ?? 0),
             durationMs: max(0, durationMs ?? 0),
             playbackRate: min(4, max(0.25, playbackRate ?? 1)),
-            translate: translate ?? false
+            translate: translate ?? false,
+            skipSameLanguage: skipSameLanguage ?? true,
+            preferredLanguage: LanguageIdentity.normalizedIdentifier(preferredLanguage)
         )
     }
 
@@ -310,7 +334,9 @@ public extension HostRequest {
             mediaKey: String(mediaKey ?? "").prefix(1_024).description,
             sampleRate: 16_000,
             channels: 1,
-            translate: translate ?? false
+            translate: translate ?? false,
+            skipSameLanguage: skipSameLanguage ?? true,
+            preferredLanguage: LanguageIdentity.normalizedIdentifier(preferredLanguage)
         )
     }
 

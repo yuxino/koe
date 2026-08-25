@@ -50,10 +50,10 @@ public struct PCMStreamBuffer: Sendable {
     public init(
         sampleRate: Int = 16_000,
         channels: Int = 1,
-        bootstrapDurationMs: Int = 4_000,
+        bootstrapDurationMs: Int = 2_000,
         windowDurationMs: Int = 4_000,
         overlapMs: Int = 1_500,
-        maximumBufferedDurationMs: Int = 30_000
+        maximumBufferedDurationMs: Int = 6_000
     ) throws {
         guard sampleRate == 16_000,
               channels == 1,

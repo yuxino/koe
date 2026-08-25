@@ -28,17 +28,25 @@ actor WhisperTranscriber {
         languageHintState.languageHint
     }
 
-    func transcribe(audioURL: URL, mediaKey: String) async throws -> [RawCue] {
+    func transcribe(
+        audioURL: URL,
+        mediaKey: String,
+        profile: TranscriptionProfile = .accurate
+    ) async throws -> [RawCue] {
         try await acquire()
         defer { busy = false }
         try Task.checkCancellation()
         let kit = try await model()
-        let languageHint = languageHintState.begin(mediaKey: mediaKey)
+        let languageHint = languageHintState.begin(
+            mediaKey: mediaKey,
+            persistHint: profile.persistsLanguageHint
+        )
         let options = DecodingOptions(
             verbose: false,
             task: .transcribe,
             language: languageHint,
             temperature: 0,
+            temperatureFallbackCount: profile.temperatureFallbackCount,
             usePrefillPrompt: languageHint != nil,
             detectLanguage: languageHint == nil,
             withoutTimestamps: false,
@@ -51,7 +59,8 @@ actor WhisperTranscriber {
         if languageHint == nil {
             languageHintState.remember(
                 results.lazy.map(\.language).first { !$0.isEmpty },
-                for: mediaKey
+                for: mediaKey,
+                persistHint: profile.persistsLanguageHint
             )
         }
         return results.flatMap { result in
