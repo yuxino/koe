@@ -23,7 +23,7 @@ Koe Helper 是“本地精准”模式使用的 macOS Native Messaging 处理器
 
 无需手动填写扩展 ID，也无需安装 Swift/Xcode。首次识别会下载并缓存 `large-v3-v20240930_626MB` 模型。
 
-下载中包含两套约 2.8 MB 的 Helper，安装器按系统只安装一套：macOS 15–25 使用不链接 Translation.framework 的兼容版，macOS 26+ 使用带本机翻译的版本。开发者修改 Swift 源码后，用 `scripts/update-helper-payload.sh all` 先暂存构建、再更新两套载荷与 SHA-256；也可传入 `baseline` 或 `macos26` 只更新一套。构建缓存不进入用户下载包。
+下载中包含两套约 1.7 MB 的 Helper，安装器按系统只安装一套：macOS 15–25 使用不链接 Translation.framework 的兼容版，macOS 26+ 使用带本机翻译的版本。开发者修改 Swift 源码后，用 `scripts/update-helper-payload.sh all` 先暂存构建、再更新两套载荷与 SHA-256；也可传入 `baseline` 或 `macos26` 只更新一套。构建缓存不进入用户下载包。
 
 当前 Helper 为 ad-hoc 签名的 Git 预览版，尚未经过 Developer ID 签名和 Apple 公证。安装器核对固定扩展 ID、SHA-256、Mach-O 架构、最低系统版本、依赖和签名结构，并只对通过校验的 Helper 复制件移除下载隔离标记。SHA 文件与二进制同包，只用于发现损坏，不代表发布者身份；正式公开分发仍需签名并公证整个发布容器。
 

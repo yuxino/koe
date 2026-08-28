@@ -298,6 +298,51 @@ function makeCtx(fetchImpl = async () => jsonResponse("译文"), { detectLanguag
     console.log("T5 稳定句抢占草稿 PASS");
   }
 
+  {
+    const h = makeCtx((url, options) => new Promise((resolve, reject) => {
+      options.signal?.addEventListener("abort", () => {
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      }, { once: true });
+    }));
+    h.run(`scheduleUnitTranslation("Hung unit 1.", 1, { sentenceId: 1 })`);
+    await settle();
+    h.run(`
+      for (let seq = 2; seq <= 20; seq += 1) {
+        scheduleUnitTranslation(\`Hung unit \${seq}.\`, seq, { sentenceId: seq });
+      }
+    `);
+    const queueState = h.run(`({
+      running: translatorRunning,
+      inFlightSeq: inFlightItem?.seq,
+      queued: translationQueue.filter((item) => item.kind === "unit").map((item) => item.seq)
+    })`);
+    check(queueState.running === true && queueState.inFlightSeq === 1,
+      "悬挂翻译仍由单 worker 串行处理");
+    check(queueState.queued.length === 8
+        && queueState.queued[0] === 13 && queueState.queued.at(-1) === 20,
+      `稳定译文队列只保留最新 8 条（实际 ${JSON.stringify(queueState.queued)}）`);
+    const dropped = h.sent.filter((message) => message.type === "CAPTURE_TRANSLATED"
+      && message.streaming === false && message.lines?.[0]?.translated === "").map((message) => message.seq);
+    check(dropped.length === 11 && dropped[0] === 2 && dropped.at(-1) === 12,
+      `淘汰的旧句显式回退原文（实际 ${JSON.stringify(dropped)}）`);
+
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    await settle(24);
+    const timedOut = h.sent.filter((message) => message.type === "CAPTURE_TRANSLATED"
+      && message.streaming === false && message.lines?.[0]?.translated === "").map((message) => message.seq);
+    check(h.requestedDelays.includes(15_000), "每条翻译使用 15 秒生产截止时间");
+    check(timedOut.includes(1) && timedOut.includes(20),
+      "悬挂请求超时后 worker 继续处理到最新稳定句");
+    check(h.requests.length === 2
+        && h.requests[1]?.body?.input?.messages?.[0]?.content === "Hung unit 20.",
+      "首条超时后跳过过期积压，只继续翻译最新稳定句");
+    check(h.run(`translationQueue.length === 0 && translatorRunning === false`) === true,
+      "全部悬挂请求超时后翻译 worker 与队列均收敛");
+    console.log("T6 翻译截止时间与稳定句队列上限 PASS");
+  }
+
   console.log(fail === 0 ? "translation-latency 回归全部通过" : `${fail} 项失败`);
   process.exitCode = fail === 0 ? 0 : 1;
 })().catch((error) => {

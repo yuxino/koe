@@ -124,12 +124,15 @@ for (const [variant, contract] of Object.entries(helperVariants)) {
   const checksumPath = `${helperPath}.sha256`;
   assert(fs.existsSync(helperPath), `${variant} payload must be checked in`);
   assert(fs.statSync(helperPath).mode & 0o111, `${variant} payload must be executable`);
-  assert(fs.statSync(helperPath).size < 10 * 1024 * 1024, `${variant} payload must stay below 10 MiB`);
+  assert(fs.statSync(helperPath).size < 2.5 * 1024 * 1024, `${variant} stripped payload must stay below 2.5 MiB`);
   const expectedDigest = fs.readFileSync(checksumPath, "utf8").trim().split(/\s+/)[0];
   assert.match(expectedDigest, /^[0-9a-f]{64}$/);
   assert.strictEqual(digest(helperPath), expectedDigest, `${variant} checksum must match`);
   assert.match(execFileSync("/usr/bin/file", [helperPath], { encoding: "utf8" }), /Mach-O 64-bit executable arm64/);
   execFileSync("/usr/bin/codesign", ["--verify", "--strict", helperPath]);
+  const signature = spawnSync("/usr/bin/codesign", ["-dvv", helperPath], { encoding: "utf8" });
+  assert.strictEqual(signature.status, 0, signature.stderr);
+  assert.match(`${signature.stdout}${signature.stderr}`, /Identifier=koe-helper/);
   const libraries = execFileSync("/usr/bin/otool", ["-L", helperPath], { encoding: "utf8" });
   assert.strictEqual(libraries.includes("/Translation.framework/"), contract.linksTranslation);
   const ready = readReadyFrame(helperPath);

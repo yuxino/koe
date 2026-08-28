@@ -1202,6 +1202,8 @@ function emitUnit(text, timing = activeTiming) {
 // 队列里的草稿始终只保留最新一条；稳定字幕块会中止正在执行的旧草稿并
 // 插到所有草稿前面。正常路径不做固定等待、不批量，避免人为增加首字延迟。
 const TRANSLATE_COOLDOWN_MS = 20_000;
+const TRANSLATE_DEADLINE_MS = 15_000;
+const MAX_QUEUED_UNIT_TRANSLATIONS = 8;
 const translationQueue = []; // { kind: "unit" | "draft", text, seq, generation }
 let translatorRunning = false;
 let throttleCooldownUntil = 0;
@@ -1354,6 +1356,7 @@ async function translateText(text, {
 function scheduleUnitTranslation(text, seq, timing = activeTiming) {
   // 稳定句是当前最可信文本：中止旧草稿，把稳定句插到所有草稿前。
   dropQueuedDrafts({ abortInFlight: true });
+  trimQueuedUnitTranslations();
   const item = { kind: "unit", text, seq, timing: { ...timing }, generation: captureGeneration };
   const firstDraft = translationQueue.findIndex((entry) =>
     entry.generation === captureGeneration && entry.kind === "draft"
@@ -1361,6 +1364,37 @@ function scheduleUnitTranslation(text, seq, timing = activeTiming) {
   if (firstDraft < 0) translationQueue.push(item);
   else translationQueue.splice(firstDraft, 0, item);
   void runTranslationWorker();
+}
+
+function trimQueuedUnitTranslations() {
+  let queuedUnits = translationQueue.filter((entry) =>
+    entry.generation === captureGeneration && entry.kind === "unit"
+  ).length;
+  while (queuedUnits >= MAX_QUEUED_UNIT_TRANSLATIONS) {
+    const oldestIndex = translationQueue.findIndex((entry) =>
+      entry.generation === captureGeneration && entry.kind === "unit"
+    );
+    if (oldestIndex < 0) break;
+    const [dropped] = translationQueue.splice(oldestIndex, 1);
+    logEvent("translation-drop", `kind=unit seq=${dropped.seq} reason=queue-limit`);
+    finishUnitTranslation(dropped, "");
+    queuedUnits -= 1;
+  }
+}
+
+function collapseTimedOutUnitBacklog() {
+  let keptLatest = false;
+  for (let index = translationQueue.length - 1; index >= 0; index -= 1) {
+    const item = translationQueue[index];
+    if (item.generation !== captureGeneration || item.kind !== "unit") continue;
+    if (!keptLatest) {
+      keptLatest = true;
+      continue;
+    }
+    translationQueue.splice(index, 1);
+    logEvent("translation-drop", `kind=unit seq=${item.seq} reason=timeout-backlog`);
+    finishUnitTranslation(item, "");
+  }
 }
 
 function scheduleDraftTranslation(text, seq, timing = activeTiming) {
@@ -1404,6 +1438,16 @@ function emitTranslatedItem(item, translated, { streaming = false } = {}) {
   }, item.timing).catch(() => undefined);
 }
 
+function finishUnitTranslation(item, translated) {
+  sendCaptureMessage({
+    type: "CAPTURE_TRANSLATED",
+    lines: [{ text: item.text, translated: String(translated || "").trim() }],
+    seq: item.seq,
+    unit: true,
+    streaming: false
+  }, item.timing).catch(() => undefined);
+}
+
 function createTranslationController() {
   if (typeof AbortController === "function") return new AbortController();
   // 仅供旧测试/旧运行环境兜底；现代 Chrome 始终使用原生 AbortController。
@@ -1412,6 +1456,23 @@ function createTranslationController() {
     signal,
     abort() { signal.aborted = true; }
   };
+}
+
+async function withTranslationDeadline(work, controller) {
+  let deadlineTimer = null;
+  const deadline = new Promise((_, reject) => {
+    deadlineTimer = setTimeout(() => {
+      const error = new Error("translation_timeout");
+      error.name = "TimeoutError";
+      reject(error);
+      controller.abort();
+    }, TRANSLATE_DEADLINE_MS);
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    if (deadlineTimer !== null) clearTimeout(deadlineTimer);
+  }
 }
 
 async function runTranslationWorker() {
@@ -1449,7 +1510,7 @@ async function runTranslationWorker() {
     const startedAt = monotonicNow();
     logEvent("translation-request", `kind=${item.kind} model=${TRANSLATE_MODEL} chars=${Array.from(item.text).length}`);
     try {
-      translated = await translateWithRetry(item.text, {
+      translated = await withTranslationDeadline(translateWithRetry(item.text, {
         model: TRANSLATE_MODEL,
         memory: recentTranslationMemory(),
         signal: controller.signal,
@@ -1464,9 +1525,12 @@ async function runTranslationWorker() {
           }
           emitTranslatedItem(item, current, { streaming: true });
         }
-      });
+      }), controller);
     } catch (error) {
-      if (error?.name !== "AbortError" && !item.superseded) {
+      if (error?.name === "TimeoutError" && !item.superseded) {
+        logEvent("translation-timeout", `kind=${item.kind} seq=${item.seq} deadline=${TRANSLATE_DEADLINE_MS}ms`);
+        if (item.kind === "unit") collapseTimedOutUnitBacklog();
+      } else if (error?.name !== "AbortError" && !item.superseded) {
         logEvent("translation-failed", `kind=${item.kind} chars=${Array.from(item.text).length}`);
       }
       translated = lastStreamed;
@@ -1486,13 +1550,7 @@ async function runTranslationWorker() {
     if (item.kind === "unit") {
       if (translated && translated !== item.text) rememberTranslation(item.text, translated);
       // 完成时再发一次冻结值；失败则空译文让显示端稳定回退原文。
-      sendCaptureMessage({
-        type: "CAPTURE_TRANSLATED",
-        lines: [{ text: item.text, translated }],
-        seq: item.seq,
-        unit: true,
-        streaming: false
-      }, item.timing).catch(() => undefined);
+      finishUnitTranslation(item, translated);
     } else if (translated && translated !== lastStreamed) {
       emitTranslatedItem(item, translated, { streaming: false });
     }

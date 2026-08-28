@@ -77,10 +77,11 @@ function makeElement(tag = "div") {
   Object.assign(video, { videoWidth: 1280, videoHeight: 720, currentSrc: "https://cdn.test/movie.mp4", paused: false, muted: false, readyState: 4 });
   class HTMLVideoElement {}
   Object.setPrototypeOf(video, HTMLVideoElement.prototype);
+  const videos = [video];
   const document = {
     documentElement: root,
     fullscreenElement: null,
-    querySelectorAll: (selector) => selector === "video" ? [video] : [],
+    querySelectorAll: (selector) => selector === "video" ? videos : [],
     createElement: (tag) => makeElement(tag),
     addEventListener: (type, listener) => {
       const previous = documentListeners[type];
@@ -117,7 +118,12 @@ function makeElement(tag = "div") {
     }
   };
   vm.createContext(ctx);
-  vm.runInContext(fs.readFileSync("content.js", "utf8"), ctx, { filename: "content.js" });
+  const contentSource = fs.readFileSync("content.js", "utf8");
+  const instrumentedContent = contentSource.replace(/\n\}\)\(\);\s*$/, `
+    window.__koeTest = { findCueAt, findVideo, mergeOfflineCues, resetOfflineCues };
+  })();`);
+  check(instrumentedContent !== contentSource, "content test hooks are injected into the IIFE");
+  vm.runInContext(instrumentedContent, ctx, { filename: "content.js" });
   const send = (message) => messageListeners.forEach((listener) => listener(message));
 
   // 操作提示和错误状态属于 Koe 控制器，不能为了显示状态而在视频页挂载 UI。
@@ -390,6 +396,57 @@ function makeElement(tag = "div") {
   documentListeners.timeupdate({ target: video });
   check(overlay.shadowRoot.querySelector(".original").textContent === "Long active cue.",
     "an ended short overlap does not hide an earlier cue that is still active");
+
+  let videoLayoutReads = 0;
+  video.getBoundingClientRect = () => {
+    videoLayoutReads += 1;
+    return { left: 100, bottom: 700, width: 900, height: 500 };
+  };
+  const largerVideo = makeElement("video");
+  Object.assign(largerVideo, {
+    videoWidth: 1920, videoHeight: 1080, currentTime: 321, duration: 1_000,
+    currentSrc: "https://cdn.test/main.m3u8", paused: false, muted: false, readyState: 4,
+    getBoundingClientRect: () => {
+      videoLayoutReads += 1;
+      return { left: 0, bottom: 720, width: 1280, height: 720 };
+    }
+  });
+  Object.setPrototypeOf(largerVideo, HTMLVideoElement.prototype);
+  const adVideo = makeElement("video");
+  Object.assign(adVideo, {
+    videoWidth: 3840, videoHeight: 2160, currentTime: 999, duration: 1_000,
+    currentSrc: "https://cdn.test/preroll.m3u8", paused: false, muted: false, readyState: 4,
+    parentElement: { id: "preroll-ad", className: "advert-player", parentElement: null },
+    getBoundingClientRect: () => {
+      videoLayoutReads += 1;
+      return { left: 0, bottom: 720, width: 1920, height: 1080 };
+    }
+  });
+  Object.setPrototypeOf(adVideo, HTMLVideoElement.prototype);
+  videos.push(largerVideo, adVideo);
+  send({ type: "OFFLINE_DISCOVER", jobId: "offline-1" });
+  const discoveredContext = sentMessages.filter((message) => message.type === "MEDIA_CONTEXT").at(-1);
+  check(discoveredContext?.currentTimeMs === 321_000,
+    "video selection prefers the largest real player over a larger ad player");
+  check(videoLayoutReads === videos.length,
+    `video selection reads layout once per candidate (actual ${videoLayoutReads}/${videos.length})`);
+  videos.splice(1);
+
+  const cueIndex = ctx.window.__koeTest;
+  cueIndex.resetOfflineCues();
+  cueIndex.mergeOfflineCues([
+    { cueId: "long-prefix", startMs: 0, endMs: 10_000, text: "Long prefix." },
+    { cueId: "ended-overlap", startMs: 5_000, endMs: 6_000, text: "Ended overlap." }
+  ], 1);
+  check(cueIndex.findCueAt(7_000)?.cueId === "long-prefix",
+    "cue prefix index still finds an earlier long overlap");
+  const cappedCues = Array.from({ length: 2_001 }, (_, index) => ({
+    cueId: `cap-${index}`, startMs: index * 1_000, endMs: index * 1_000 + 500, text: `Cue ${index}`
+  }));
+  cueIndex.resetOfflineCues();
+  cueIndex.mergeOfflineCues(cappedCues, 1);
+  check(cueIndex.findCueAt(100) === null && cueIndex.findCueAt(2_000_100)?.cueId === "cap-2000",
+    "cue prefix index stays aligned after the 2,000-cue cap");
 
   documentListeners.emptied({ target: video });
   check(overlay.shadowRoot.querySelector(".original").textContent === "",

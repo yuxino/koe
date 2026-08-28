@@ -55,6 +55,7 @@
   let awaitingMediaReset = false;
   const pendingUnitTranslations = new Map();
   let offlineCues = [];
+  let offlineCueMaxEnds = [];
   let offlineRevision = 0;
   let visibleOfflineCueId = "";
   let offlineFrameRequest = 0;
@@ -499,10 +500,16 @@
     offlineCues = [...byId.values()]
       .sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs)
       .slice(-2_000);
+    let maximumEnd = 0;
+    offlineCueMaxEnds = offlineCues.map((cue) => {
+      maximumEnd = Math.max(maximumEnd, cue.endMs);
+      return maximumEnd;
+    });
   }
 
   function resetOfflineCues() {
     offlineCues = [];
+    offlineCueMaxEnds = [];
     offlineRevision = 0;
     visibleOfflineCueId = "";
   }
@@ -569,20 +576,19 @@
   function findCueAt(currentMs) {
     let low = 0;
     let high = offlineCues.length - 1;
-    let candidate = null;
+    let candidateIndex = -1;
     while (low <= high) {
       const middle = Math.floor((low + high) / 2);
       const cue = offlineCues[middle];
       if (cue.startMs <= currentMs) {
-        candidate = cue;
+        candidateIndex = middle;
         low = middle + 1;
       } else {
         high = middle - 1;
       }
     }
-    if (!candidate) return null;
-    let index = offlineCues.indexOf(candidate);
-    while (index >= 0) {
+    let index = candidateIndex;
+    while (index >= 0 && offlineCueMaxEnds[index] > currentMs) {
       const cue = offlineCues[index];
       if (cue.startMs <= currentMs && currentMs < cue.endMs) return cue;
       index -= 1;
@@ -920,25 +926,33 @@
 
   function findVideo() {
     const videos = [...document.querySelectorAll("video")];
-    const score = (video) => {
+    let preferred = null;
+    let preferredScore = -Infinity;
+    let fallback = null;
+    let fallbackScore = -Infinity;
+    for (const video of videos) {
       const rect = video.getBoundingClientRect?.() || {};
       const intrinsicArea = Number(video.videoWidth || 0) * Number(video.videoHeight || 0);
       const layoutArea = Number(rect.width || 0) * Number(rect.height || 0);
       const ancestry = [video, video.parentElement, video.parentElement?.parentElement]
         .map((node) => `${node?.id || ""} ${node?.className || ""}`).join(" ");
       const adLike = /(^|[\s_-])(ad|ads|advert|preroll|postroll|pauseroll|gifvideo)([\s_-]|$)/i.test(ancestry);
-      if (adLike) return -1_000_000_000_000;
-      return Math.max(intrinsicArea, layoutArea)
-        + (video.muted ? 0 : 1_000_000)
-        + (video.paused ? 0 : 500_000);
-    };
-    const main = videos
-      .filter((video) => {
-        const rect = video.getBoundingClientRect?.() || {};
-        return Math.max(Number(video.videoWidth || 0), Number(rect.width || 0)) >= 320
-          && Math.max(Number(video.videoHeight || 0), Number(rect.height || 0)) >= 180;
-      })
-      .sort((left, right) => score(right) - score(left))[0];
-    return main || videos.sort((left, right) => score(right) - score(left))[0] || null;
+      const candidateScore = adLike
+        ? -1_000_000_000_000
+        : Math.max(intrinsicArea, layoutArea)
+          + (video.muted ? 0 : 1_000_000)
+          + (video.paused ? 0 : 500_000);
+      if (!fallback || candidateScore > fallbackScore) {
+        fallback = video;
+        fallbackScore = candidateScore;
+      }
+      const wideEnough = Math.max(Number(video.videoWidth || 0), Number(rect.width || 0)) >= 320;
+      const tallEnough = Math.max(Number(video.videoHeight || 0), Number(rect.height || 0)) >= 180;
+      if (wideEnough && tallEnough && (!preferred || candidateScore > preferredScore)) {
+        preferred = video;
+        preferredScore = candidateScore;
+      }
+    }
+    return preferred || fallback;
   }
 })();

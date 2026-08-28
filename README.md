@@ -26,7 +26,7 @@ The lightweight installer supports an **Apple silicon Mac running macOS 15 or la
 
 Keep the selected folder in a permanent location. Koe runs directly from that unpacked folder, so moving or deleting it after loading will make the extension unavailable.
 
-Open a video, choose Koe, then click the button labelled **开启本地精准字幕**. No Xcode, Swift toolchain, administrator access, or extension ID is required. The download is about 2–3 MB and expands to about 6–7 MB; the installer selects one of two precompiled Helpers and writes about 3 MB. The Git download contains neither the 1.7 GB development build cache nor the Whisper model.
+Open a video, choose Koe, then click the button labelled **开启本地精准字幕**. No Xcode, Swift toolchain, administrator access, or extension ID is required. The download is about 2 MB and expands to about 4–5 MB; the installer selects one of two precompiled Helpers and writes about 1.7 MB. The Git download contains neither the development build cache nor the Whisper model.
 
 The first local-caption session downloads the approximately 626 MB Whisper model and reuses the local cache afterward. Alternatively, switch to **DashScope** in the side panel and save your own API Key.
 

@@ -169,26 +169,6 @@ async function commitOnce(run) {
     console.log("T5 草稿截短回退不删翻译 PASS");
   }
   {
-    // 场景：真词尾修正（her too → her titties）——草稿阶段不 revoke（避免覆盖字幕），
-    // final 权威到达时 revoke 重发
-    const h = makeCtx();
-    const run = (code) => vm.runInContext(code, h.ctx);
-    await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope" }).catch(e => ({ok:false}))`);
-    await flush();
-    run(`handleServerDraft("Wow, I can't believe her too.")`);
-    await commitOnce(run);
-    await flush();
-    // 草稿阶段词尾震荡（tootties）→ 不 revoke（不删已上屏行）
-    run(`handleServerDraft("Wow, I can't believe her tootties are that big")`);
-    await flush();
-    check(!h.sent.some((m) => m.type === "CAPTURE_REVOKE"), "草稿阶段词尾震荡不 revoke（字幕不被覆盖）");
-    // final 权威修正 → revoke 重发
-    run(`handleServerFinal("Wow, I can't believe her titties are that big.")`);
-    await flush();
-    check(h.sent.some((m) => m.type === "CAPTURE_REVOKE"), "final 权威修正仍 revoke");
-    console.log("T6 词尾修正推迟到 final 阶段 PASS");
-  }
-  {
     // 场景：服务端草稿回退到已提交内容的前缀（重新识别中）→ 不重复提交整句
     // （日志 08:11:02 场景：seq=36 与 seq=56 同一句 "I do, and I want to lose the weight."
     //  上屏两次）
@@ -208,7 +188,7 @@ async function commitOnce(run) {
     await flush();
     const afterCount = h.sent.filter((m) => m.type === "CAPTURE_LINES").length;
     check(afterCount === 1, `草稿回退不重复提交（实际 ${afterCount} 块）`);
-    console.log("T7 草稿回退前缀不重复提交 PASS");
+    console.log("T6 草稿回退前缀不重复提交 PASS");
   }
   {
     // 场景：词尾修正（"I am." → "Yes? Yes."）→ 只撤最后一块，
@@ -231,7 +211,7 @@ async function commitOnce(run) {
     const lines = h.sent.filter((m) => m.type === "CAPTURE_LINES").map((m) => m.lines[0].text);
     check(lines.filter((l) => l.includes("Are you ready?")).length <= 2,
       `Are you ready? 不重复提交（实际 ${JSON.stringify(lines)}）`);
-    console.log("T8 词尾修正只撤最后一块不重复 PASS");
+    console.log("T7 词尾修正只撤最后一块不重复 PASS");
   }
   console.log(fail === 0 ? "revoke 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);

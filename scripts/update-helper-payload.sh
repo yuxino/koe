@@ -40,6 +40,7 @@ build_variant() {
     /usr/bin/swift build
     --package-path "$helper_root"
     --scratch-path "$scratch_root"
+    --only-use-versions-from-resolved-file
     -c release
     --product koe-helper
   )
@@ -76,6 +77,13 @@ build_variant() {
 
   /bin/mkdir -p "$staged_variant"
   /usr/bin/install -m 755 "$source_binary" "$staged_payload"
+  # Swift release binaries retain a large local symbol table. Published payloads
+  # do not need those private symbols; strip them before restoring the stable
+  # ad-hoc identity that the installer and package checks expect.
+  /usr/bin/strip -x "$staged_payload" \
+    || fail "$variant 无法移除本地符号。"
+  /usr/bin/codesign --force --sign - --identifier koe-helper "$staged_payload" >/dev/null 2>&1 \
+    || fail "$variant 无法恢复临时代码签名。"
   /usr/bin/codesign --verify --strict "$staged_payload" 2>/dev/null \
     || fail "$variant 代码签名结构无效。"
   payload_hash="$(/usr/bin/shasum -a 256 "$staged_payload" | /usr/bin/awk '{ print $1 }')"

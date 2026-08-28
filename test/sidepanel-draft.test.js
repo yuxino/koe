@@ -45,6 +45,35 @@ function makeElement(tag) {
   return el;
 }
 
+function makeClock() {
+  let now = 0;
+  let nextId = 1;
+  const timers = new Map();
+
+  const setTimer = (fn, delay = 0) => {
+    const id = nextId;
+    nextId += 1;
+    timers.set(id, { at: now + Math.max(0, Number(delay) || 0), fn });
+    return id;
+  };
+  const clearTimer = (id) => timers.delete(id);
+  const advance = (duration) => {
+    const target = now + Math.max(0, Number(duration) || 0);
+    while (true) {
+      const due = [...timers.entries()]
+        .filter(([, timer]) => timer.at <= target)
+        .sort((a, b) => a[1].at - b[1].at || a[0] - b[0])[0];
+      if (!due) break;
+      const [id, timer] = due;
+      timers.delete(id);
+      now = timer.at;
+      timer.fn();
+    }
+    now = target;
+  };
+  return { setTimer, clearTimer, advance };
+}
+
 function makeCtx() {
   const els = {};
   const feed = makeElement("feed");
@@ -52,13 +81,16 @@ function makeCtx() {
   feed.querySelectorAll = () => [];
   const messageListeners = [];
   const domReadyListeners = [];
+  const clock = makeClock();
 
   const ctx = {
-    console, Date, JSON, String, Number, Boolean, Promise, Math, Set, Intl, setTimeout, clearTimeout,
+    console, Date, JSON, String, Number, Boolean, Promise, Math, Set, Intl,
+    setTimeout: clock.setTimer,
+    clearTimeout: clock.clearTimer,
     window: {
       addEventListener: (ev, fn) => { if (ev === "error" || ev === "unhandledrejection") return; },
-      setTimeout: (fn, delay) => { setTimeout(fn, Number(delay) || 0); return 0; },
-      clearTimeout: () => undefined
+      setTimeout: clock.setTimer,
+      clearTimeout: clock.clearTimer
     },
     document: {
       querySelector: (sel) => {
@@ -85,7 +117,7 @@ function makeCtx() {
   };
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "sidepanel.js"), "utf8"), ctx, { filename: "sidepanel.js" });
-  return { ctx, els, feed, messageListeners, domReadyListeners };
+  return { ctx, els, feed, messageListeners, domReadyListeners, advanceTimers: clock.advance };
 }
 
 function sendMessage(h, message) {
@@ -237,7 +269,7 @@ const WAIT = 380;
       type: "LIVE_PARTIAL", jobId: "epoch-job", mediaEpoch: 3,
       seq: 6, lines: [{ text: "epoch three draft" }]
     });
-    await new Promise((r) => setTimeout(r, WAIT));
+    h.advanceTimers(WAIT);
     sendMessage(h, {
       type: "LIVE_SUBTITLES", jobId: "epoch-job", mediaEpoch: 3,
       seq: 7, unit: true, lines: [{ text: "epoch three stable" }]
@@ -277,7 +309,7 @@ const WAIT = 380;
       type: "LIVE_PARTIAL", jobId: "epoch-job", mediaEpoch: 3,
       seq: 9, lines: [{ text: "stale draft" }]
     });
-    await new Promise((r) => setTimeout(r, WAIT));
+    h.advanceTimers(WAIT);
     const visibleTexts = h.feed.children.map(captionText).join("\n");
     check(!visibleTexts.includes("旧 epoch 译文")
         && !visibleTexts.includes("stale offline")
@@ -329,7 +361,7 @@ const WAIT = 380;
     sendMessage(h, { type: "LIVE_STATE", jobId: "live-1", status: "live", translate: true });
     sendMessage(h, { type: "LIVE_PARTIAL", jobId: "live-1", seq: 1, lines: [{ text: "Okayur assets and make" }] });
     // raw 草稿防抖 300ms 后才显示
-    await new Promise((r) => setTimeout(r, WAIT));
+    h.advanceTimers(WAIT);
     check(h.feed.children.length === 1, "翻译模式原文草稿行出现");
     const draft = h.feed.children[0];
     check(draft.dataset.kind === "raw", `原文草稿 kind=raw（实际 ${draft.dataset.kind}）`);
@@ -340,7 +372,7 @@ const WAIT = 380;
     check(draftText(h.feed).includes("奥凯尤尔资产并让"), "译文草稿内容正确");
     // 译文展示期：原文草稿不打扰（5 秒内不覆盖译文）
     sendMessage(h, { type: "LIVE_PARTIAL", jobId: "live-1", seq: 2, lines: [{ text: "Identify your assets and make good" }] });
-    await new Promise((r) => setTimeout(r, WAIT));
+    h.advanceTimers(WAIT);
     check(draftText(h.feed).includes("奥凯尤尔资产并让"), "译文展示期原文不覆盖（保持译文）");
     console.log("T1 翻译模式: 原文草稿 → 译文替换 → 不打扰 PASS");
   }
@@ -350,7 +382,7 @@ const WAIT = 380;
     h.els["#translate-toggle"].checked = false;
     sendMessage(h, { type: "LIVE_STATE", jobId: "live-2", status: "live", translate: false });
     sendMessage(h, { type: "LIVE_PARTIAL", jobId: "live-2", seq: 1, lines: [{ text: "Hey there" }] });
-    await new Promise((r) => setTimeout(r, WAIT));
+    h.advanceTimers(WAIT);
     check(h.feed.children.length === 1, "原文模式草稿行出现");
     check(draftText(h.feed).includes("Hey there"), "原文草稿内容正确");
     console.log("T2 原文模式草稿正常 PASS");
@@ -361,16 +393,16 @@ const WAIT = 380;
     h.els["#translate-toggle"].checked = false;
     sendMessage(h, { type: "LIVE_STATE", jobId: "live-3", status: "live", translate: false });
     sendMessage(h, { type: "LIVE_PARTIAL", jobId: "live-3", seq: 1, lines: [{ text: "Okayur assets and make" }] });
-    await new Promise((r) => setTimeout(r, WAIT));
-    // 服务端整体换词：互不包含 → correcting（8ms 后自动移除）
+    h.advanceTimers(WAIT);
+    // 服务端整体换词：互不包含 → correcting（320ms 后自动移除）
     sendMessage(h, { type: "LIVE_PARTIAL", jobId: "live-3", seq: 2, lines: [{ text: "Identify your assets and make good" }] });
-    await new Promise((r) => setTimeout(r, WAIT));
+    h.advanceTimers(WAIT);
     const draft = h.feed.children[0];
     check(draft.classList.contains("correcting"), "修正时草稿加 correcting 过渡类");
     // 等过渡类自动移除后再发正常延伸 → 不加 correcting
-    await new Promise((r) => setTimeout(r, WAIT));
+    h.advanceTimers(WAIT);
     sendMessage(h, { type: "LIVE_PARTIAL", jobId: "live-3", seq: 3, lines: [{ text: "Identify your assets and make good on" }] });
-    await new Promise((r) => setTimeout(r, WAIT));
+    h.advanceTimers(WAIT);
     check(!draft.classList.contains("correcting"), "正常延伸不加 correcting（过渡类已移除）");
     console.log("T3 草稿修正过渡 PASS");
   }

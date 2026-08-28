@@ -11,7 +11,7 @@ const runtime = {
 Object.defineProperty(runtime, "lastError", { get() { lastErrorReads += 1; return undefined; } });
 const ctx = {
   console, Date, JSON, String, Number, Boolean, Promise, Math, URL,
-  setTimeout, clearTimeout, setInterval: () => 0, clearInterval() {},
+  setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
   chrome: {
     runtime,
     contextMenus: {
