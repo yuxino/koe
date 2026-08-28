@@ -9,6 +9,8 @@ Koe 快速安装
 3. 点击“加载已解压的扩展程序”，选择本目录中的“Koe Extension”。
 4. 打开视频，点 Koe，再点“开启本地精准字幕”。
 
+请把本目录放在长期保留的位置。ego-lite 会直接从“Koe Extension”读取扩展；加载后移动或删除本目录，会导致 Koe 不可用。
+
 无需 Xcode、Swift、管理员权限或手动填写扩展 ID。下载约 2 MB，解压约 6 MB；安装器会按系统从两套 Helper 中只安装一套，另写入约 3 MB。macOS 15–25 可本地识别原文；macOS 26+ 安装 Apple 语言包后可本机翻译。
 
 安装包不包含 Whisper 模型；首次开启本地字幕时会另外下载约 626 MB，之后复用本机缓存。
@@ -30,6 +32,8 @@ Install ego-lite first: https://www.egolite.ai/download
 2. When installation finishes, enable Developer mode on the ego-lite extensions page.
 3. Choose Load unpacked and select “Koe Extension” from this folder.
 4. Open a video, choose Koe, then click “开启本地精准字幕”.
+
+Keep this folder in a permanent location. ego-lite reads the extension directly from “Koe Extension”; moving or deleting this folder after loading will make Koe unavailable.
 
 No Xcode, Swift toolchain, administrator access, or extension ID is required. The download is about 2 MB and expands to about 6 MB; the installer chooses one of two Helpers and writes about 3 MB. macOS 15–25 transcribes locally in the original language. macOS 26+ can translate locally after its Apple language pack is installed.
 

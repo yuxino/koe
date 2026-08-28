@@ -24,6 +24,10 @@ function rememberTranslation(source, target) {
 function recentTranslationMemory() {
   return translationMemory.slice(-5);
 }
+
+function clearTranslationMemory() {
+  translationMemory.length = 0;
+}
 const PCM_FRAME_BYTES = 3_200; // 100 ms, 16 kHz mono int16
 const LOCAL_PCM_BATCH_FRAMES = 5; // Native Messaging 每 500 ms 一包，降低开销又不积累延迟
 const PCM_QUEUE_LIMIT = 20; // 最多保留约 2 秒；网络追不上时优先保持实时
@@ -349,6 +353,9 @@ async function runStartCapture({
   if (operationId !== captureOperationId) throw captureCancelledError();
   stopping = false;
   assertCaptureOperation(operationId);
+  // Translation memory is useful for reconnecting the same media session, but
+  // must not carry dialogue from one capture job into the next video/tab.
+  if (nextJobId && nextJobId !== captureJobId) clearTranslationMemory();
   captureSource = source === "mic" ? "mic" : "tab";
   captureEngine = ["webspeech", "local"].includes(engine) ? engine : "dashscope";
   captureApiKey = String(apiKey || "").trim();
@@ -1806,6 +1813,12 @@ async function stopCapture({ cancelPendingStarts = true } = {}) {
   stopping = true;
   socketResetOperationId += 1;
   captureGeneration += 1;
+  clearTranslationMemory();
+  capturedAudioSamples = 0;
+  captureClockStartedAt = monotonicNow();
+  taskAudioOffsetMs = 0;
+  activeSentenceId = 0;
+  activeTiming = {};
   cancelPendingSocketStart();
   clearRetryTimer();
   if (recognition) {

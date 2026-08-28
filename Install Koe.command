@@ -285,6 +285,7 @@ print "安装内容约 3 MB；Whisper 模型会在首次开启本地字幕时单
 print ""
 print "最后一步：在 ego-lite 的扩展页开启开发者模式，选择“加载已解压的扩展程序”。"
 print "请选择：$extension_root"
+print "请把这个目录保留在当前位置；加载后移动或删除它，会导致 Koe 扩展不可用。"
 
 if [[ "${KOE_SKIP_BROWSER_OPEN:-0}" != "1" ]]; then
   /usr/bin/open -a "ego lite" "chrome://extensions" 2>/dev/null \

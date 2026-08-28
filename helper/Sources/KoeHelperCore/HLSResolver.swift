@@ -88,7 +88,82 @@ public struct AssembledMedia: Sendable {
     }
 }
 
-private final class SafeRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+private enum BoundedDownloadError: Error {
+    case tooLarge
+}
+
+package final class HLSDownloadBudget: @unchecked Sendable {
+    private let lock = NSLock()
+    private let maximumBytes: Int
+    private var consumed = 0
+
+    package init(maximumBytes: Int) {
+        self.maximumBytes = max(0, maximumBytes)
+    }
+
+    package func canFit(_ count: Int) -> Bool {
+        guard count >= 0 else { return false }
+        lock.lock()
+        defer { lock.unlock() }
+        return count <= maximumBytes - consumed
+    }
+
+    package func consume(_ count: Int) -> Bool {
+        guard count >= 0 else { return false }
+        lock.lock()
+        defer { lock.unlock() }
+        guard count <= maximumBytes - consumed else { return false }
+        consumed += count
+        return true
+    }
+
+    package var consumedBytes: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return consumed
+    }
+}
+
+private final class BoundedDataLoader: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate, @unchecked Sendable {
+    private let maximumBytes: Int
+    private let budget: HLSDownloadBudget?
+    private let stateLock = NSLock()
+    private var continuation: CheckedContinuation<Data, Error>?
+    private var session: URLSession?
+    private var task: URLSessionDataTask?
+    private var payload = Data()
+    private var acceptedResponse = false
+    private var cancellationRequested = false
+    private var finished = false
+
+    init(maximumBytes: Int, budget: HLSDownloadBudget?) {
+        self.maximumBytes = max(0, maximumBytes)
+        self.budget = budget
+    }
+
+    func load(_ request: URLRequest, configuration: URLSessionConfiguration) async throws -> Data {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let queue = OperationQueue()
+                queue.maxConcurrentOperationCount = 1
+                let session = URLSession(configuration: configuration, delegate: self, delegateQueue: queue)
+                let task = session.dataTask(with: request)
+
+                stateLock.lock()
+                self.continuation = continuation
+                self.session = session
+                self.task = task
+                let shouldCancel = cancellationRequested
+                stateLock.unlock()
+
+                task.resume()
+                if shouldCancel { task.cancel() }
+            }
+        } onCancel: {
+            self.requestCancellation()
+        }
+    }
+
     func urlSession(
         _ session: URLSession,
         task: URLSessionTask,
@@ -98,24 +173,127 @@ private final class SafeRedirectDelegate: NSObject, URLSessionTaskDelegate, @unc
     ) {
         completionHandler(request.url.map(MediaURLSafety.isResolvedPublic) == true ? request : nil)
     }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        let result: Result<Void, Error>
+        if let http = response as? HTTPURLResponse {
+            if http.url.map(MediaURLSafety.isResolvedPublic) != true {
+                result = .failure(HLSResolverError.unsafeRedirect)
+            } else if !(200..<300).contains(http.statusCode) {
+                result = .failure(HLSResolverError.http(http.statusCode))
+            } else if response.expectedContentLength >= 0,
+                      response.expectedContentLength > Int64(maximumBytes) {
+                result = .failure(BoundedDownloadError.tooLarge)
+            } else if response.expectedContentLength >= 0,
+                      budget?.canFit(Int(response.expectedContentLength)) == false {
+                result = .failure(BoundedDownloadError.tooLarge)
+            } else {
+                result = .success(())
+            }
+        } else {
+            result = .failure(HLSResolverError.invalidResponse)
+        }
+
+        switch result {
+        case .success:
+            stateLock.lock()
+            acceptedResponse = true
+            stateLock.unlock()
+            completionHandler(.allow)
+        case let .failure(error):
+            completionHandler(.cancel)
+            dataTask.cancel()
+            finish(.failure(error))
+        }
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        var overflow = false
+        stateLock.lock()
+        if !finished {
+            if !acceptedResponse
+                || data.count > maximumBytes - payload.count
+                || budget?.consume(data.count) == false {
+                overflow = true
+            } else {
+                payload.append(data)
+            }
+        }
+        stateLock.unlock()
+
+        if overflow {
+            dataTask.cancel()
+            finish(.failure(BoundedDownloadError.tooLarge))
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error {
+            stateLock.lock()
+            let wasCancelled = cancellationRequested
+            stateLock.unlock()
+            if wasCancelled, (error as? URLError)?.code == .cancelled {
+                finish(.failure(CancellationError()))
+            } else {
+                finish(.failure(error))
+            }
+            return
+        }
+
+        stateLock.lock()
+        let complete = acceptedResponse
+        let data = payload
+        stateLock.unlock()
+        finish(complete ? .success(data) : .failure(HLSResolverError.invalidResponse))
+    }
+
+    private func requestCancellation() {
+        stateLock.lock()
+        cancellationRequested = true
+        let task = self.task
+        stateLock.unlock()
+        task?.cancel()
+    }
+
+    private func finish(_ result: Result<Data, Error>) {
+        stateLock.lock()
+        guard !finished else {
+            stateLock.unlock()
+            return
+        }
+        finished = true
+        let continuation = self.continuation
+        let session = self.session
+        self.continuation = nil
+        self.session = nil
+        task = nil
+        payload = Data()
+        stateLock.unlock()
+
+        session?.invalidateAndCancel()
+        continuation?.resume(with: result)
+    }
+}
+
+private func makeHLSURLSessionConfiguration() -> URLSessionConfiguration {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.timeoutIntervalForRequest = 20
+    configuration.timeoutIntervalForResource = 45
+    configuration.httpMaximumConnectionsPerHost = 4
+    return configuration
 }
 
 public actor HLSResolver {
-    private let session: URLSession
     private let root: URL
     private let maximumManifestBytes = 2 * 1_024 * 1_024
     private let maximumChunkBytes = 128 * 1_024 * 1_024
 
     public init(root: URL? = nil) throws {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 20
-        configuration.timeoutIntervalForResource = 45
-        configuration.httpMaximumConnectionsPerHost = 4
-        self.session = URLSession(
-            configuration: configuration,
-            delegate: SafeRedirectDelegate(),
-            delegateQueue: nil
-        )
         let base = root ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("koe-helper-hls", isDirectory: true)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -138,25 +316,44 @@ public actor HLSResolver {
         let matching = playlist.segments.filter { $0.endMs > window.startMs && $0.startMs < window.endMs }
         guard !matching.isEmpty, matching.count <= 40 else { throw HLSResolverError.emptyPlaylist }
         var pieces = Array<Data?>(repeating: nil, count: matching.count)
+        let downloadBudget = HLSDownloadBudget(maximumBytes: maximumChunkBytes)
+        let maximumChunkBytes = self.maximumChunkBytes
         try await withThrowingTaskGroup(of: (Int, Data).self) { group in
             var nextIndex = 0
             let initial = min(4, matching.count)
             for _ in 0..<initial {
                 let index = nextIndex
                 nextIndex += 1
-                group.addTask { [session] in
-                    (index, try await Self.data(at: matching[index].url, headers: headers, session: session))
+                group.addTask {
+                    (index, try await Self.data(
+                        at: matching[index].url,
+                        headers: headers,
+                        maximumBytes: maximumChunkBytes,
+                        budget: downloadBudget,
+                        tooLargeError: .invalidResponse
+                    ))
                 }
             }
-            while let (index, data) = try await group.next() {
-                pieces[index] = data
-                if nextIndex < matching.count {
-                    let index = nextIndex
-                    nextIndex += 1
-                    group.addTask { [session] in
-                        (index, try await Self.data(at: matching[index].url, headers: headers, session: session))
+            do {
+                while let (index, data) = try await group.next() {
+                    pieces[index] = data
+                    if nextIndex < matching.count {
+                        let index = nextIndex
+                        nextIndex += 1
+                        group.addTask {
+                            (index, try await Self.data(
+                                at: matching[index].url,
+                                headers: headers,
+                                maximumBytes: maximumChunkBytes,
+                                budget: downloadBudget,
+                                tooLargeError: .invalidResponse
+                            ))
+                        }
                     }
                 }
+            } catch {
+                group.cancelAll()
+                throw error
             }
         }
         let completePieces = try pieces.map { piece -> Data in
@@ -169,7 +366,9 @@ public actor HLSResolver {
             let initialization = try await Self.data(
                 at: initializationSegmentURL,
                 headers: headers,
-                session: session
+                maximumBytes: maximumChunkBytes,
+                budget: downloadBudget,
+                tooLargeError: .invalidResponse
             )
             let total = completePieces.reduce(initialization.count) { $0 + $1.count }
             guard total > initialization.count, total <= maximumChunkBytes else {
@@ -208,23 +407,49 @@ public actor HLSResolver {
     }
 
     private func text(at url: URL, headers: [String: String]) async throws -> String {
-        let data = try await Self.data(at: url, headers: headers, session: session)
-        guard data.count <= maximumManifestBytes else { throw HLSResolverError.manifestTooLarge }
+        let data = try await Self.data(
+            at: url,
+            headers: headers,
+            maximumBytes: maximumManifestBytes,
+            tooLargeError: .manifestTooLarge
+        )
         guard let value = String(data: data, encoding: .utf8), !value.isEmpty else {
             throw HLSResolverError.emptyPlaylist
         }
         return value
     }
 
-    private static func data(at url: URL, headers: [String: String], session: URLSession) async throws -> Data {
+    private static func data(
+        at url: URL,
+        headers: [String: String],
+        maximumBytes: Int,
+        budget: HLSDownloadBudget? = nil,
+        tooLargeError: HLSResolverError,
+        configuration: URLSessionConfiguration = makeHLSURLSessionConfiguration()
+    ) async throws -> Data {
         guard MediaURLSafety.isResolvedPublic(url) else { throw HLSResolverError.unsafeRedirect }
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
         for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw HLSResolverError.invalidResponse }
-        guard http.url.map(MediaURLSafety.isResolvedPublic) == true else { throw HLSResolverError.unsafeRedirect }
-        guard (200..<300).contains(http.statusCode) else { throw HLSResolverError.http(http.statusCode) }
-        return data
+        do {
+            return try await BoundedDataLoader(maximumBytes: maximumBytes, budget: budget)
+                .load(request, configuration: configuration)
+        } catch BoundedDownloadError.tooLarge {
+            throw tooLargeError
+        }
+    }
+
+    package static func boundedDataForCoreChecks(
+        at url: URL,
+        maximumBytes: Int,
+        configuration: URLSessionConfiguration
+    ) async throws -> Data {
+        try await data(
+            at: url,
+            headers: [:],
+            maximumBytes: maximumBytes,
+            tooLargeError: .manifestTooLarge,
+            configuration: configuration
+        )
     }
 
     /// Extracts an AAC/ADTS elementary stream from MPEG-TS HLS segments.

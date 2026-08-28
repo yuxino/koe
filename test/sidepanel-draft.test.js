@@ -310,6 +310,18 @@ const WAIT = 380;
     console.log("T0.5 离线同 seq 译文修订 upsert PASS");
   }
   {
+    const h = makeCtx();
+    h.ctx.chrome.storage.local.get = async () => ({ koeApiKey: "" });
+    h.els["#api-key"].focus = () => undefined;
+    h.els["#capture-mode"].value = "tab-dashscope";
+    vm.runInContext(`activeTab = { id: 9, url: "https://example.com/video" };`, h.ctx);
+    await vm.runInContext(`startForTab()`, h.ctx);
+    check(h.els["#hint"].textContent.includes("本地精准")
+        && !h.els["#hint"].textContent.includes("Chrome 内置"),
+      `DashScope 缺 Key 时只推荐仍存在的本地精准模式（实际 ${JSON.stringify(h.els["#hint"].textContent)}）`);
+    console.log("T0.6 DashScope 缺 Key 的恢复指引 PASS");
+  }
+  {
     // 场景：翻译模式 —— 原文草稿先显示（防抖后），译文到达立即替换，译文展示期原文不打扰
     const h = makeCtx();
     h.els["#translate-toggle"].checked = true;
@@ -477,6 +489,23 @@ const WAIT = 380;
     check(h.els["#hint"].textContent.includes("仍保持关闭"),
       `保存后明确提示保持关闭（实际 ${JSON.stringify(h.els["#hint"].textContent)}）`);
     console.log("T9 保存设置不改变字幕开关 PASS");
+  }
+  {
+    // 清空按钮不仅清当前面板，也必须清掉后台 session 历史；否则重开面板
+    // restoreTranscript 会把用户刚清掉的字幕全部恢复回来。
+    const h = makeCtx();
+    const sent = [];
+    h.ctx.chrome.runtime.sendMessage = async (message) => {
+      sent.push(message);
+      return { ok: true };
+    };
+    const clear = h.els["#clear-feed"].listeners.click;
+    check(typeof clear === "function", "清空字幕记录绑定 click 处理器");
+    if (clear) clear();
+    await new Promise((resolve) => setImmediate(resolve));
+    check(sent.some((message) => message.type === "CLEAR_TRANSCRIPT"),
+      `清空字幕记录同步清除后台历史（实际 ${JSON.stringify(sent)}）`);
+    console.log("T9.1 清空字幕记录持久生效 PASS");
   }
   console.log(fail === 0 ? "sidepanel-draft 回归全部通过" : `${fail} 项失败`);
   process.exit(fail === 0 ? 0 : 1);

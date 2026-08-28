@@ -127,6 +127,12 @@ function makeContext() {
   result = await vm.runInContext("getTranscript()", ctx);
   check(result.rows.length === 1 && result.rows[0]?.jobId === "live-new",
     "new-session clear is serialized after old writes and before new rows");
+
+  const clearResponse = await vm.runInContext(`handle({ type: "CLEAR_TRANSCRIPT" }, {})`, ctx);
+  await settle();
+  result = await vm.runInContext("getTranscript()", ctx);
+  check(clearResponse.ok === true && result.rows.length === 0,
+    "the side-panel clear command removes restored session history");
   console.log(fail === 0 ? "transcript-consistency regression PASS" : `${fail} failures`);
   process.exit(fail ? 1 : 0);
 })().catch((error) => { console.error(error); process.exit(1); });

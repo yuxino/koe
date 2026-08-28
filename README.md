@@ -24,6 +24,8 @@ The lightweight installer supports an **Apple silicon Mac running macOS 15 or la
 2. Double-click `Install Koe.command` in the extracted folder. If macOS blocks it, Control-click the file, choose **Open**, and confirm once.
 3. The installer opens `chrome://extensions` in ego-lite. Enable **Developer mode**, choose **Load unpacked**, and select the extracted repository root (the folder that directly contains `manifest.json`). For a dedicated release ZIP, select its `Koe Extension` folder instead.
 
+Keep the selected folder in a permanent location. Koe runs directly from that unpacked folder, so moving or deleting it after loading will make the extension unavailable.
+
 Open a video, choose Koe, then click the button labelled **开启本地精准字幕**. No Xcode, Swift toolchain, administrator access, or extension ID is required. The download is about 2–3 MB and expands to about 6–7 MB; the installer selects one of two precompiled Helpers and writes about 3 MB. The Git download contains neither the 1.7 GB development build cache nor the Whisper model.
 
 The first local-caption session downloads the approximately 626 MB Whisper model and reuses the local cache afterward. Alternatively, switch to **DashScope** in the side panel and save your own API Key.

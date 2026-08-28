@@ -78,23 +78,45 @@ const fakeTabStream = () => ({ getTracks: () => [{ stop() {} }] });
     await flush();
     check(r.ok === true, "first start ok");
     check(tabCalls === 1, "getUserMedia called once for first start");
+    run(`rememberTranslation("first caption", "第一句字幕")`);
+    check(run(`recentTranslationMemory().length`) === 1,
+      "translation memory records the active job");
     run(`emitSeq = 41`);
     await run(`stopRecognitionOnly()`);
     check(run(`Boolean(stream)`) === true, "stream kept after recognition-only stop");
     check(run(`Boolean(monitorAudio)`) === true, "monitor kept after recognition-only stop");
+    check(run(`recentTranslationMemory()[0]?.source`) === "first caption",
+      "recognition-only stop preserves translation memory for reconnect");
     r = await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope", jobId: "job-1", mediaEpoch: 3 }).then(r => ({ok:true})).catch(e => ({ok:false,error:e.message}))`);
     await flush();
     check(r.ok === true, "restart ok");
     check(tabCalls === 1, "getUserMedia NOT called again (stream reused)");
     check(run(`emitSeq`) === 41, "same job reconnect preserves the monotonic subtitle sequence");
+    check(run(`recentTranslationMemory()[0]?.target`) === "第一句字幕",
+      "same-job reconnect preserves translation memory");
     run(`emitSeq = 42`);
     await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope", jobId: "job-1", mediaEpoch: 4 })`);
     await flush();
     check(run(`emitSeq`) === 0, "a new media epoch resets the subtitle sequence");
+    check(run(`recentTranslationMemory().length`) === 1,
+      "the same job keeps translation memory across a timeline reconnect");
     run(`emitSeq = 7`);
     await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope", jobId: "job-2", mediaEpoch: 0 })`);
     await flush();
     check(run(`emitSeq`) === 0, "a genuinely new job resets the subtitle sequence");
+    check(run(`recentTranslationMemory().length`) === 0,
+      "a new job clears translation memory from the previous capture");
+    run(`rememberTranslation("second caption", "第二句字幕")`);
+    run(`capturedAudioSamples = 96_000; captureClockStartedAt = 123; activeTiming = { beginTimeMs: 4000, endTimeMs: 6000 };`);
+    await run(`stopCapture()`);
+    check(run(`recentTranslationMemory().length`) === 0,
+      "a full stop clears translation memory");
+    check(run(`capturedAudioSamples === 0 && captureClockStartedAt > 123 && Object.keys(activeTiming).length === 0`) === true,
+      "a full stop clears the captured-audio clock and active timing");
+    r = await run(`startCapture({ streamId: "s1", translate: false, apiKey: "k", source: "tab", engine: "dashscope", jobId: "job-2", mediaEpoch: 0 })`);
+    await flush();
+    check(r.audioPositionMs === 0,
+      "reauthorizing the same job and epoch after a full stop starts at audio position zero");
     console.log("T1 stream reuse PASS");
   }
   {

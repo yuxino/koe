@@ -1,5 +1,7 @@
 # Koe Local-First Workspace Design
 
+> **Status note (2026-08-28):** The automatic-start portions of this historical design are superseded. Current Koe sessions are off by default and begin only after the user explicitly starts subtitles; the HLS and local tab-audio routing details below still describe the two local processing paths.
+
 ## Product direction
 
 Koe should feel like a quiet subtitle instrument, not a developer console. The side panel becomes a reading-first workspace: a compact brand and session header, one clear session action, three frequently used display preferences, and a transcript that owns the remaining height. Empty, preparing, gesture-required, live, and failed states are expressed in plain language near the action that resolves them. Copy and clear remain available for the transcript; diagnostic-log controls leave the normal interface. Technical details continue to exist in the background ring buffer for development and automated tests, but are no longer part of the user’s everyday workflow.

@@ -126,10 +126,7 @@ elements.overlaySize.addEventListener("change", async () => {
   elements.hint.textContent = "页面字幕大小已更新";
 });
 elements.copyAll.addEventListener("click", () => void copyTranscript());
-elements.clearFeed.addEventListener("click", () => {
-  resetFeed();
-  elements.hint.textContent = "字幕记录已清空";
-});
+elements.clearFeed.addEventListener("click", () => void clearTranscriptHistory());
 elements.copyLogs.addEventListener("click", () => void copyDiagnosticLogs());
 elements.clearLogs.addEventListener("click", () => void clearDiagnosticLogs());
 elements.scrollBottom.addEventListener("click", () => smoothScrollToBottom());
@@ -502,6 +499,7 @@ async function startForTab() {
     return;
   }
   let busyTimer = 0;
+  let validationHint = "";
   try {
     elements.hint.textContent = "① 正在读取设置…";
     const { koeApiKey } = await chrome.storage.local.get("koeApiKey");
@@ -512,7 +510,8 @@ async function startForTab() {
     const keyless = mode.engine !== "dashscope";
     if (!keyless && !apiKey) {
       elements.settings.open = true;
-      elements.hint.textContent = "② DashScope 模式需要 API Key；或把字幕模式切换为「Chrome 内置」。";
+      validationHint = "② DashScope 模式需要 API Key；或把字幕模式切换为「本地精准」。";
+      elements.hint.textContent = validationHint;
       elements.apiKey.focus();
       return;
     }
@@ -556,6 +555,8 @@ async function startForTab() {
     if (busyTimer) window.clearTimeout(busyTimer);
     setButtonBusy(false);
     await refreshState();
+    // refreshState 会把空闲状态恢复成快捷键提示；设置校验失败时应保留可执行的恢复指引。
+    if (validationHint) elements.hint.textContent = validationHint;
   }
 }
 
@@ -819,6 +820,18 @@ function resetFeed() {
   lastUnitSeq = 0;
   lastDraftSeq = 0;
   pendingOriginalUnits.clear();
+}
+
+async function clearTranscriptHistory() {
+  resetFeed();
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "CLEAR_TRANSCRIPT" });
+    if (!response?.ok) throw new Error(response?.error || "后台未确认清空");
+    elements.hint.textContent = "字幕记录已清空";
+  } catch {
+    // 当前面板已经清空，但必须诚实说明持久历史未能同步清除。
+    elements.hint.textContent = "当前字幕已清空，但历史记录清除失败；重开面板后可能恢复";
+  }
 }
 
 // 切 tab 后新面板实例接管会话：从后台拉回本次会话已上屏的字幕历史。

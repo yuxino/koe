@@ -11,6 +11,130 @@ private func check(_ condition: @autoclosure () -> Bool, _ label: String) {
     }
 }
 
+private final class BoundedResponseURLProtocol: URLProtocol, @unchecked Sendable {
+    private final class ScenarioStore: @unchecked Sendable {
+        private let lock = NSLock()
+        private var contentLength: Int64?
+        private var chunks: [Data] = []
+        private var chunkDelayMilliseconds = 5
+        private var generation = 0
+        private var sentBytes = 0
+        private var stopCount = 0
+
+        func configure(contentLength: Int64?, chunks: [Data], chunkDelayMilliseconds: Int) {
+            lock.lock()
+            self.contentLength = contentLength
+            self.chunks = chunks
+            self.chunkDelayMilliseconds = chunkDelayMilliseconds
+            generation += 1
+            sentBytes = 0
+            stopCount = 0
+            lock.unlock()
+        }
+
+        func snapshot() -> (contentLength: Int64?, chunks: [Data], delayMilliseconds: Int, generation: Int) {
+            lock.lock()
+            defer { lock.unlock() }
+            return (contentLength, chunks, chunkDelayMilliseconds, generation)
+        }
+
+        func recordSent(_ count: Int, generation: Int) {
+            lock.lock()
+            if self.generation == generation { sentBytes += count }
+            lock.unlock()
+        }
+
+        func recordStop(generation: Int) {
+            lock.lock()
+            if self.generation == generation { stopCount += 1 }
+            lock.unlock()
+        }
+
+        func metrics() -> (sentBytes: Int, stopCount: Int) {
+            lock.lock()
+            defer { lock.unlock() }
+            return (sentBytes, stopCount)
+        }
+    }
+
+    private static let scenarios = ScenarioStore()
+    private let lifecycleLock = NSLock()
+    private var stopped = false
+    private var chunks: [Data] = []
+    private var chunkDelayMilliseconds = 5
+    private var generation = 0
+
+    static func configure(contentLength: Int64?, chunks: [Data], chunkDelayMilliseconds: Int = 5) {
+        scenarios.configure(
+            contentLength: contentLength,
+            chunks: chunks,
+            chunkDelayMilliseconds: chunkDelayMilliseconds
+        )
+    }
+
+    static func metrics() -> (sentBytes: Int, stopCount: Int) {
+        scenarios.metrics()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == "203.0.113.10"
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        guard let url = request.url else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        let scenario = Self.scenarios.snapshot()
+        chunks = scenario.chunks
+        chunkDelayMilliseconds = scenario.delayMilliseconds
+        generation = scenario.generation
+        let headers = scenario.contentLength.map { ["Content-Length": String($0)] }
+        let response = HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: headers
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        scheduleChunk(at: 0)
+    }
+
+    override func stopLoading() {
+        lifecycleLock.lock()
+        let shouldRecord = !stopped
+        stopped = true
+        lifecycleLock.unlock()
+        if shouldRecord { Self.scenarios.recordStop(generation: generation) }
+    }
+
+    private func scheduleChunk(at index: Int) {
+        DispatchQueue.global().asyncAfter(
+            deadline: .now() + .milliseconds(chunkDelayMilliseconds)
+        ) { [weak self] in
+            guard let self, !self.isStopped else { return }
+            guard index < self.chunks.count else {
+                self.client?.urlProtocolDidFinishLoading(self)
+                return
+            }
+            let chunk = self.chunks[index]
+            Self.scenarios.recordSent(chunk.count, generation: self.generation)
+            self.client?.urlProtocol(self, didLoad: chunk)
+            self.scheduleChunk(at: index + 1)
+        }
+    }
+
+    private var isStopped: Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        return stopped
+    }
+}
+
 let preferenceDefaults = KoePreferences.normalized(KoePreferences())
 check(preferenceDefaults.koeTranslate == true,
       "native preference defaults enable translation")
@@ -344,6 +468,57 @@ do {
 } catch {
     check(false, "private network source returns the expected error")
 }
+
+let boundedConfiguration = URLSessionConfiguration.ephemeral
+boundedConfiguration.protocolClasses = [BoundedResponseURLProtocol.self]
+let boundedURL = URL(string: "https://203.0.113.10/test.m3u8")!
+
+BoundedResponseURLProtocol.configure(
+    contentLength: 2_048,
+    chunks: (0..<8).map { _ in Data(repeating: 1, count: 256) },
+    chunkDelayMilliseconds: 20
+)
+do {
+    _ = try await HLSResolver.boundedDataForCoreChecks(
+        at: boundedURL,
+        maximumBytes: 1_024,
+        configuration: boundedConfiguration
+    )
+    check(false, "oversized Content-Length is rejected before its body is buffered")
+} catch HLSResolverError.manifestTooLarge {
+    try? await Task.sleep(for: .milliseconds(60))
+    let metrics = BoundedResponseURLProtocol.metrics()
+    check(metrics.sentBytes < 2_048 && metrics.stopCount > 0,
+          "oversized Content-Length is rejected before its body is buffered (sent=\(metrics.sentBytes), stops=\(metrics.stopCount))")
+} catch {
+    check(false, "oversized Content-Length returns the expected bounded-read error")
+}
+
+BoundedResponseURLProtocol.configure(
+    contentLength: nil,
+    chunks: (0..<6).map { _ in Data(repeating: 2, count: 256) }
+)
+do {
+    _ = try await HLSResolver.boundedDataForCoreChecks(
+        at: boundedURL,
+        maximumBytes: 1_024,
+        configuration: boundedConfiguration
+    )
+    check(false, "unknown-length bodies are cancelled as soon as the stream crosses its limit")
+} catch HLSResolverError.manifestTooLarge {
+    try? await Task.sleep(for: .milliseconds(25))
+    let metrics = BoundedResponseURLProtocol.metrics()
+    check(metrics.sentBytes < 1_536 && metrics.stopCount > 0,
+          "unknown-length bodies are cancelled as soon as the stream crosses its limit")
+} catch {
+    check(false, "unknown-length overflow returns the expected bounded-read error")
+}
+
+let downloadBudget = HLSDownloadBudget(maximumBytes: 1_024)
+check(downloadBudget.canFit(1_024) && downloadBudget.consume(700),
+      "an HLS media window shares one bounded download budget")
+check(!downloadBudget.consume(400) && downloadBudget.consumedBytes == 700,
+      "parallel HLS fragments cannot exceed their aggregate byte budget")
 
 let windows = WindowScheduler().windows(currentTimeMs: 170_000, durationMs: 260_000)
 check(windows.first == MediaWindow(startMs: 166_000, endMs: 186_000, emitAfterMs: 166_000),

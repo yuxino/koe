@@ -1,5 +1,7 @@
 # Koe Local-First Workspace Implementation Plan
 
+> **Status note (2026-08-28):** This plan has been implemented with one later product-policy change: Koe is now off by default and starts subtitles only after an explicit user action. References below to click-free or automatic HLS startup are retained as historical context, not current behavior.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Make Koe remember ordinary settings across extension reinstalls, default to translation, support non-HLS sites through a private local-live Whisper fallback, and replace the debug-like side panel with a polished subtitle workspace.

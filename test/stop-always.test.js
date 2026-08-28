@@ -225,6 +225,102 @@ function makeCtx({ captureStarted = false } = {}) {
     console.log("T7 ignored reset recovery PASS");
   }
   {
+    // offscreen 自己上报终止错误后不会再主动释放流。后台必须用错误发生时的
+    // 精确身份补发 STOP；旧 epoch 的迟到错误则不能碰当前会话。
+    const h = makeCtx({ captureStarted: true });
+    vm.runInContext(`
+      tabStates.set(1, {
+        tabId: 1, frameId: 0, jobId: "job-error", mediaEpoch: 4,
+        captureStarted: true, userStopped: false, status: "live",
+        engine: "dashscope", source: "tab", translate: true
+      });
+      captureTabId = 1;
+    `, h.ctx);
+    await vm.runInContext(`handleCaptureError({
+      type: "CAPTURE_ERROR", tabId: 1, jobId: "job-error", mediaEpoch: 4,
+      error: "terminal websocket failure"
+    })`, h.ctx);
+    const preciseErrorStop = h.sent.find((message) => message.type === "CAPTURE_STOP");
+    const failedState = vm.runInContext(`({ captureTabId, state: tabStates.get(1) })`, h.ctx);
+    check(preciseErrorStop?.tabId === 1 && preciseErrorStop?.jobId === "job-error"
+        && preciseErrorStop?.mediaEpoch === 4 && preciseErrorStop?.force !== true,
+      `terminal capture errors release the exact offscreen session (${JSON.stringify(preciseErrorStop)})`);
+    check(failedState.captureTabId === null && failedState.state.captureStarted === false
+        && failedState.state.status === "error",
+      "terminal capture errors leave one visible stopped/error state");
+
+    const stale = makeCtx({ captureStarted: true });
+    vm.runInContext(`
+      tabStates.set(1, {
+        tabId: 1, frameId: 0, jobId: "job-current", mediaEpoch: 7,
+        captureStarted: true, userStopped: false, status: "live",
+        engine: "dashscope", source: "tab", translate: true
+      });
+      captureTabId = 1;
+    `, stale.ctx);
+    const staleResult = await vm.runInContext(`handleCaptureError({
+      type: "CAPTURE_ERROR", tabId: 1, jobId: "job-current", mediaEpoch: 6,
+      error: "late failure from old epoch"
+    })`, stale.ctx);
+    const current = vm.runInContext(`({ captureTabId, state: tabStates.get(1) })`, stale.ctx);
+    check(staleResult.ignored === true
+        && current.captureTabId === 1 && current.state.captureStarted === true
+        && current.state.status === "live",
+      "a stale-epoch capture error cannot stop or rewrite the current session");
+    check(!stale.sent.some((message) => message.type === "CAPTURE_STOP"),
+      "a stale-epoch capture error sends no offscreen stop");
+    console.log("T7.1 terminal error cleanup + stale epoch fencing PASS");
+  }
+  {
+    // 错误清理会等待 offscreen 释放；等待期间同一 tab 可以被用户重开成新身份。
+    // 旧清理恢复后不得把新会话再次写成 error 或发送新身份的停止消息。
+    const h = makeCtx({ captureStarted: true });
+    let releaseCleanup;
+    let cleanupEntered = false;
+    h.ctx.chrome.runtime.sendMessage = (message) => {
+      h.sent.push(JSON.parse(JSON.stringify(message)));
+      if (!cleanupEntered && ["CAPTURE_STOP", "LIVE_STOP"].includes(message.type)) {
+        cleanupEntered = true;
+        return new Promise((resolve) => { releaseCleanup = resolve; });
+      }
+      return Promise.resolve({ ok: true });
+    };
+    vm.runInContext(`
+      tabStates.set(1, {
+        tabId: 1, frameId: 0, jobId: "job-old-error", mediaEpoch: 2,
+        captureStarted: true, userStopped: false, status: "live",
+        engine: "dashscope", source: "tab", translate: true
+      });
+      captureTabId = 1;
+    `, h.ctx);
+    const oldCleanup = vm.runInContext(`handleCaptureError({
+      type: "CAPTURE_ERROR", tabId: 1, jobId: "job-old-error", mediaEpoch: 2,
+      error: "old terminal failure"
+    })`, h.ctx);
+    await flush();
+    check(cleanupEntered && typeof releaseCleanup === "function",
+      "terminal cleanup reaches an asynchronous release boundary");
+    vm.runInContext(`
+      Object.assign(tabStates.get(1), {
+        jobId: "job-new-live", mediaEpoch: 3, captureStarted: true,
+        userStopped: false, status: "live", captureNeedsGesture: false,
+        issueKind: "", issueCode: "", stageDetail: "new session live"
+      });
+      captureTabId = 1;
+    `, h.ctx);
+    releaseCleanup({ ok: true });
+    await oldCleanup;
+    const reopened = vm.runInContext(`({ captureTabId, state: tabStates.get(1) })`, h.ctx);
+    check(reopened.captureTabId === 1 && reopened.state.jobId === "job-new-live"
+        && reopened.state.mediaEpoch === 3 && reopened.state.captureStarted === true
+        && reopened.state.status === "live" && reopened.state.issueKind === "",
+      "old terminal cleanup cannot overwrite a reopened session");
+    check(!h.sent.some((message) => message.type === "CAPTURE_STOP"
+        && (message.jobId === "job-new-live" || message.mediaEpoch === 3)),
+      "old terminal cleanup never targets the reopened identity");
+    console.log("T7.2 terminal cleanup re-open race PASS");
+  }
+  {
     // B 正在等待停止 A 时，更新的 C 启动可先完成；B 的 await 晚到后不能
     // 再抢回全局 captureTabId。
     const h = makeCtx({ captureStarted: false });
