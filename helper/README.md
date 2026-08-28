@@ -12,14 +12,14 @@ Koe Helper 是“本地精准”模式使用的 macOS Native Messaging 处理器
 
 ## 安装
 
-1. 下载并完整解压 Koe。
-2. 双击仓库根目录的 `Install Koe.command`，或在终端运行：
+1. 从 [Koe Releases](https://github.com/yuxino/koe/releases) 下载并完整解压 `Koe-*-macOS-arm64.zip`。
+2. 双击解压目录中的 `Install Koe.command`，或在终端运行：
 
    ```sh
    ./Install\ Koe.command
    ```
 
-3. 在 ego-lite 的 `chrome://extensions` 开启开发者模式。GitHub 源码 ZIP 加载包含 `manifest.json` 的仓库根目录；专用 Release ZIP 加载其中的 `Koe Extension`。
+3. 安装器会把扩展复制到固定目录并打开 ego-lite；Koe 会自动出现。Google Chrome 仍需在 `chrome://extensions` 手动加载 `~/Library/Application Support/Koe/Extension`。
 
 无需手动填写扩展 ID，也无需安装 Swift/Xcode。首次识别会下载并缓存 `large-v3-v20240930_626MB` 模型。
 
