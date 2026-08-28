@@ -12,7 +12,7 @@ Koe Helper 是“本地精准”模式使用的 macOS Native Messaging 处理器
 
 ## 安装
 
-1. 从 [Koe Releases](https://github.com/yuxino/koe/releases) 下载并完整解压 `Koe-*-macOS-arm64.zip`。
+1. 从 [Koe 最新版本](https://github.com/yuxino/koe/releases/latest) 下载并完整解压 `Koe-*-macOS-arm64.zip`。
 2. 双击解压目录中的 `Install Koe.command`，或在终端运行：
 
    ```sh
