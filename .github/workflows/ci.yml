@@ -28,7 +28,6 @@ jobs:
           node-version: 22
 
       - name: Test extension
-        shell: zsh
         run: |
           set -euo pipefail
           for test_file in test/*.test.js; do
