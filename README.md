@@ -20,7 +20,7 @@ Koe generates manually controlled, media-synced subtitles with optional Simplifi
 
 The lightweight installer supports an **Apple silicon Mac running macOS 15 or later**. The guided and tested browser path is [ego-lite](https://www.egolite.ai/download). Intel Macs are not supported yet.
 
-1. [Download the Koe ZIP](https://github.com/yuxino/koe/archive/refs/heads/main.zip) and fully extract it.
+1. [Download the latest Koe release](https://github.com/yuxino/koe/releases/latest) and fully extract the `Koe-*-macOS-arm64.zip` asset.
 2. Double-click `Install Koe.command` in the extracted folder. If macOS blocks it, Control-click the file, choose **Open**, and confirm once.
 3. The installer opens `chrome://extensions` in ego-lite. Enable **Developer mode**, choose **Load unpacked**, and select the extracted repository root (the folder that directly contains `manifest.json`). For a dedicated release ZIP, select its `Koe Extension` folder instead.
 

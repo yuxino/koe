@@ -20,7 +20,7 @@ Koe 为浏览器视频生成可手动开关、与播放进度同步的字幕，�
 
 当前轻量安装支持 **Apple Silicon Mac、macOS 15 或更高版本**；引导和验证过的浏览器路径是 [ego-lite](https://www.egolite.ai/download)。Intel Mac 暂不支持。
 
-1. [下载 Koe ZIP](https://github.com/yuxino/koe/archive/refs/heads/main.zip) 并完整解压。
+1. [下载最新 Koe Release](https://github.com/yuxino/koe/releases/latest)，并完整解压其中的 `Koe-*-macOS-arm64.zip` 安装包。
 2. 双击解压目录中的 `Install Koe.command`。如果 macOS 阻止直接打开，请按住 Control 点击它，选择**打开**并确认一次。
 3. 安装器会打开 ego-lite 的 `chrome://extensions`：开启**开发者模式**，选择**加载已解压的扩展程序**，然后选择刚才解压的 Koe 仓库根目录（里面直接有 `manifest.json`）。专用 Release ZIP 则选择其中的 `Koe Extension`。
 
