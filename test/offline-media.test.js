@@ -69,6 +69,7 @@ function makeContext() {
       alarms: { create: async () => undefined, onAlarm: { addListener: () => undefined } },
       tabs: {
         query: async () => [],
+        get: async (tabId) => ({ id: tabId, url: "https://video.example/watch", discarded: false }),
         sendMessage: async (tabId, message) => contentMessages.push({ tabId, message: JSON.parse(JSON.stringify(message)) }),
         onRemoved: { addListener: () => undefined },
         onUpdated: { addListener: () => undefined },
@@ -103,7 +104,7 @@ function makeContext() {
   const run = (source) => vm.runInContext(source, h.ctx);
   await run(`bootPromise`);
   run(`tabStates.set(31, { tabId: 31, frameId: 2, jobId: "offline-upgrade-31", engine: "local" })`);
-  await run(`refreshKnownContentScripts()`);
+  await run(`refreshRestoredContentScripts({ includeInactiveKnownSessions: true })`);
   check(h.scriptInjections.some((details) => details.target?.tabId === 31
       && details.target?.frameIds?.[0] === 2
       && details.files?.includes("content.js")),

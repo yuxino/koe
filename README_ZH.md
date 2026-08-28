@@ -20,17 +20,17 @@ Koe 为浏览器视频生成可手动开关、与播放进度同步的字幕，�
 
 当前轻量安装支持 **Apple Silicon Mac、macOS 15 或更高版本**；引导和验证过的浏览器路径是 [ego-lite](https://www.egolite.ai/download)。Intel Mac 暂不支持。
 
-1. [下载最新 Koe Release](https://github.com/yuxino/koe/releases/latest)，并完整解压其中的 `Koe-*-macOS-arm64.zip` 安装包。
+1. 从 [Koe Releases](https://github.com/yuxino/koe/releases) 下载 **v1.9.5 或更高版本**的 `Koe-*-macOS-arm64.zip`，并完整解压。v1.9.4 及更早安装包不包含自动恢复。
 2. 双击解压目录中的 `Install Koe.command`。如果 macOS 阻止直接打开，请按住 Control 点击它，选择**打开**并确认一次。
-3. 安装器会打开 ego-lite 的 `chrome://extensions`：开启**开发者模式**，选择**加载已解压的扩展程序**，然后选择刚才解压的 Koe 仓库根目录（里面直接有 `manifest.json`）。专用 Release ZIP 则选择其中的 `Koe Extension`。
+3. 安装器会把扩展复制到固定的应用支持目录并打开 ego-lite；Koe 会自动出现，无需再进入扩展页或反复导入。
 
-请把选中的目录放在长期保留的位置。Koe 会直接从这个已解压目录运行；加载后移动或删除它，会导致扩展不可用。
+安装后可以移动或删除解压目录。安装器会注册一个仅限当前用户的轻量启动项：只在正版 ego-lite 的本地套接字存在时运行，核对浏览器发布者以及 Koe 的固定 ID、版本、安装路径和文件哈希，再恢复扩展；它不读取网页内容、浏览历史、Cookie 或 Koe 设置。恢复过程只使用一个不含用户页面的隔离空任务，并在校验完成后立即关闭。若要停用自动恢复，运行 `~/Library/Application Support/Koe/Disable Koe Auto-Load.command`；当前浏览器里的 Koe 会保留到退出，下次重开不再自动恢复。重新运行安装器即可恢复。
 
-现在打开视频，点 Koe，再点**开启本地精准字幕**即可。无需安装 Xcode、Swift 或管理员权限，也无需查找或填写扩展 ID。下载约 2 MB，解压约 4–5 MB；安装器会从两套预编译 Helper 中按系统选择一套，另写入约 1.7 MB。Git 下载不包含开发缓存，也不包含 Whisper 模型。
+现在打开视频，点 Koe，再点**开启本地精准字幕**即可。无需安装 Xcode、Swift 或管理员权限，也无需查找或填写扩展 ID。下载约 1.5–2 MB，解压约 4 MB；本次版本安装约 3 MB，旧版 Helper 可能保留用于排障。Git 下载不包含开发缓存，也不包含 Whisper 模型。
 
 首次开启本地字幕会自动下载约 626 MB 的 Whisper 模型，之后复用本机缓存。如果只想用云端识别，也可以在侧边栏切换到 **DashScope** 并保存自己的 API Key。
 
-> 从 1.8.3 或更早的开发版升级：固定扩展 ID 会让 1.9.0 显示为一个新的扩展。请先移除旧 Koe，再按上面的步骤加载新目录；旧扩展中保存的 DashScope API Key 需要重新填写。1.9.0 之后升级时，请先把新文件覆盖到浏览器当前加载的原目录，再运行安装器并点“重新加载”；只把新 ZIP 解压到另一目录后点击旧扩展的“重新加载”，不会更新扩展代码。
+> 从 1.8.3 或更早的开发版升级：固定扩展 ID 会让 1.9.0 显示为一个新的扩展。请先移除旧 Koe，再运行安装器；旧扩展中保存的 DashScope API Key 需要重新填写。若此前手动加载过 1.9.0–1.9.4，运行新版安装器后正常退出并重新打开 ego-lite 一次，浏览器会切换到固定安装路径；若扩展页仍显示旧目录，请先移除旧 Koe，再重新运行安装器。之后升级只需重新运行安装器。
 
 ## Koe Helper
 
@@ -38,7 +38,7 @@ Koe 为浏览器视频生成可手动开关、与播放进度同步的字幕，�
 
 当前 Git 下载属于开发预览：Helper 尚未使用 Developer ID 签名和 Apple 公证。安装器只会在 SHA-256 与签名结构校验通过后，移除复制出来的 Helper 的下载隔离标记；安装器自身若被 macOS 拦截，仍需按住 Control 点击并选择**打开**。正式无提示分发仍需要签名、公证的 PKG/DMG。
 
-安装器也会写入 Google Chrome 的兼容注册，但目前只自动打开并验证 ego-lite；Chrome 需要手动打开 `chrome://extensions` 并加载同一目录。
+安装器也会写入 Google Chrome 的兼容注册，但自动恢复只针对 ego-lite。Chrome 仍需在 `chrome://extensions` 手动加载 `~/Library/Application Support/Koe/Extension`。
 
 需要从源码重建 Helper 的开发者才需要 Swift 6，以及 macOS 15.4 与 macOS 26 SDK。一次更新两套轻量载荷：
 

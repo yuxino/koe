@@ -5,6 +5,8 @@ readonly repo_root="${0:A:h:h}"
 readonly manifest_path="$repo_root/manifest.json"
 readonly source_payload_root="$repo_root/helper/bin"
 readonly installer="$repo_root/Install Koe.command"
+readonly autoloader="$repo_root/release/ensure-ego-extension.zsh"
+readonly disable_autoload="$repo_root/release/Disable Koe Auto-Load.command"
 
 fail() {
   print -u2 "Koe 打包失败：$1"
@@ -12,7 +14,8 @@ fail() {
 }
 
 [[ -f "$manifest_path" && -x "$source_payload_root/macos-arm64/koe-helper" \
-    && -x "$source_payload_root/macos26-arm64/koe-helper" && -x "$installer" ]] \
+    && -x "$source_payload_root/macos26-arm64/koe-helper" && -x "$installer" \
+    && -x "$autoloader" && -x "$disable_autoload" ]] \
   || fail "缺少扩展、Helper 或安装器。"
 
 dist_root="${KOE_DIST_DIR:-$repo_root/dist}"
@@ -84,6 +87,8 @@ for relative_path in $extension_files; do
 done
 
 /usr/bin/install -m 755 "$installer" "$bundle_root/Install Koe.command"
+/usr/bin/install -m 755 "$autoloader" "$resources_root/ensure-ego-extension.zsh"
+/usr/bin/install -m 755 "$disable_autoload" "$resources_root/Disable Koe Auto-Load.command"
 /usr/bin/install -m 644 "$repo_root/release/README.txt" "$bundle_root/README.txt"
 /usr/bin/install -m 644 "$repo_root/THIRD_PARTY_NOTICES.md" "$bundle_root/THIRD_PARTY_NOTICES.md"
 /usr/bin/install -m 644 "$repo_root/licenses/argmax-oss-swift-MIT.txt" "$bundle_root/licenses/argmax-oss-swift-MIT.txt"

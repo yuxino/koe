@@ -20,17 +20,17 @@ Koe generates manually controlled, media-synced subtitles with optional Simplifi
 
 The lightweight installer supports an **Apple silicon Mac running macOS 15 or later**. The guided and tested browser path is [ego-lite](https://www.egolite.ai/download). Intel Macs are not supported yet.
 
-1. [Download the latest Koe release](https://github.com/yuxino/koe/releases/latest) and fully extract the `Koe-*-macOS-arm64.zip` asset.
+1. From [Koe Releases](https://github.com/yuxino/koe/releases), download and fully extract the `Koe-*-macOS-arm64.zip` asset from **v1.9.5 or later**. v1.9.4 and earlier do not include automatic restore.
 2. Double-click `Install Koe.command` in the extracted folder. If macOS blocks it, Control-click the file, choose **Open**, and confirm once.
-3. The installer opens `chrome://extensions` in ego-lite. Enable **Developer mode**, choose **Load unpacked**, and select the extracted repository root (the folder that directly contains `manifest.json`). For a dedicated release ZIP, select its `Koe Extension` folder instead.
+3. The installer copies the extension to a stable application-support directory and opens ego-lite. Koe appears automatically; there is no extension-page step and no repeated import after reopening the browser.
 
-Keep the selected folder in a permanent location. Koe runs directly from that unpacked folder, so moving or deleting it after loading will make the extension unavailable.
+You can move or delete the extracted folder afterward. The installer registers a small per-user startup item that runs only while a genuine ego-lite local socket exists. It verifies the browser publisher plus Koe's fixed ID, version, managed path, and file hashes before restoring the extension; it does not read page content, browsing history, cookies, or Koe settings. Restoration uses an isolated empty task with no user pages and closes it immediately after verification. Run `~/Library/Application Support/Koe/Disable Koe Auto-Load.command` to disable restore. Koe remains in the current browser process until you quit, but the next launch will not restore it. Rerun the installer to enable restore again.
 
-Open a video, choose Koe, then click the button labelled **开启本地精准字幕**. No Xcode, Swift toolchain, administrator access, or extension ID is required. The download is about 2 MB and expands to about 4–5 MB; the installer selects one of two precompiled Helpers and writes about 1.7 MB. The Git download contains neither the development build cache nor the Whisper model.
+Open a video, choose Koe, then click the button labelled **开启本地精准字幕**. No Xcode, Swift toolchain, administrator access, or extension ID is required. The download is about 1.5–2 MB and expands to about 4 MB; the current version installs about 3 MB, while an older Helper may remain for diagnostics. The Git download contains neither the development build cache nor the Whisper model.
 
 The first local-caption session downloads the approximately 626 MB Whisper model and reuses the local cache afterward. Alternatively, switch to **DashScope** in the side panel and save your own API Key.
 
-> Upgrading from development version 1.8.3 or earlier: version 1.9.0's fixed extension ID makes this a one-time new extension install. Remove the old Koe entry, then load the new folder; a DashScope API Key stored by the old extension must be entered again. For upgrades after 1.9.0, first replace the files in the same folder currently loaded by the browser, then rerun the installer and click Reload. Extracting a new ZIP elsewhere and reloading the old entry does not update its code.
+> Upgrading from development version 1.8.3 or earlier: version 1.9.0's fixed extension ID makes this a one-time new extension install. Remove the old Koe entry, then run the installer; a DashScope API Key stored by the old extension must be entered again. If 1.9.0–1.9.4 was loaded manually, run the new installer and quit/reopen ego-lite once so it switches to the managed path. If the extensions page still shows the old folder, remove that old Koe entry and rerun the installer. Later upgrades only require rerunning the installer.
 
 ## Koe Helper
 
@@ -38,7 +38,7 @@ Koe Helper is required only for Local accurate mode. The download contains two p
 
 The current Git download is a developer preview. The Helper is not yet Developer ID signed or Apple notarized. Only after its SHA-256 and code-signature structure pass validation does the installer remove quarantine from the copied Helper; if macOS blocks the installer itself, Control-click it and choose **Open**. Truly frictionless public distribution still requires a signed and notarized PKG or DMG.
 
-The installer also writes a compatibility registration for Google Chrome, but currently opens and tests only ego-lite. Chrome must be opened at `chrome://extensions` and loaded manually.
+The installer also writes a compatibility registration for Google Chrome, but automatic restore is limited to ego-lite. Chrome still needs a manual `chrome://extensions` load from `~/Library/Application Support/Koe/Extension`.
 
 Only developers rebuilding the Helper need Swift 6 plus the macOS 15.4 and macOS 26 SDKs. Refresh both lightweight payloads with:
 

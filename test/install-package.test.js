@@ -9,6 +9,25 @@ const root = path.resolve(__dirname, "..");
 const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
 const expectedExtensionId = "dajnahkneeemkfndhdbanekjhmndgmej";
 const expectedProtocolVersion = 1;
+const runtimeExtensionFiles = [
+  "assets/koe-avatar-16.png",
+  "assets/koe-avatar-48.png",
+  "assets/koe-avatar-128.png",
+  "background.js",
+  "content.js",
+  "manifest.json",
+  "media-discovery.js",
+  "offscreen.html",
+  "offscreen.js",
+  "pcm-worklet.js",
+  "popup.css",
+  "popup.html",
+  "popup.js",
+  "preferences.js",
+  "sidepanel.css",
+  "sidepanel.html",
+  "sidepanel.js"
+];
 
 function extensionIdFromKey(key) {
   assert.strictEqual(typeof key, "string", "manifest.key must be a string");
@@ -53,6 +72,8 @@ function installerEnvironment(roots, systemVersion) {
     KOE_INSTALL_BASE: roots.installBase,
     KOE_CHROME_HOST_ROOT: roots.chromeHostRoot,
     KOE_EGO_HOST_ROOT: roots.egoHostRoot,
+    KOE_LAUNCH_AGENT_ROOT: roots.launchAgentRoot,
+    KOE_EGO_USER_DATA_ROOT: roots.egoUserDataRoot,
     KOE_SKIP_BROWSER_OPEN: "1",
     KOE_SKIP_PROCESS_STOP: "1",
     KOE_TEST_ARCH: "arm64",
@@ -73,7 +94,9 @@ function makeInstallRoots(sandbox, name) {
   return {
     installBase: path.join(base, "Application Support/Koe"),
     chromeHostRoot: path.join(base, "Google Chrome/NativeMessagingHosts"),
-    egoHostRoot: path.join(base, "Citro Labs/ego lite/NativeMessagingHosts")
+    egoHostRoot: path.join(base, "Citro Labs/ego lite/NativeMessagingHosts"),
+    launchAgentRoot: path.join(base, "LaunchAgents"),
+    egoUserDataRoot: path.join(base, "Citro Labs/ego lite")
   };
 }
 
@@ -100,6 +123,47 @@ function assertInstalled(roots, expectedDigest, expectedTranslation) {
     { type: ready.type, protocolVersion: ready.protocolVersion, nativeTranslation: ready.nativeTranslation },
     { type: "ready", protocolVersion: expectedProtocolVersion, nativeTranslation: expectedTranslation }
   );
+  const installedExtension = path.join(roots.installBase, "Extension");
+  assert.deepStrictEqual(filesBelow(installedExtension).sort(), [...runtimeExtensionFiles].sort());
+  const installedManifest = JSON.parse(fs.readFileSync(path.join(installedExtension, "manifest.json"), "utf8"));
+  assert.strictEqual(extensionIdFromKey(installedManifest.key), expectedExtensionId);
+  assert.strictEqual(installedManifest.version, manifest.version);
+  for (const relativePath of runtimeExtensionFiles) {
+    assert.strictEqual(fs.lstatSync(path.join(installedExtension, relativePath)).isSymbolicLink(), false,
+      `installed extension file must not be a symlink: ${relativePath}`);
+  }
+  const checksumPath = path.join(roots.installBase, "extension.sha256");
+  const checksums = new Map(fs.readFileSync(checksumPath, "utf8").trim().split("\n").map((line) => {
+    const match = line.match(/^([0-9a-f]{64})  (.+)$/);
+    assert(match, `invalid extension checksum line: ${line}`);
+    return [match[2], match[1]];
+  }));
+  assert.deepStrictEqual([...checksums.keys()].sort(), [...runtimeExtensionFiles].sort());
+  for (const relativePath of runtimeExtensionFiles) {
+    assert.strictEqual(digest(path.join(installedExtension, relativePath)), checksums.get(relativePath));
+  }
+
+  const installedAutoloader = path.join(roots.installBase, "ensure-ego-extension.zsh");
+  const installedDisable = path.join(roots.installBase, "Disable Koe Auto-Load.command");
+  for (const executable of [installedAutoloader, installedDisable]) {
+    assert(fs.statSync(executable).mode & 0o111, `${path.basename(executable)} must be executable`);
+  }
+  const launchAgentPath = path.join(roots.launchAgentRoot, "app.yuxino.koe.autoload.plist");
+  const launchAgent = JSON.parse(execFileSync("/usr/bin/plutil", ["-convert", "json", "-o", "-", launchAgentPath], {
+    encoding: "utf8"
+  }));
+  assert.strictEqual(launchAgent.Label, "app.yuxino.koe.autoload");
+  const singletonLock = path.join(roots.egoUserDataRoot, "SingletonLock");
+  const singletonSocket = path.join(roots.egoUserDataRoot, "SingletonSocket");
+  assert.deepStrictEqual(launchAgent.ProgramArguments,
+    ["/bin/zsh", installedAutoloader, singletonLock, singletonSocket]);
+  assert.strictEqual(launchAgent.KeepAlive?.PathState?.[singletonSocket], true);
+  assert.strictEqual(launchAgent.RunAtLoad, undefined);
+  assert.strictEqual(launchAgent.StartInterval, undefined);
+  assert.strictEqual(launchAgent.WatchPaths, undefined);
+  assert.strictEqual(launchAgent.ProcessType, "Background");
+  assert.strictEqual(launchAgent.LimitLoadToSessionType, "Aqua");
+  assert.strictEqual(launchAgent.ThrottleInterval, 10);
   return installedHelper;
 }
 
@@ -148,10 +212,18 @@ for (const [variant, contract] of Object.entries(helperVariants)) {
 const installerPath = path.join(root, "Install Koe.command");
 const packageScript = path.join(root, "scripts/package-release.sh");
 const payloadUpdater = path.join(root, "scripts/update-helper-payload.sh");
-for (const executable of [installerPath, packageScript, payloadUpdater]) {
+const autoloaderPath = path.join(root, "release/ensure-ego-extension.zsh");
+const disableAutoloadPath = path.join(root, "release/Disable Koe Auto-Load.command");
+for (const executable of [installerPath, packageScript, payloadUpdater, autoloaderPath, disableAutoloadPath]) {
   assert(fs.existsSync(executable), `${path.basename(executable)} must exist`);
   assert(fs.statSync(executable).mode & 0o111, `${path.basename(executable)} must be executable`);
 }
+const autoloaderSource = fs.readFileSync(autoloaderPath, "utf8");
+assert.match(autoloaderSource, /taskName = 'koe extension restore ' \+ egoPid/);
+assert.match(autoloaderSource, /completeTaskSpace\(taskId, \{ keep: false \}\)/,
+  "the loader must close its isolated restore task after verification");
+assert.match(autoloaderSource, /target\.ownership === 'user'/,
+  "the loader must never complete a user-owned task");
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "koe-install-package-test-"));
 try {
@@ -166,25 +238,7 @@ try {
   const bundleName = `Koe-${manifest.version}-macOS-arm64`;
   const builtBundleRoot = path.join(distRoot, bundleName);
   const zipPath = path.join(distRoot, `${bundleName}.zip`);
-  const extensionFiles = [
-    "assets/koe-avatar-16.png",
-    "assets/koe-avatar-48.png",
-    "assets/koe-avatar-128.png",
-    "background.js",
-    "content.js",
-    "manifest.json",
-    "media-discovery.js",
-    "offscreen.html",
-    "offscreen.js",
-    "pcm-worklet.js",
-    "popup.css",
-    "popup.html",
-    "popup.js",
-    "preferences.js",
-    "sidepanel.css",
-    "sidepanel.html",
-    "sidepanel.js"
-  ].map((file) => `Koe Extension/${file}`);
+  const extensionFiles = runtimeExtensionFiles.map((file) => `Koe Extension/${file}`);
   const helperFiles = Object.keys(helperVariants).flatMap((variant) => [
     `Resources/${variant}/koe-helper`,
     `Resources/${variant}/koe-helper.sha256`
@@ -192,6 +246,8 @@ try {
   const expectedPackageFiles = [
     "Install Koe.command",
     "README.txt",
+    "Resources/Disable Koe Auto-Load.command",
+    "Resources/ensure-ego-extension.zsh",
     "Resources/release.json",
     "THIRD_PARTY_NOTICES.md",
     "licenses/Apache-2.0.txt",
@@ -229,6 +285,10 @@ try {
   const releaseRoot = path.join(extractRoot, bundleName);
   const releaseInstaller = path.join(releaseRoot, "Install Koe.command");
   assert(fs.statSync(releaseInstaller).mode & 0o111, "extracted installer must be executable");
+  assert(fs.statSync(path.join(releaseRoot, "Resources/ensure-ego-extension.zsh")).mode & 0o111,
+    "extracted autoloader must be executable");
+  assert(fs.statSync(path.join(releaseRoot, "Resources/Disable Koe Auto-Load.command")).mode & 0o111,
+    "extracted disable command must be executable");
   for (const variant of Object.keys(helperVariants)) {
     assert(fs.statSync(path.join(releaseRoot, "Resources", variant, "koe-helper")).mode & 0o111,
       `${variant} must stay executable after ZIP extraction`);
@@ -238,10 +298,19 @@ try {
   const first15 = runInstaller(releaseInstaller, releaseRoot, roots15, "15.0");
   assert.strictEqual(first15.status, 0, `${first15.stdout}\n${first15.stderr}`);
   assert.match(first15.stdout, /兼容 Helper/);
+  assert.match(first15.stdout, /自动恢复启动项与受管扩展已完成离线校验/);
   assertInstalled(roots15, helperVariants["macos-arm64"].digest, false);
+  fs.writeFileSync(path.join(roots15.installBase, "Extension/stale-development-file.js"), "stale");
+  const disabledLaunchAgent = path.join(roots15.launchAgentRoot, "app.yuxino.koe.autoload.plist.disabled");
+  fs.copyFileSync(path.join(roots15.launchAgentRoot, "app.yuxino.koe.autoload.plist"), disabledLaunchAgent);
   const second15 = runInstaller(releaseInstaller, releaseRoot, roots15, "15.0");
   assert.strictEqual(second15.status, 0, `${second15.stdout}\n${second15.stderr}`);
   assert.match(second15.stdout, /已经是最新版本/);
+  assertInstalled(roots15, helperVariants["macos-arm64"].digest, false);
+  assert(!fs.existsSync(path.join(roots15.installBase, "Extension/stale-development-file.js")),
+    "reinstall must remove files outside the extension runtime allow-list");
+  assert.strictEqual(fs.existsSync(disabledLaunchAgent), false,
+    "reinstall must clear the obsolete disabled LaunchAgent backup");
   assert.strictEqual(fs.readdirSync(path.join(roots15.installBase, "versions")).length, 1);
 
   const quarantinedPayload = path.join(releaseRoot, "Resources/macos26-arm64/koe-helper");

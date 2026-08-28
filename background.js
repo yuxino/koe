@@ -17,6 +17,7 @@ const captureStreamIds = new Map();
 const captureStartPromises = new Map();
 const localFallbackPromises = new Map();
 const mediaCandidatesByTab = new Map();
+const pendingActivatedRecoveryTabs = new Set();
 let captureTabId = null;
 // captureAttemptId 只表示“最近一次实时启动尝试”；预检失败的尝试不能
 // 提前杀掉仍在建立连接的旧会话。captureIntentId 只在预检全部通过、真正
@@ -137,12 +138,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-chrome.runtime.onStartup.addListener(() => { bootPromise = boot(); });
+chrome.runtime.onStartup.addListener(() => {
+  bootPromise = boot();
+  // 浏览器恢复窗口时，静态 content script 不一定会重新进入已经存在的标签页。
+  // 只刷新各窗口当前活动页与已有会话；其余页面在首次激活时再补，避免唤醒休眠标签页。
+  void bootPromise.then(() => refreshRestoredContentScripts()).catch(() => undefined);
+});
 chrome.runtime.onInstalled.addListener(() => {
   bootPromise = boot();
   // Chrome 不会自动把更新后的静态 content script 注入已打开页面。
-  // 主动接管已知会话，才能在升级后立刻移除旧版视频状态卡。
-  void bootPromise.then(refreshKnownContentScripts).catch(() => undefined);
+  // 主动接管当前活动页与已知会话，才能在升级后立刻移除旧版视频状态卡。
+  void bootPromise
+    .then(() => refreshRestoredContentScripts({ includeInactiveKnownSessions: true }))
+    .catch(() => undefined);
 });
 chrome.storage?.onChanged?.addListener((changes, areaName) => {
   if (areaName !== "local" || !PREFERENCE_KEYS.some((key) => changes[key])) return;
@@ -354,12 +362,35 @@ chrome.commands.onCommand.addListener(async (command) => {
   // 这里只打开控制器，不直接尝试 getMediaStreamId，也不改变字幕开关。
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => cleanupTab(tabId));
+chrome.tabs.onRemoved.addListener((tabId) => {
+  pendingActivatedRecoveryTabs.delete(Number(tabId));
+  cleanupTab(tabId);
+});
 chrome.tabs.onActivated?.addListener?.(({ tabId }) => {
   void (async () => {
     await bootPromise;
+    const result = await refreshContentScriptForTab(tabId).catch(() => false);
+    if (result === "deferred") pendingActivatedRecoveryTabs.add(Number(tabId));
+    else pendingActivatedRecoveryTabs.delete(Number(tabId));
     await resumeLocalTab(tabId);
-  })();
+  })().catch(() => undefined);
+});
+chrome.tabs.onUpdated?.addListener?.((tabId, changeInfo) => {
+  const normalizedTabId = Number(tabId);
+  if (changeInfo?.status !== "complete" || !pendingActivatedRecoveryTabs.has(normalizedTabId)) return;
+  pendingActivatedRecoveryTabs.delete(normalizedTabId);
+  void (async () => {
+    await bootPromise;
+    await refreshContentScriptForTab(normalizedTabId).catch(() => false);
+    await resumeLocalTab(normalizedTabId);
+  })().catch(() => undefined);
+});
+chrome.windows?.onCreated?.addListener?.((window) => {
+  const windowId = Number(window?.id);
+  if (!Number.isInteger(windowId)) return;
+  void bootPromise
+    .then(() => refreshRestoredContentScripts({ windowId, includeKnownSessions: false }))
+    .catch(() => undefined);
 });
 
 async function boot() {
@@ -2869,7 +2900,7 @@ async function resumeLocalTab(tabId) {
   if (active?.captureStarted && active.tabId !== id && active.status !== "error") return;
   if (typeof chrome.tabs.get !== "function") return;
   const tab = await chrome.tabs.get(id).catch(() => null);
-  const pageUrl = String(tab?.url || state.pageUrl || "");
+  const pageUrl = String(tab?.url || tab?.pendingUrl || state.pageUrl || "");
   if (!/^https?:/i.test(pageUrl)) return;
   await ensureLiveCaptions({ tabId: id, pageUrl });
 }
@@ -3233,12 +3264,62 @@ async function ensureContentScript(tabId, frameId = 0) {
   });
 }
 
-async function refreshKnownContentScripts() {
-  const targets = [...tabStates.values()].map((state) => ({
-    tabId: state.tabId,
-    frameId: Number(state.frameId) || 0
-  }));
-  await Promise.allSettled(targets.map(({ tabId, frameId }) => ensureContentScript(tabId, frameId)));
+async function refreshContentScriptForTab(tabId) {
+  const normalizedTabId = Number(tabId);
+  if (!Number.isInteger(normalizedTabId) || typeof chrome.tabs.get !== "function") return false;
+  let tab;
+  try {
+    tab = await chrome.tabs.get(normalizedTabId);
+  } catch {
+    return false;
+  }
+  const pageKey = normalizePageKey(tab?.url) || normalizePageKey(tab?.pendingUrl);
+  if (!pageKey) return tab?.status === "loading" ? "deferred" : false;
+  if (tab?.discarded) return "deferred";
+  await ensureContentScript(normalizedTabId, 0);
+  return true;
+}
+
+async function refreshRestoredContentScripts({
+  windowId,
+  includeKnownSessions = true,
+  includeInactiveKnownSessions = false
+} = {}) {
+  let activeTabs = [];
+  try {
+    const queryInfo = { active: true };
+    if (Number.isInteger(windowId)) queryInfo.windowId = windowId;
+    activeTabs = await chrome.tabs.query(queryInfo);
+  } catch {
+    activeTabs = [];
+  }
+  const targets = [];
+  for (const tab of activeTabs) {
+    const tabId = Number(tab?.id);
+    if (!Number.isInteger(tabId) || tab?.discarded
+        || !(normalizePageKey(tab?.url) || normalizePageKey(tab?.pendingUrl))) continue;
+    targets.push({ tabId, frameId: 0 });
+  }
+  if (includeKnownSessions) {
+    for (const state of tabStates.values()) {
+      const tabId = Number(state?.tabId);
+      if (!Number.isInteger(tabId)
+          || (!includeInactiveKnownSessions && (!state?.captureStarted || state?.userStopped))) continue;
+      let tab;
+      try {
+        tab = await chrome.tabs.get(tabId);
+      } catch {
+        continue;
+      }
+      if (tab?.discarded || !(normalizePageKey(tab?.url) || normalizePageKey(tab?.pendingUrl))) continue;
+      targets.push({ tabId, frameId: Number(state?.frameId) || 0 });
+    }
+  }
+  const uniqueTargets = [...new Map(targets.map((target) => [
+    `${target.tabId}:${target.frameId}`,
+    target
+  ])).values()];
+  await Promise.allSettled(uniqueTargets.map(({ tabId, frameId }) => ensureContentScript(tabId, frameId)));
 }
 
 function resolveCaptureState(message = {}) {
