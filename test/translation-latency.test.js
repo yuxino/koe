@@ -57,14 +57,15 @@ function sseResponse(contents) {
   };
 }
 
-function makeCtx(fetchImpl = async () => jsonResponse("译文"), { detectLanguage } = {}) {
+function makeCtx(fetchImpl = async () => jsonResponse("译文"), { detectLanguage, now } = {}) {
   const sent = [];
   const requestedDelays = [];
   const requests = [];
   const ctx = {
     console, Date, JSON, String, Number, Boolean, Promise, Math,
     Uint8Array, DataView, Float32Array, TextDecoder, TextEncoder,
-    AbortController, DOMException, performance,
+    AbortController, DOMException,
+    performance: typeof now === "function" ? { now } : performance,
     window: { addEventListener: () => undefined, removeEventListener: () => undefined },
     setTimeout: (fn, delay) => {
       requestedDelays.push(Number(delay) || 0);
@@ -341,6 +342,62 @@ function makeCtx(fetchImpl = async () => jsonResponse("译文"), { detectLanguag
     check(h.run(`translationQueue.length === 0 && translatorRunning === false`) === true,
       "全部悬挂请求超时后翻译 worker 与队列均收敛");
     console.log("T6 翻译截止时间与稳定句队列上限 PASS");
+  }
+
+  {
+    let virtualNow = 0;
+    const h = makeCtx(async (url, options, index) => {
+      virtualNow += 100;
+      return jsonResponse(`快速译文 ${index + 1}`);
+    }, { now: () => virtualNow });
+    h.run(`
+      for (let seq = 1; seq <= 9; seq += 1) {
+        scheduleUnitTranslation(\`Fast unit \${seq}.\`, seq, { sentenceId: seq });
+      }
+    `);
+    await settle(48);
+    const fastRequested = h.requests.map((request) =>
+      Number(request.body.input.messages[0].content.match(/\d+/)?.[0] || 0)
+    );
+    const fastFallbacks = h.sent.filter((message) => message.type === "CAPTURE_TRANSLATED"
+      && message.streaming === false && message.lines?.[0]?.translated === "");
+    check(JSON.stringify(fastRequested) === JSON.stringify([1, 2, 3, 4, 5, 6, 7, 8, 9]),
+      `快速突发仍按 FIFO 完整翻译（实际 ${JSON.stringify(fastRequested)}）`);
+    check(fastFallbacks.length === 0, "快速突发不淘汰确认句");
+
+    virtualNow = 0;
+    const slow = makeCtx(async (url, options, index) => {
+      virtualNow += 12_000;
+      return jsonResponse(`慢速译文 ${index + 1}`);
+    }, { now: () => virtualNow });
+    slow.run(`
+      for (let seq = 1; seq <= 9; seq += 1) {
+        scheduleUnitTranslation(\`Slow unit \${seq}.\`, seq, { sentenceId: seq });
+      }
+    `);
+    await settle(48);
+    const slowRequested = slow.requests.map((request) =>
+      Number(request.body.input.messages[0].content.match(/\d+/)?.[0] || 0)
+    );
+    const slowFallbacks = slow.sent.filter((message) => message.type === "CAPTURE_TRANSLATED"
+      && message.streaming === false && message.lines?.[0]?.translated === "")
+      .map((message) => message.seq).sort((left, right) => left - right);
+    const slowTranslated = slow.sent.filter((message) => message.type === "CAPTURE_TRANSLATED"
+      && message.streaming === false && message.lines?.[0]?.translated)
+      .map((message) => message.seq).sort((left, right) => left - right);
+    const slowTimeouts = slow.sent.filter((message) =>
+      message.type === "KOE_LOG" && message.event === "translation-timeout"
+    );
+    check(JSON.stringify(slowRequested) === JSON.stringify([1, 9]),
+      `慢成功积压只继续最新确认句（实际 ${JSON.stringify(slowRequested)}）`);
+    check(JSON.stringify(slowFallbacks) === JSON.stringify([2, 3, 4, 5, 6, 7, 8]),
+      `过期中间句显式回退原文（实际 ${JSON.stringify(slowFallbacks)}）`);
+    check(JSON.stringify(slowTranslated) === JSON.stringify([1, 9]),
+      `首条与最新确认句保留译文（实际 ${JSON.stringify(slowTranslated)}）`);
+    check(slowTimeouts.length === 0, "慢成功积压折叠不依赖单请求超时");
+    check(slow.run(`translationQueue.length === 0 && translatorRunning === false`) === true,
+      "慢成功积压在两个请求内收敛");
+    console.log("T7 慢成功积压只追最新稳定句 PASS");
   }
 
   console.log(fail === 0 ? "translation-latency 回归全部通过" : `${fail} 项失败`);

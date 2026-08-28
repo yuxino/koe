@@ -1203,8 +1203,9 @@ function emitUnit(text, timing = activeTiming) {
 // 插到所有草稿前面。正常路径不做固定等待、不批量，避免人为增加首字延迟。
 const TRANSLATE_COOLDOWN_MS = 20_000;
 const TRANSLATE_DEADLINE_MS = 15_000;
+const TRANSLATE_MAX_QUEUE_WAIT_MS = 6_000;
 const MAX_QUEUED_UNIT_TRANSLATIONS = 8;
-const translationQueue = []; // { kind: "unit" | "draft", text, seq, generation }
+const translationQueue = []; // { kind: "unit" | "draft", text, seq, generation, queuedAt? }
 let translatorRunning = false;
 let throttleCooldownUntil = 0;
 let inFlightItem = null;
@@ -1357,7 +1358,10 @@ function scheduleUnitTranslation(text, seq, timing = activeTiming) {
   // 稳定句是当前最可信文本：中止旧草稿，把稳定句插到所有草稿前。
   dropQueuedDrafts({ abortInFlight: true });
   trimQueuedUnitTranslations();
-  const item = { kind: "unit", text, seq, timing: { ...timing }, generation: captureGeneration };
+  const item = {
+    kind: "unit", text, seq, timing: { ...timing }, generation: captureGeneration,
+    queuedAt: monotonicNow()
+  };
   const firstDraft = translationQueue.findIndex((entry) =>
     entry.generation === captureGeneration && entry.kind === "draft"
   );
@@ -1382,7 +1386,7 @@ function trimQueuedUnitTranslations() {
   }
 }
 
-function collapseTimedOutUnitBacklog() {
+function collapseQueuedUnitBacklog(reason) {
   let keptLatest = false;
   for (let index = translationQueue.length - 1; index >= 0; index -= 1) {
     const item = translationQueue[index];
@@ -1392,9 +1396,23 @@ function collapseTimedOutUnitBacklog() {
       continue;
     }
     translationQueue.splice(index, 1);
-    logEvent("translation-drop", `kind=unit seq=${item.seq} reason=timeout-backlog`);
+    logEvent("translation-drop", `kind=unit seq=${item.seq} reason=${reason}`);
     finishUnitTranslation(item, "");
   }
+}
+
+function collapseStaleUnitBacklog() {
+  const queuedUnits = translationQueue.filter((item) =>
+    item.generation === captureGeneration && item.kind === "unit"
+  );
+  if (queuedUnits.length < 2) return;
+  const oldest = queuedUnits[0];
+  const queuedAt = Number(oldest?.queuedAt);
+  if (!Number.isFinite(queuedAt)) return;
+  const waitMs = monotonicNow() - queuedAt;
+  if (waitMs <= TRANSLATE_MAX_QUEUE_WAIT_MS) return;
+  logEvent("translation-backlog", `wait=${Math.round(waitMs)}ms limit=${TRANSLATE_MAX_QUEUE_WAIT_MS}ms`);
+  collapseQueuedUnitBacklog("stale-backlog");
 }
 
 function scheduleDraftTranslation(text, seq, timing = activeTiming) {
@@ -1479,6 +1497,9 @@ async function runTranslationWorker() {
   if (translatorRunning) return;
   translatorRunning = true;
   while (translationQueue.length > 0) {
+    // 快速响应时保留完整 FIFO；服务已慢过当前字幕可见窗口时，原文仍完整
+    // 留存，只跳过不可能及时上屏的中间译文并直接追到最新确认句。
+    collapseStaleUnitBacklog();
     const item = translationQueue.shift();
     const generation = item.generation;
     // RESET 可以在旧 worker 等待语言检测或重试时开启新一代。
@@ -1529,7 +1550,7 @@ async function runTranslationWorker() {
     } catch (error) {
       if (error?.name === "TimeoutError" && !item.superseded) {
         logEvent("translation-timeout", `kind=${item.kind} seq=${item.seq} deadline=${TRANSLATE_DEADLINE_MS}ms`);
-        if (item.kind === "unit") collapseTimedOutUnitBacklog();
+        if (item.kind === "unit") collapseQueuedUnitBacklog("timeout-backlog");
       } else if (error?.name !== "AbortError" && !item.superseded) {
         logEvent("translation-failed", `kind=${item.kind} chars=${Array.from(item.text).length}`);
       }
