@@ -46,6 +46,9 @@ jobs:
       - name: Validate helper core
         run: swift run --package-path helper koe-helper-core-checks
 
+      - name: Build release helper
+        run: swift build --package-path helper -c release --product koe-helper
+
       - name: Build release preview
         env:
           KOE_DIST_DIR: ${{ runner.temp }}/koe-dist
