@@ -568,6 +568,12 @@ if let base = URL(string: "https://cdn.example.com/master.m3u8?token=secret") {
     check(resolutionSelected?.url.absoluteString == "https://cdn.example.com/288/index.m3u8?token=secret",
           "bandwidth-less HLS selects the lowest-resolution variant")
 
+    let missingURIStress = "#EXTM3U\n"
+        + String(repeating: "#EXT-X-STREAM-INF:BANDWIDTH=1\n", count: 2_000)
+        + "#EXT-X-STREAM-INF:BANDWIDTH=600000\nlow.m3u8"
+    check(HLSResolver.variants(in: missingURIStress, baseURL: base).count == 1,
+          "repeated malformed entries never multiply one URI into thousands of variants")
+
     let media = """
     #EXTM3U
     #EXT-X-TARGETDURATION:5
@@ -608,6 +614,56 @@ if let base = URL(string: "https://cdn.example.com/master.m3u8?token=secret") {
               "CMAF media fragments use the same absolute HLS timing")
     } catch {
         check(false, "CMAF HLS playlist parses: \(error)")
+    }
+
+    let commaMap = fragmentedMP4.replacingOccurrences(
+        of: "init.mp4", with: "init,part.mp4?token=a,b"
+    )
+    do {
+        let parsed = try HLSResolver.mediaPlaylist(in: commaMap, baseURL: base)
+        check(parsed.initializationSegmentURL?.absoluteString
+            == "https://cdn.example.com/init,part.mp4?token=a,b",
+              "quoted HLS map URIs retain commas in paths and signed queries")
+    } catch {
+        check(false, "quoted comma map URI parses: \(error)")
+    }
+
+    let quotedAttribute = """
+    #EXTM3U
+    #EXT-X-STREAM-INF:NAME="low,BANDWIDTH=1",BANDWIDTH=600000
+    low.m3u8
+    """
+    check(HLSResolver.variants(in: quotedAttribute, baseURL: base).first?.bandwidth == 600_000,
+          "attribute-looking text inside a quoted value cannot override HLS bandwidth")
+
+    let missingVariantURI = """
+    #EXTM3U
+    #EXT-X-STREAM-INF:BANDWIDTH=1
+    #EXT-X-STREAM-INF:BANDWIDTH=600000
+    low.m3u8
+    """
+    check(HLSResolver.variants(in: missingVariantURI, baseURL: base).map(\.bandwidth) == [600_000],
+          "a missing variant URI cannot borrow the next variant URI")
+
+    let malformedMedia: [(String, String)] = [
+        ("missing key method", "#EXT-X-KEY:URI=key.bin\n#EXTINF:4,\nfirst.ts"),
+        ("unterminated key quote", "#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\n#EXTINF:4,\nfirst.ts"),
+        ("missing URI", "#EXTINF:4,\n#EXTINF:6,\nsecond.ts"),
+        ("missing final URI", "#EXTINF:4,\nfirst.ts\n#EXTINF:6,"),
+        ("invalid duration", "#EXTINF:invalid,\nfirst.ts\n#EXTINF:6,\nsecond.ts"),
+        ("infinite duration", "#EXTINF:inf,\nfirst.ts"),
+        ("millisecond overflow", "#EXTINF:1e308,\nfirst.ts"),
+        ("unsafe URI", "#EXTINF:4,\nhttp://127.0.0.1/first.ts\n#EXTINF:6,\nsecond.ts")
+    ]
+    for (label, body) in malformedMedia {
+        do {
+            _ = try HLSResolver.mediaPlaylist(in: "#EXTM3U\n" + body, baseURL: base)
+            check(false, "\(label) fails before corrupting the HLS timeline")
+        } catch HLSResolverError.invalidResponse {
+            check(true, "\(label) fails before corrupting the HLS timeline")
+        } catch {
+            check(false, "\(label) returns the expected invalid-response error")
+        }
     }
 
     let byteRangeMap = """
@@ -657,6 +713,17 @@ if let base = URL(string: "https://cdn.example.com/master.m3u8?token=secret") {
         check(true, "encrypted HLS is rejected instead of mis-decoded")
     } catch {
         check(false, "encrypted HLS returns the expected error")
+    }
+    let paddedEncryption = encrypted.replacingOccurrences(
+        of: "#EXT-X-KEY:", with: "  #EXT-X-KEY:"
+    )
+    do {
+        _ = try HLSResolver.mediaPlaylist(in: paddedEncryption, baseURL: base)
+        check(false, "whitespace handling cannot bypass the encrypted-media guard")
+    } catch HLSResolverError.unsupportedEncryption {
+        check(true, "whitespace handling cannot bypass the encrypted-media guard")
+    } catch {
+        check(false, "padded encryption tag returns the expected error")
     }
 } else {
     check(false, "HLS test URL")
@@ -978,6 +1045,26 @@ check(shortCue.count == 1
         && shortCue.first?.startMs == 11_000
         && shortCue.first?.endMs == 13_000,
       "short cue text and timing remain unchanged")
+
+var completeHistory = CueAccumulator()
+var streamingHistory = CueAccumulator(maximumRetainedCues: 12)
+for index in 0..<2_000 {
+    let startMs = Double(index) * 4_000
+    let window = MediaWindow(startMs: startMs, endMs: startMs + 4_000, emitAfterMs: startMs)
+    let raw = [RawCue(startSeconds: 0.2, endSeconds: 1.2, text: "Sentence \(index)")]
+    let fullAdditions = completeHistory.merge(rawCues: raw, window: window, durationMs: window.endMs)
+    let streamAdditions = streamingHistory.merge(rawCues: raw, window: window, durationMs: window.endMs)
+    check(streamAdditions == fullAdditions,
+          "bounded live history emits the same captions at window \(index)")
+    check(streamingHistory.cues.count <= 12, "live duplicate history stays bounded")
+    check(streamingHistory.merge(rawCues: raw, window: window, durationMs: window.endMs).isEmpty,
+          "bounded live history still suppresses overlapping duplicate captions")
+}
+check(completeHistory.cues.count == 2_000, "default accumulator preserves complete history")
+check(streamingHistory.cues == Array(completeHistory.cues.suffix(12)),
+      "live accumulator retains the exact recent duplicate-detection tail")
+check(streamingHistory.revision == completeHistory.revision,
+      "trimming live history never changes caption revision semantics")
 
 var accumulator = CueAccumulator()
 let firstWindow = MediaWindow(startMs: 166_000, endMs: 186_000, emitAfterMs: 166_000)

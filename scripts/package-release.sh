@@ -178,7 +178,7 @@ done
 archive_path="$staging_root/$bundle_name.zip"
 (
   cd "$staging_root"
-  COPYFILE_DISABLE=1 /usr/bin/zip -X -qry "$archive_path" "$bundle_name"
+  COPYFILE_DISABLE=1 /usr/bin/zip -9 -X -qry "$archive_path" "$bundle_name"
 )
 
 archive_bytes="$(/usr/bin/stat -f '%z' "$archive_path")"

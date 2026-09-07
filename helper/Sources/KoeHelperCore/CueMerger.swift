@@ -44,7 +44,13 @@ public struct CueAccumulator: Sendable {
     public private(set) var cues: [SubtitleCue] = []
     public private(set) var revision = 0
 
-    public init() {}
+    private let maximumRetainedCues: Int?
+
+    public init(maximumRetainedCues: Int? = nil) {
+        // Duplicate detection needs the most recent twelve cues. Streaming
+        // consumers already receive every addition and need no full history.
+        self.maximumRetainedCues = maximumRetainedCues.map { max(12, $0) }
+    }
 
     public mutating func merge(
         rawCues: [RawCue],
@@ -94,6 +100,9 @@ public struct CueAccumulator: Sendable {
         }
         cues.sort { left, right in
             left.startMs == right.startMs ? left.endMs < right.endMs : left.startMs < right.startMs
+        }
+        if let maximumRetainedCues, cues.count > maximumRetainedCues {
+            cues.removeFirst(cues.count - maximumRetainedCues)
         }
         if !additions.isEmpty { revision += 1 }
         return additions

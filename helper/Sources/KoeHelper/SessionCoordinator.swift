@@ -677,7 +677,9 @@ private struct StreamSession {
     let skipSameLanguage: Bool
     let preferredLanguage: String?
     var buffer: PCMStreamBuffer
-    var accumulator = CueAccumulator()
+    // The browser receives all additions; retain only duplicate-detection
+    // history here so long-running live sessions cannot grow without bound.
+    var accumulator = CueAccumulator(maximumRetainedCues: 12)
     var revision = 0
 }
 

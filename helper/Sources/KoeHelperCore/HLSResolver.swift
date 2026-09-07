@@ -672,9 +672,10 @@ public actor HLSResolver {
 
     public static func variants(in playlist: String, baseURL: URL) -> [HLSVariant] {
         let lines = playlist.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         var variants: [HLSVariant] = []
         for index in lines.indices {
-            let line = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            let line = lines[index]
             guard line.uppercased().hasPrefix("#EXT-X-STREAM-INF:") else { continue }
             let attributes = String(line.dropFirst("#EXT-X-STREAM-INF:".count))
             let bandwidth = attribute(named: "AVERAGE-BANDWIDTH", in: attributes)
@@ -695,18 +696,20 @@ public actor HLSResolver {
 
     public static func mediaPlaylist(in playlist: String, baseURL: URL) throws -> HLSMediaPlaylist {
         let lines = playlist.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         if lines.contains(where: { $0.uppercased().hasPrefix("#EXT-X-BYTERANGE") }) {
             throw HLSResolverError.unsupportedByteRange
         }
         for line in lines where line.uppercased().hasPrefix("#EXT-X-KEY:") {
             let attributes = line.split(separator: ":", maxSplits: 1).dropFirst().first.map(String.init) ?? ""
-            let method = attributeString(named: "METHOD", in: attributes) ?? "NONE"
+            guard let method = attributeString(named: "METHOD", in: attributes), !method.isEmpty else {
+                throw HLSResolverError.invalidResponse
+            }
             if method.uppercased() != "NONE" { throw HLSResolverError.unsupportedEncryption }
         }
         var initializationSegmentURL: URL?
         var sawMediaSegment = false
-        for rawLine in lines {
-            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        for line in lines {
             if line.uppercased().hasPrefix("#EXTINF:") {
                 sawMediaSegment = true
                 continue
@@ -730,14 +733,19 @@ public actor HLSResolver {
         var segments: [HLSSegment] = []
         var cursorMs = 0.0
         for index in lines.indices {
-            let line = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            let line = lines[index]
             guard line.uppercased().hasPrefix("#EXTINF:") else { continue }
             let value = line.dropFirst("#EXTINF:".count).split(separator: ",", maxSplits: 1).first
-            guard let value, let seconds = Double(value), seconds > 0,
+            guard let value, let seconds = Double(value), seconds.isFinite, seconds > 0,
                   let uri = nextURI(after: index, lines: lines),
                   let url = resolvedURL(uri, relativeTo: baseURL),
-                  MediaURLSafety.isAllowed(url) else { continue }
+                  MediaURLSafety.isAllowed(url) else {
+                // Skipping a bad segment moves every later subtitle earlier.
+                // Reject the playlist so the caller can try tab-audio capture.
+                throw HLSResolverError.invalidResponse
+            }
             let endMs = cursorMs + seconds * 1_000
+            guard endMs.isFinite, endMs > cursorMs else { throw HLSResolverError.invalidResponse }
             segments.append(HLSSegment(url: url, startMs: cursorMs, endMs: endMs))
             cursorMs = endMs
         }
@@ -753,8 +761,13 @@ public actor HLSResolver {
     private static func nextURI(after index: Int, lines: [String]) -> String? {
         var next = index + 1
         while next < lines.count {
-            let candidate = lines[next].trimmingCharacters(in: .whitespacesAndNewlines)
+            let candidate = lines[next]
             if !candidate.isEmpty && !candidate.hasPrefix("#") { return candidate }
+            // A URI belongs to one entry only. Besides preventing timeline
+            // corruption, stopping here bounds scans over missing-URI entries.
+            let tag = candidate.uppercased()
+            if tag.hasPrefix("#EXTINF:") || tag.hasPrefix("#EXT-X-STREAM-INF:")
+                || tag == "#EXT-X-ENDLIST" { return nil }
             next += 1
         }
         return nil
@@ -778,11 +791,25 @@ public actor HLSResolver {
     }
 
     private static func attributeString(named name: String, in attributes: String) -> String? {
+        // RFC 8216 attribute values can contain commas inside quoted strings
+        // (notably signed map URIs and CODECS). Split only outside quotes.
+        var quoted = false
+        let fields = attributes.split(omittingEmptySubsequences: false) { character in
+            if character == "\"" { quoted.toggle() }
+            return character == "," && !quoted
+        }
+        guard !quoted else { return nil }
         let prefix = "\(name)="
-        return attributes.split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .first { $0.uppercased().hasPrefix(prefix) }
-            .map { String($0.dropFirst(prefix.count)).trimmingCharacters(in: CharacterSet(charactersIn: "\"")) }
+        for field in fields {
+            let attribute = field.trimmingCharacters(in: .whitespaces)
+            guard attribute.uppercased().hasPrefix(prefix) else { continue }
+            let value = String(attribute.dropFirst(prefix.count))
+            if value.hasPrefix("\""), value.hasSuffix("\""), value.count >= 2 {
+                return String(value.dropFirst().dropLast())
+            }
+            return value
+        }
+        return nil
     }
 
     private static func resolvedURL(_ raw: String, relativeTo baseURL: URL) -> URL? {

@@ -41,6 +41,7 @@ build_variant() {
     --package-path "$helper_root"
     --scratch-path "$scratch_root"
     --only-use-versions-from-resolved-file
+    --jobs "${KOE_BUILD_JOBS:-2}"
     -c release
     --product koe-helper
   )
