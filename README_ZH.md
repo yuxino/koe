@@ -2,7 +2,7 @@
   <img src="./assets/koe-avatar.png" alt="Koe" width="128">
   <h1>Koe</h1>
   <p>为 Chromium 标签页中的视频生成本地优先字幕。</p>
-  <p><a href="README.md">English</a></p>
+  <p><a href="https://koe.yuxino.cn">官网</a> · <a href="README.md">English</a></p>
 </div>
 
 Koe 为浏览器视频生成可手动开关、与播放进度同步的字幕，并可选显示简体中文翻译。视频画面只显示字幕；开关、提示和错误都留在弹窗或侧边栏。

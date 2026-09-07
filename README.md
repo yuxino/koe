@@ -2,7 +2,7 @@
   <img src="./assets/koe-avatar.png" alt="Koe" width="128">
   <h1>Koe</h1>
   <p>Local-first subtitles for video playing in a Chromium tab.</p>
-  <p><a href="README_ZH.md">简体中文</a></p>
+  <p><a href="https://koe.yuxino.cn">Website</a> · <a href="README_ZH.md">简体中文</a></p>
 </div>
 
 Koe generates manually controlled, media-synced subtitles with optional Simplified Chinese translation. Only captions appear over the video; controls, prompts, and errors stay in the popup or side panel.
