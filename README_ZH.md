@@ -49,7 +49,7 @@ scripts/update-helper-payload.sh all
 
 也可用 `baseline` 或 `macos26` 参数只更新其中一套。首次构建会下载 Swift 依赖。
 
-媒体直读支持公开、未加密、非 byte-range 的 HLS VOD，以及 MPEG-TS AAC 或 CMAF/fMP4 分片。Koe 不绕过 DRM，也不读取浏览器 Cookie 或 Authorization；浏览器内部页面无法采集。没有可用 HLS 直读来源的页面可以尝试本地标签页音频回退。准确边界见 [Koe Helper 文档](helper/README.md)。
+媒体直读支持公开、未加密、非 byte-range 的 HLS VOD，以及 MPEG-TS AAC 或 CMAF/fMP4 分片。Koe 不绕过 DRM，也不读取浏览器 Cookie 或 Authorization；浏览器内部页面无法采集。没有可用 HLS 直读来源的页面可以尝试本地标签页音频回退。准确边界见 [Koe Helper 文档](helper/README_ZH.md)。
 
 ## 隐私
 
