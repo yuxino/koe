@@ -575,6 +575,16 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
   if (!forceReset && (!state?.captureStarted || state.userStopped)) {
     return { ok: true, skipped: true };
   }
+  // Discovery precedes startCapture's own operation fence. Keep its original
+  // identity, including the absence of a state on the very first start, so a
+  // stop or handoff during storage/script work cannot revive an old request.
+  const discoveryState = state;
+  const discoveryIdentity = state ? sessionIdentity(state) : null;
+  const discoveryIntentId = captureIntentId;
+  const isCurrentDiscovery = () => captureIntentId === discoveryIntentId
+    && tabStates.get(tabId) === discoveryState
+    && (!discoveryState || matchesSessionIdentity(discoveryState, discoveryIdentity))
+    && (forceReset || (discoveryState.captureStarted && !discoveryState.userStopped));
   let captureSource = state?.source || preferenceTools.defaults?.koeCaptureSource || "tab";
   let captureEngine = state?.engine || preferenceTools.defaults?.koeAsrEngine || "local";
   let skipSameLanguage = state
@@ -592,6 +602,7 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
   } catch {
     // 偏好读取失败时沿用当前会话；新会话使用上面的安全默认值。
   }
+  if (!isCurrentDiscovery()) return { ok: true, skipped: true };
   const sourceMode = captureSource === "mic" ? "mic" : "tab";
   const engineMode = ["local", "webspeech"].includes(captureEngine) ? captureEngine : "dashscope";
   const sessionMode = engineMode === "local" ? "offline" : "live";
@@ -611,6 +622,7 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
   } else {
     source = await discoverVideoSource(tabId, pageUrl, { allowPaused: engineMode === "local" }).catch(() => null);
   }
+  if (!isCurrentDiscovery()) return { ok: true, skipped: true };
   const sourceKey = source?.sourceUrl ? normalizeSourceKey(source.sourceUrl) : "";
   const nextPageKey = normalizePageKey(pageUrl || source?.pageUrl || "");
   const previousPageKey = normalizePageKey(state?.pageUrl || "");
@@ -629,6 +641,21 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
     }
   }
 
+  const usableVideo = engineMode === "local"
+    ? Boolean(source?.hasVideo && !isAdSource(source.sourceUrl || ""))
+    : isLiveAllowed(source);
+  if (sourceMode !== "mic" && (!source?.hasVideo || !usableVideo)) {
+    // 没有正在播放的主视频，或只是静音/广告/背景视频：不打扰，也不清掉已有会话
+    return { ok: true, skipped: true };
+  }
+  try {
+    await ensureContentScript(tabId, source.frameId || 0);
+  } catch (error) {
+    if (!isCurrentDiscovery()) return { ok: true, skipped: true };
+    throw error;
+  }
+  if (!isCurrentDiscovery()) return { ok: true, skipped: true };
+
   // “停止/报错 → 用户明确再开”必须得到新的会话身份。若沿用旧 job/epoch，
   // 停止前已经排队的 Helper 消息会在新会话激活后重新通过校验。
   if (forceReset && state && !state.captureStarted) {
@@ -642,18 +669,12 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
     state.startedAt = Date.now();
   }
 
-  const usableVideo = engineMode === "local"
-    ? Boolean(source?.hasVideo && !isAdSource(source.sourceUrl || ""))
-    : isLiveAllowed(source);
-  if (sourceMode !== "mic" && (!source?.hasVideo || !usableVideo)) {
-    // 没有正在播放的主视频，或只是静音/广告/背景视频：不打扰，也不清掉已有会话
-    return { ok: true, skipped: true };
-  }
-  await ensureContentScript(tabId, source.frameId || 0);
-
   const startedHere = !state || String(state.sessionMode || (state.liveOnly ? "live" : "")) !== sessionMode;
   if (startedHere) {
-    if (state?.captureStarted) await stopCapture(state);
+    if (state?.captureStarted) {
+      await stopCapture(state);
+      if (!isCurrentCaptureIntent(state, discoveryIdentity, discoveryIntentId)) return { ok: true, skipped: true };
+    }
     state = {
       tabId,
       frameId: source.frameId || 0,
@@ -675,7 +696,9 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
       startedAt: Date.now()
     };
     tabStates.set(tabId, state);
+    const startIdentity = sessionIdentity(state);
     await persistStates();
+    if (!isCurrentCaptureIntent(state, startIdentity, discoveryIntentId)) return { ok: true, skipped: true };
   } else if (forceReset || pageChanged || mediaChanged
       || (sourceKey && sourceKey !== normalizeSourceKey(state.sourceUrl || ""))
       || state.source !== sourceMode || state.engine !== engineMode || languagePolicyChanged) {
@@ -721,12 +744,16 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
         audioPositionMs: Number(response?.audioPositionMs) || 0
       });
       await persistStates();
+      if (!isCurrentSession(state, resetIdentity, true)) return { ok: true, skipped: true };
     } else if (state.captureStarted && sessionMode === "offline") {
       if (state.localFallbackActive) {
-        await resetLocalLiveSession(state, forceReset ? "manual" : "source", {
+        const reset = resetLocalLiveSession(state, forceReset ? "manual" : "source", {
           currentTimeMs: source?.currentTimeMs,
           playbackRate: source?.playbackRate
         });
+        const resetIdentity = sessionIdentity(state);
+        await reset;
+        if (!isCurrentSession(state, resetIdentity, true)) return { ok: true, skipped: true };
       } else {
         const previousEpoch = Number(state.mediaEpoch) || 0;
         try {
@@ -739,19 +766,21 @@ async function ensureLiveCaptions({ tabId, pageUrl = "", translate, forceReset =
         state.offlineSourceUrl = "";
         state.offlineContext = undefined;
         mediaCandidatesByTab.delete(tabId);
+        const resetIdentity = sessionIdentity(state);
         await sendToContent(state, {
           type: "OFFLINE_RESET",
           jobId: state.jobId,
           mediaEpoch: state.mediaEpoch,
           reason: forceReset ? "manual" : "source"
         });
+        if (!isCurrentSession(state, resetIdentity, true)) return { ok: true, skipped: true };
         await persistStates();
+        if (!isCurrentSession(state, resetIdentity, true)) return { ok: true, skipped: true };
       }
     }
   }
 
-  state = tabStates.get(tabId);
-  if (!state) return { ok: true };
+  if (tabStates.get(tabId) !== state || state.userStopped) return { ok: true, skipped: true };
   state.skipSameLanguage = state.skipSameLanguage !== false;
   state.preferredLanguage = String(state.preferredLanguage || preferredLanguage);
   if (state.engine === "local") {
@@ -810,10 +839,12 @@ async function startOfflineSession(state, { allowHandoff = true } = {}) {
   // 本地模式和实时模式一样尊重用户的明确停止。只有 START_CAPTURE
   // 会先清除此标记；页面自己的 PAGE_READY/播放事件不得偷偷重启。
   if (!state || state.userStopped) return;
+  const startIdentity = sessionIdentity(state);
+  const baseIntentId = captureIntentId;
   await clearMediaIssue(state);
   // clearMediaIssue 会让出事件循环；这期间另一个标签页可能已经接管，
   // 或用户已经停止当前页。失效启动不能再把自己写回全局路由。
-  if (state.userStopped || tabStates.get(state.tabId) !== state) return;
+  if (!isCurrentCaptureIntent(state, startIdentity, baseIntentId)) return;
   try {
     connectNativeHelper();
   } catch (error) {
@@ -830,7 +861,6 @@ async function startOfflineSession(state, { allowHandoff = true } = {}) {
     // 自动任务不会在竞态中停掉刚建立的会话。
     if (!allowHandoff && previous?.captureStarted && previous.tabId !== state.tabId
         && previous.status !== "error") return;
-    const startIdentity = sessionIdentity(state);
     const intentId = ++captureIntentId;
     if (!isCurrentCaptureIntent(state, startIdentity, intentId)) return;
     if (previous && previous.tabId !== state.tabId && previous.captureStarted) {
@@ -1024,11 +1054,13 @@ async function startLocalLiveFallback(state, streamId = captureStreamIds.get(sta
   if (!state?.captureStarted || state.engine !== "local" || state.userStopped) return false;
   if (state.localFallbackActive) return true;
   const existing = localFallbackPromises.get(state.tabId);
-  if (existing) return existing;
-  const pending = runLocalLiveFallback(state, String(streamId || ""));
+  if (existing?.state === state && matchesSessionIdentity(state, existing.identity)) return existing.promise;
+  const pending = {
+    state, identity: sessionIdentity(state), promise: runLocalLiveFallback(state, String(streamId || ""))
+  };
   localFallbackPromises.set(state.tabId, pending);
   try {
-    return await pending;
+    return await pending.promise;
   } finally {
     if (localFallbackPromises.get(state.tabId) === pending) localFallbackPromises.delete(state.tabId);
   }
@@ -1083,6 +1115,7 @@ async function runLocalLiveFallback(state, streamId) {
     state.status = "starting";
     state.stageDetail = "正在启动本地实时字幕…";
     await clearMediaIssue(state);
+    if (!isCurrentSession(state, identity, true)) return false;
     captureTabId = state.tabId;
     await clearTranscript();
     if (!isCurrentSession(state, identity, true)) return false;
@@ -1091,6 +1124,7 @@ async function runLocalLiveFallback(state, streamId) {
       jobId: state.jobId,
       mediaEpoch: Number(state.mediaEpoch) || 0
     });
+    if (!isCurrentSession(state, identity, true)) return false;
     await sendToContent(state, {
       type: "LIVE_SESSION",
       jobId: state.jobId,
@@ -1100,6 +1134,7 @@ async function runLocalLiveFallback(state, streamId) {
       mediaTimed: true,
       discontinuityId: Number(state.lastDiscontinuityId) || 0
     });
+    if (!isCurrentSession(state, identity, true)) return false;
     postNativeMessage({
       type: "streamStart",
       protocolVersion: NATIVE_PROTOCOL_VERSION,
@@ -1131,7 +1166,7 @@ async function runLocalLiveFallback(state, streamId) {
     state.status = "starting";
     state.stageDetail = "本地模型正在听取第一句…";
     await persistStates();
-    return true;
+    return isCurrentSession(state, identity, true);
   } catch (error) {
     if (!isCurrentSession(state, identity, true)) return false;
     try {
@@ -1142,11 +1177,13 @@ async function runLocalLiveFallback(state, streamId) {
       });
     } catch { /* Helper disconnected */ }
     try { await chrome.runtime.sendMessage({ type: "CAPTURE_STOP", ...identity }); } catch { /* offscreen unavailable */ }
+    if (!isCurrentSession(state, identity, true)) return false;
     state.localFallbackActive = false;
     state.captureNeedsGesture = true;
     state.status = "starting";
     state.stageDetail = `点一次 Koe 重试标签页声音：${error instanceof Error ? error.message : String(error)}`;
     await sendToContent(state, { type: "LIVE_STOP", jobId: state.jobId, mediaEpoch: state.mediaEpoch });
+    if (!isCurrentSession(state, identity, true)) return false;
     await sendToContent(state, {
       type: "OFFLINE_SESSION",
       jobId: state.jobId,
@@ -1154,6 +1191,7 @@ async function runLocalLiveFallback(state, streamId) {
       translate: state.translate,
       discontinuityId: Number(state.lastDiscontinuityId) || 0
     });
+    if (!isCurrentSession(state, identity, true)) return false;
     await publishMediaIssue(state, {
       kind: "action",
       issueCode: "needs_tab_audio",
@@ -1752,12 +1790,12 @@ function isLiveAllowed(source) {
 
 async function ensureCaptureAuthorized(state) {
   const pending = captureStartPromises.get(state.tabId);
-  if (pending) return pending;
+  if (pending?.state === state && matchesSessionIdentity(state, pending.identity)) return pending.promise;
 
-  const attempt = runCaptureAuthorization(state);
+  const attempt = { state, identity: sessionIdentity(state), promise: runCaptureAuthorization(state) };
   captureStartPromises.set(state.tabId, attempt);
   try {
-    return await attempt;
+    return await attempt.promise;
   } finally {
     if (captureStartPromises.get(state.tabId) === attempt) {
       captureStartPromises.delete(state.tabId);
@@ -1770,7 +1808,9 @@ async function runCaptureAuthorization(state) {
   // content.js 每 3 秒发 PAGE_READY → ensureLiveCaptions → 这里。
   // 点"停止"按钮本身就是用户手势（5 秒窗口），getMediaStreamId 会成功，
   // 不在这里拦的话停止后字幕会悄悄又开起来（"根本停不下来"）。
-  if (state.userStopped) return;
+  const authorizationIdentity = sessionIdentity(state);
+  const authorizationIntentId = captureIntentId;
+  if (!isCurrentSession(state, authorizationIdentity)) return;
   // 麦克风来源不需要 tabCapture 授权手势：直接启动
   if (state.source === "mic") {
     await startCapture(state, "");
@@ -1781,6 +1821,7 @@ async function runCaptureAuthorization(state) {
     try {
       streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: state.tabId });
     } catch (error) {
+      if (!isCurrentCaptureIntent(state, authorizationIdentity, authorizationIntentId)) return;
       const message = error instanceof Error ? error.message : String(error);
       if (/gesture|invocation|permission|user gesture/i.test(message)) {
         // 用户刚主动停止过：不再弹“点击开启”的提示，直到切换视频或手动再开
@@ -1800,9 +1841,11 @@ async function runCaptureAuthorization(state) {
       throw error;
     }
   }
+  if (!isCurrentCaptureIntent(state, authorizationIdentity, authorizationIntentId)) return;
   try {
     await startCapture(state, streamId);
   } catch (error) {
+    if (!isCurrentSession(state, authorizationIdentity)) return;
     const message = error instanceof Error ? error.message : String(error);
     captureStreamIds.delete(state.tabId);
     state.captureStarted = false;
@@ -1823,21 +1866,29 @@ async function startCapture(state, streamId) {
   const startIdentity = sessionIdentity(state);
   const baseIntentId = captureIntentId;
   const attemptId = ++captureAttemptId;
-  // 扩展重载后已打开的页面可能没有内容脚本，先补上视频探测脚本。
-  await ensureContentScript(state.tabId, state.frameId || 0);
-  if (!isCurrentCaptureAttempt(state, startIdentity, attemptId, baseIntentId)) return;
-  const { koeApiKey } = await chrome.storage.local.get("koeApiKey");
-  if (!isCurrentCaptureAttempt(state, startIdentity, attemptId, baseIntentId)) return;
-  const apiKey = String(koeApiKey || "").trim();
-  // 内置识别（Chrome 内置）不需要 DashScope Key；其余引擎需要
-  const keyless = state.engine === "webspeech";
-  if (!keyless && !apiKey) {
-    throw new Error("请先在 Koe 中保存 DashScope API Key。");
+  let apiKey;
+  try {
+    // 扩展重载后已打开的页面可能没有内容脚本，先补上视频探测脚本。
+    await ensureContentScript(state.tabId, state.frameId || 0);
+    if (!isCurrentCaptureAttempt(state, startIdentity, attemptId, baseIntentId)) return;
+    const { koeApiKey } = await chrome.storage.local.get("koeApiKey");
+    if (!isCurrentCaptureAttempt(state, startIdentity, attemptId, baseIntentId)) return;
+    apiKey = String(koeApiKey || "").trim();
+    // 内置识别（Chrome 内置）不需要 DashScope Key；其余引擎需要
+    const keyless = state.engine === "webspeech";
+    if (!keyless && !apiKey) {
+      throw new Error("请先在 Koe 中保存 DashScope API Key。");
+    }
+    await syncAuthorizationRule(apiKey);
+    if (!isCurrentCaptureAttempt(state, startIdentity, attemptId, baseIntentId)) return;
+    await ensureOffscreen();
+    if (!isCurrentCaptureAttempt(state, startIdentity, attemptId, baseIntentId)) return;
+  } catch (error) {
+    // A retry can clear userStopped before it receives a new job/epoch. The
+    // operation token must fence rejected preflight work as well as successes.
+    if (!isCurrentCaptureAttempt(state, startIdentity, attemptId, baseIntentId)) return;
+    throw error;
   }
-  await syncAuthorizationRule(apiKey);
-  if (!isCurrentCaptureAttempt(state, startIdentity, attemptId, baseIntentId)) return;
-  await ensureOffscreen();
-  if (!isCurrentCaptureAttempt(state, startIdentity, attemptId, baseIntentId)) return;
 
   // 只有所有可能失败的预检都完成后才提交接管意图。较新的尝试如果预检失败，
   // 不会让已经 provisional-active 的旧标签页在 await 返回后自行退出。
@@ -1932,6 +1983,7 @@ async function startCapture(state, streamId) {
       status: "error",
       captureNeedsGesture: false
     });
+    if (!isCurrentCaptureIntent(state, startIdentity, intentId)) return;
     throw error;
   }
 
@@ -2311,7 +2363,11 @@ async function startCaptureForTab({ tabId, streamId, pageUrl = "" }) {
   // 不再重新跑一轮 HLS 探测，点击后立即开始本机实时识别。
   if (streamId && preState?.captureStarted && preState.engine === "local"
       && (preState.captureNeedsGesture || preState.offlineMissingMediaSince)) {
+    const fallbackIdentity = sessionIdentity(preState);
     const started = await startLocalLiveFallback(preState, streamId);
+    if (!isCurrentSession(preState, fallbackIdentity, true)) {
+      return { ok: true, stale: true, state: publicState(tabStates.get(id)) };
+    }
     if (started) return { ok: true, state: publicState(preState) };
   }
   await ensureLiveCaptions({ tabId: id, pageUrl, forceReset: true });
@@ -2348,30 +2404,36 @@ async function stopCaptureForTab(request) {
     try { await chrome.runtime.sendMessage({ type: "CAPTURE_STOP", force: true }); } catch { /* offscreen 未就绪 */ }
     return { ok: true, state: publicState(null) };
   }
+  const stopIdentity = sessionIdentity(state);
+  const isCurrentStop = () => tabStates.get(id) === state
+    && String(state.jobId || "") === stopIdentity.jobId
+    && (Number(state.mediaEpoch) || 0) === stopIdentity.mediaEpoch
+    && state.userStopped && !state.captureStarted;
+  // Close the maintenance gate and release the old authorization before any
+  // await. A later manual start may reuse this state object with a new session.
+  state.userStopped = true;
+  captureStreamIds.delete(id);
   if (state.captureStarted) {
     await stopCapture(state);
-    state.status = "idle";
-    state.stageDetail = "";
-    state.captureNeedsGesture = false;
   } else {
     // SW 恢复后状态可能先显示未运行，而独立 offscreen 仍持有音频流；
     // 只有已核对为当前目标的停止请求可以执行这次恢复性全局停止。
+    if (captureTabId === id) captureTabId = null;
     try {
       await chrome.runtime.sendMessage({
         type: "CAPTURE_STOP",
-        tabId: state.tabId,
-        jobId: state.jobId,
-        mediaEpoch: Number(state.mediaEpoch) || 0
+        ...stopIdentity
       });
     } catch { /* offscreen 未就绪 */ }
-    if (captureTabId === id) captureTabId = null;
-    state.status = "idle";
-    state.stageDetail = "";
-    state.captureNeedsGesture = false;
   }
+  if (!isCurrentStop()) return { ok: true, stale: true, state: publicState(tabStates.get(id)) };
+  state.status = "idle";
+  state.stageDetail = "";
+  state.captureNeedsGesture = false;
   // 停止是最终的 OFF 状态：不能让之前的授权提示或终止错误继续把主按钮
   // 渲染成“继续/重试”。同时通知页面撤掉残留的媒体状态提示。
   await clearMediaIssue(state);
+  if (!isCurrentStop()) return { ok: true, stale: true, state: publicState(tabStates.get(id)) };
   if (state.engine === "local") {
     resetOfflineBatchState(state);
     state.offlineSourceUrl = "";
@@ -2379,10 +2441,6 @@ async function stopCaptureForTab(request) {
     state.sourceUrl = normalizeSourceKey(state.sourceUrl || "");
     mediaCandidatesByTab.delete(id);
   }
-  // 主动停止 = 彻底释放：清掉缓存的音频流 id（流已释放，旧 id 不应残留）
-  captureStreamIds.delete(id);
-  // 主动停止 = 不再打扰：换页、换视频和播放事件都不再提示或启动，直到手动再开。
-  state.userStopped = true;
   await persistStates();
   scheduleNativeIdleDisconnect();
   return { ok: true, state: publicState(tabStates.get(id)) };
